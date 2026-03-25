@@ -284,24 +284,43 @@ exports.registerForEvent = async (req, res) => {
       });
     }
 
-    // ❌ duplicate check
-    const already = await EventRegistration.findOne({
+    // 🔥 check existing registration
+    let existing = await EventRegistration.findOne({
       user: userId,
       event: eventId,
     });
 
-    if (already) {
+    // ❌ already registered
+    if (existing && existing.status === "REGISTERED") {
       return res.status(400).json({
         message: "Already registered",
       });
     }
 
+    // ❌ check capacity
     if (event.totalRegistered >= event.maxParticipants) {
       return res.status(400).json({
         message: "Event is full",
       });
     }
 
+    // ✅ re-register (if previously cancelled)
+    if (existing && existing.status === "CANCELLED") {
+      existing.status = "REGISTERED";
+      await existing.save();
+
+      await Event.findByIdAndUpdate(eventId, {
+        $inc: { totalRegistered: 1 },
+      });
+
+      return res.json({
+        success: true,
+        message: "Re-registered successfully",
+        data: existing,
+      });
+    }
+
+    // ✅ first-time registration
     const registration = await EventRegistration.create({
       user: userId,
       event: eventId,
@@ -316,6 +335,7 @@ exports.registerForEvent = async (req, res) => {
       message: "Registered successfully",
       data: registration,
     });
+
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -338,17 +358,21 @@ exports.cancelRegistration = async (req, res) => {
       });
     }
 
+    // ✅ update status
     registration.status = "CANCELLED";
     await registration.save();
 
-    await Event.findByIdAndUpdate(eventId, {
-      $inc: { totalRegistered: -1 },
-    });
+    // ✅ decrement count safely
+    await Event.findOneAndUpdate(
+      { _id: eventId, totalRegistered: { $gt: 0 } },
+      { $inc: { totalRegistered: -1 } }
+    );
 
     res.json({
       success: true,
       message: "Registration cancelled",
     });
+
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
