@@ -8,6 +8,11 @@ const Banner = require("../models/Banner");
 const fs = require("fs");
 const path = require("path");
 const ExcelJS = require("exceljs");
+const Category = require("../models/Category");
+const mongoose = require("mongoose");
+const Program = require("../models/Program");
+const Term = require("../models/Term");
+const Class = require("../models/Class");
 
 exports.adminLogin = async (req, res) => {
   try {
@@ -202,6 +207,82 @@ exports.updateUserStatus = async (req, res) => {
   }
 };
 
+exports.assignClassToUser = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { userId } = req.params;
+    const { classId } = req.body;
+
+    const user = await User.findById(userId).session(session);
+    const classData = await Class.findById(classId).session(session);
+
+    if (!user) throw new Error("User not found");
+    if (!classData) throw new Error("Class not found");
+
+    if (user.status !== "APPROVED") {
+      throw new Error("User must be approved");
+    }
+
+    // ✅ Validate program & category
+    if (
+      user.program.toString() !== classData.program.toString() ||
+      user.category.toString() !== classData.category.toString()
+    ) {
+      throw new Error("User not eligible for this class");
+    }
+
+    // ✅ Prevent duplicate
+    const alreadyAssigned = classData.players.some(
+      (id) => id.toString() === userId
+    );
+
+    if (alreadyAssigned) {
+      throw new Error("User already assigned");
+    }
+
+    // ✅ Capacity safe update
+    const updatedClass = await Class.findOneAndUpdate(
+      {
+        _id: classId,
+        $expr: {
+          $lt: [{ $size: "$players" }, "$capacity"],
+        },
+      },
+      {
+        $addToSet: { players: userId },
+      },
+      { new: true, session }
+    );
+
+    if (!updatedClass) {
+      throw new Error("Class is full");
+    }
+
+    // ✅ Update user
+    if (!user.assignedClasses.some(id => id.toString() === classId)) {
+      user.assignedClasses.push(classId);
+    }
+
+    if (!user.term) {
+      user.term = classData.term;
+    }
+
+    await user.save({ session });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    res.json({ message: "Class assigned successfully" });
+
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+
+    res.status(400).json({ message: err.message });
+  }
+};
 exports.createBanner = async (req, res) => {
   try {
     const { title, subtitle, link } = req.body;
@@ -516,5 +597,706 @@ exports.exportUsers = async (req, res) => {
     res.status(500).json({
       message: err.message,
     });
+  }
+};
+
+
+exports.createCategory = async (req, res) => {
+  try {
+    const { name } = req.body;
+
+    if (!name) {
+      return res.status(400).json({
+        message: "Category name is required",
+      });
+    }
+
+    const existing = await Category.findOne({ name: name.toUpperCase() });
+    if (existing) {
+      return res.status(400).json({
+        message: "Category already exists",
+      });
+    }
+
+    const category = await Category.create({
+      name: name.toUpperCase(),
+    });
+
+    res.json({
+      message: "Category created successfully",
+      category,
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+
+exports.createProgram = async (req, res) => {
+  try {
+    const { name, category } = req.body;
+
+    if (!name || !category) {
+      return res.status(400).json({
+        message: "Name and category are required",
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(category)) {
+      return res.status(400).json({
+        message: "Invalid category ID",
+      });
+    }
+
+    const categoryData = await Category.findById(category);
+    if (!categoryData) {
+      return res.status(400).json({
+        message: "Category not found",
+      });
+    }
+
+    const existing = await Program.findOne({
+      name: name,
+      category: category,
+    });
+
+    if (existing) {
+      return res.status(400).json({
+        message: "Program already exists in this category",
+      });
+    }
+
+    const program = await Program.create({
+      name,
+      category,
+    });
+
+    res.json({
+      message: "Program created successfully",
+      program,
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.createTerm = async (req, res) => {
+  try {
+    const { name, year, startDate, endDate } = req.body;
+
+    const parseDate = (dateStr) => {
+      const [day, month, year] = dateStr.split("/").map(Number);
+      return new Date(year, month - 1, day);
+    };
+
+    const term = await Term.create({
+      name,
+      year,
+      startDate: parseDate(startDate),
+      endDate: parseDate(endDate),
+    });
+
+    res.json({
+      message: "Term created successfully",
+      data: term,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getAllTerms = async (req, res) => {
+  try {
+    const terms = await Term.find().sort({ startDate: 1 });
+
+    res.json({
+      data: terms,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getTermById = async (req, res) => {
+  try {
+    const term = await Term.findById(req.params.id);
+
+    if (!term) {
+      return res.status(404).json({ message: "Term not found" });
+    }
+
+    res.json({ data: term });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.updateTerm = async (req, res) => {
+  try {
+    const { name, year, startDate, endDate } = req.body;
+
+    const parseDate = (dateStr) => {
+      if (!dateStr) return undefined;
+
+      // Handle dd/mm/yyyy
+      if (dateStr.includes("/")) {
+        const [day, month, year] = dateStr.split("/").map(Number);
+        return new Date(year, month - 1, day);
+      }
+
+      // Handle ISO format
+      return new Date(dateStr);
+    };
+
+    const updatedData = {
+      name,
+      year,
+    };
+
+    if (startDate) updatedData.startDate = parseDate(startDate);
+    if (endDate) updatedData.endDate = parseDate(endDate);
+
+    // ✅ Validate dates
+    if (
+      updatedData.startDate &&
+      updatedData.endDate &&
+      updatedData.startDate > updatedData.endDate
+    ) {
+      return res.status(400).json({
+        message: "Start date cannot be after end date",
+      });
+    }
+
+    const term = await Term.findByIdAndUpdate(
+      req.params.id,
+      updatedData,
+      { new: true, runValidators: true }
+    );
+
+    if (!term) {
+      return res.status(404).json({ message: "Term not found" });
+    }
+
+    res.json({
+      message: "Term updated successfully",
+      data: term,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+
+exports.createClass = async (req, res) => {
+  try {
+    const {
+      name,
+      term,
+      program,
+      category,
+      dayOfWeek,
+      startTime,
+      endTime,
+      location,
+      coach,
+      capacity,
+    } = req.body;
+
+    // ✅ Required fields
+    if (
+      !name ||
+      !term ||
+      !program ||
+      !category ||
+      !dayOfWeek ||
+      !startTime ||
+      !endTime ||
+      !coach ||
+      !capacity
+    ) {
+      return res.status(400).json({
+        message: "Required fields missing",
+      });
+    }
+
+    // ✅ Validate ObjectIds
+    if (!mongoose.Types.ObjectId.isValid(term)) {
+      return res.status(400).json({ message: "Invalid term ID" });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(program)) {
+      return res.status(400).json({ message: "Invalid program ID" });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(category)) {
+      return res.status(400).json({ message: "Invalid category ID" });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(coach)) {
+      return res.status(400).json({ message: "Invalid coach ID" });
+    }
+
+    // ✅ Check existence
+    const termData = await Term.findById(term);
+    if (!termData) {
+      return res.status(400).json({ message: "Term not found" });
+    }
+
+    const programData = await Program.findById(program);
+    if (!programData) {
+      return res.status(400).json({ message: "Program not found" });
+    }
+
+    const categoryData = await Category.findById(category);
+    if (!categoryData) {
+      return res.status(400).json({ message: "Category not found" });
+    }
+
+    // ✅ Program must belong to category
+    if (programData.category.toString() !== category) {
+      return res.status(400).json({
+        message: "Program does not belong to selected category",
+      });
+    }
+
+    // ✅ Day validation
+    const validDays = [
+      "MONDAY",
+      "TUESDAY",
+      "WEDNESDAY",
+      "THURSDAY",
+      "FRIDAY",
+      "SATURDAY",
+      "SUNDAY",
+    ];
+
+    if (!validDays.includes(dayOfWeek)) {
+      return res.status(400).json({
+        message: "Invalid day of week",
+      });
+    }
+
+    // ✅ Time validation (HH:mm)
+    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+    if (!timeRegex.test(startTime) || !timeRegex.test(endTime)) {
+      return res.status(400).json({
+        message: "Time must be in HH:mm format",
+      });
+    }
+
+    // Convert to minutes for comparison
+    const toMinutes = (t) => {
+      const [h, m] = t.split(":").map(Number);
+      return h * 60 + m;
+    };
+
+    if (toMinutes(startTime) >= toMinutes(endTime)) {
+      return res.status(400).json({
+        message: "Start time must be before end time",
+      });
+    }
+
+    // ✅ Capacity validation
+    if (capacity < 1 || capacity > 200) {
+      return res.status(400).json({
+        message: "Capacity must be between 1 and 200",
+      });
+    }
+
+    // ✅ Optional: prevent duplicate class timing (same coach + time + day)
+    const existingClass = await Class.findOne({
+      coach,
+      dayOfWeek,
+      startTime,
+      endTime,
+    });
+
+    if (existingClass) {
+      return res.status(400).json({
+        message: "Coach already has a class at this time",
+      });
+    }
+
+    // ✅ Create class
+    const classData = await Class.create({
+      name,
+      term,
+      program,
+      category,
+      dayOfWeek,
+      startTime,
+      endTime,
+      location,
+      coach,
+      capacity,
+    });
+
+    res.json({
+      message: "Class created successfully",
+      data: classData,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getAllClasses = async (req, res) => {
+  try {
+    const { term, dayOfWeek, program, category } = req.query;
+
+    let filter = {};
+
+    if (term) filter.term = term;
+    if (dayOfWeek) filter.dayOfWeek = dayOfWeek;
+    if (program) filter.program = program;
+    if (category) filter.category = category;
+
+    const classes = await Class.find(filter)
+      .populate("term program category coach")
+      .sort({ dayOfWeek: 1, startTime: 1 });
+
+    res.json({ data: classes });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getClassById = async (req, res) => {
+  try {
+    const classData = await Class.findById(req.params.id)
+      .populate("term program category coach players");
+
+    if (!classData) {
+      return res.status(404).json({ message: "Class not found" });
+    }
+
+    res.json({ data: classData });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.updateClass = async (req, res) => {
+  try {
+    const {
+      name,
+      term,
+      program,
+      category,
+      dayOfWeek,
+      startTime,
+      endTime,
+      location,
+      coach,
+      capacity,
+    } = req.body;
+
+    const updatedData = {};
+
+    // ✅ Assign only provided fields
+    if (name) updatedData.name = name;
+    if (location) updatedData.location = location;
+
+    // ✅ Validate ObjectIds (only if provided)
+    if (term) {
+      if (!mongoose.Types.ObjectId.isValid(term)) {
+        return res.status(400).json({ message: "Invalid term ID" });
+      }
+      const termData = await Term.findById(term);
+      if (!termData) {
+        return res.status(400).json({ message: "Term not found" });
+      }
+      updatedData.term = term;
+    }
+
+    if (program) {
+      if (!mongoose.Types.ObjectId.isValid(program)) {
+        return res.status(400).json({ message: "Invalid program ID" });
+      }
+      const programData = await Program.findById(program);
+      if (!programData) {
+        return res.status(400).json({ message: "Program not found" });
+      }
+      updatedData.program = program;
+
+      // If category also provided, validate relation
+      if (category) {
+        if (programData.category.toString() !== category) {
+          return res.status(400).json({
+            message: "Program does not belong to selected category",
+          });
+        }
+      }
+    }
+
+    if (category) {
+      if (!mongoose.Types.ObjectId.isValid(category)) {
+        return res.status(400).json({ message: "Invalid category ID" });
+      }
+      const categoryData = await Category.findById(category);
+      if (!categoryData) {
+        return res.status(400).json({ message: "Category not found" });
+      }
+      updatedData.category = category;
+    }
+
+    if (coach) {
+      if (!mongoose.Types.ObjectId.isValid(coach)) {
+        return res.status(400).json({ message: "Invalid coach ID" });
+      }
+      updatedData.coach = coach;
+    }
+
+    // ✅ Day validation
+    if (dayOfWeek) {
+      const validDays = [
+        "MONDAY",
+        "TUESDAY",
+        "WEDNESDAY",
+        "THURSDAY",
+        "FRIDAY",
+        "SATURDAY",
+        "SUNDAY",
+      ];
+
+      if (!validDays.includes(dayOfWeek)) {
+        return res.status(400).json({
+          message: "Invalid day of week",
+        });
+      }
+
+      updatedData.dayOfWeek = dayOfWeek;
+    }
+
+    // ✅ Time validation
+    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+    if (startTime) {
+      if (!timeRegex.test(startTime)) {
+        return res.status(400).json({
+          message: "Start time must be HH:mm format",
+        });
+      }
+      updatedData.startTime = startTime;
+    }
+
+    if (endTime) {
+      if (!timeRegex.test(endTime)) {
+        return res.status(400).json({
+          message: "End time must be HH:mm format",
+        });
+      }
+      updatedData.endTime = endTime;
+    }
+
+    // ✅ Validate time logic if both present
+    if (startTime && endTime) {
+      const toMinutes = (t) => {
+        const [h, m] = t.split(":").map(Number);
+        return h * 60 + m;
+      };
+
+      if (toMinutes(startTime) >= toMinutes(endTime)) {
+        return res.status(400).json({
+          message: "Start time must be before end time",
+        });
+      }
+    }
+
+    // ✅ Capacity validation
+    if (capacity !== undefined) {
+      if (capacity < 1 || capacity > 200) {
+        return res.status(400).json({
+          message: "Capacity must be between 1 and 200",
+        });
+      }
+      updatedData.capacity = capacity;
+    }
+
+    // ✅ Prevent coach conflict (if relevant fields updated)
+    if (coach || dayOfWeek || startTime || endTime) {
+      const existing = await Class.findOne({
+        _id: { $ne: req.params.id },
+        coach: coach || undefined,
+        dayOfWeek: dayOfWeek || undefined,
+        startTime: startTime || undefined,
+        endTime: endTime || undefined,
+      });
+
+      if (existing) {
+        return res.status(400).json({
+          message: "Coach already has a class at this time",
+        });
+      }
+    }
+
+    const classData = await Class.findByIdAndUpdate(
+      req.params.id,
+      updatedData,
+      { new: true, runValidators: true }
+    );
+
+    if (!classData) {
+      return res.status(404).json({ message: "Class not found" });
+    }
+
+    res.json({
+      message: "Class updated successfully",
+      data: classData,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getCurrentYearTerms = async (req, res) => {
+  try {
+    const currentYear = new Date().getFullYear();
+
+    const terms = await Term.find({ year: currentYear }).sort({
+      startDate: 1,
+    });
+
+    res.json({
+      message: "Current year terms fetched successfully",
+      count: terms.length,
+      data: terms,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getClassesByTerm = async (req, res) => {
+  try {
+    const { termId } = req.params;
+
+    // ✅ Validate ID
+    if (!mongoose.Types.ObjectId.isValid(termId)) {
+      return res.status(400).json({ message: "Invalid term ID" });
+    }
+
+    // ✅ Check term exists
+    const term = await Term.findById(termId);
+    if (!term) {
+      return res.status(404).json({ message: "Term not found" });
+    }
+
+    const classes = await Class.find({ term: termId })
+      .populate("program", "name")
+      .populate("category", "name")
+      .populate("coach", "fullName")
+      .sort({ dayOfWeek: 1, startTime: 1 });
+
+    res.json({
+      message: "Classes fetched successfully",
+      term: term.name,
+      count: classes.length,
+      data: classes,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+const generateClassSessions = (term, classObj) => {
+  const sessions = [];
+
+  const start = new Date(term.startDate);
+  const end = new Date(term.endDate);
+
+  const dayMap = {
+    SUNDAY: 0,
+    MONDAY: 1,
+    TUESDAY: 2,
+    WEDNESDAY: 3,
+    THURSDAY: 4,
+    FRIDAY: 5,
+    SATURDAY: 6,
+  };
+
+  const targetDay = dayMap[classObj.dayOfWeek];
+
+  let current = new Date(start);
+
+  while (current <= end) {
+    if (current.getDay() === targetDay) {
+      sessions.push(new Date(current));
+    }
+
+    current = new Date(current);
+    current.setDate(current.getDate() + 1);
+  }
+
+  return sessions;
+};
+
+exports.getClassSessions = async (req, res) => {
+  try {
+    const classData = await Class.findById(req.params.classId).populate("term");
+
+    if (!classData) {
+      return res.status(404).json({ message: "Class not found" });
+    }
+
+    const sessions = generateClassSessions(classData.term, classData);
+
+    res.json({
+      totalSessions: sessions.length,
+      sessions,
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.markAttendance = async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const { sessionDate, records } = req.body;
+
+    // records = [{ player, status }]
+
+    const existing = await Attendance.findOne({
+      class: classId,
+      sessionDate,
+    });
+
+    if (existing) {
+      // update existing
+      existing.records = records;
+      await existing.save();
+
+      return res.json({ message: "Attendance updated" });
+    }
+
+    // create new
+    const attendance = await Attendance.create({
+      class: classId,
+      sessionDate,
+      records,
+    });
+
+    res.json({ message: "Attendance marked", data: attendance });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getAttendanceByClass = async (req, res) => {
+  try {
+    const data = await Attendance.find({
+      class: req.params.classId,
+    }).populate("records.player");
+
+    res.json({ data });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 };

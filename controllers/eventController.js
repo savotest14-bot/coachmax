@@ -399,7 +399,7 @@ exports.getMyEvents = async (req, res) => {
 exports.getEventDetails = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const userId = req.user?._id; // optional (if user logged in)
+    const userId = req.user?._id;
 
     // ✅ get event
     const event = await Event.findById(eventId);

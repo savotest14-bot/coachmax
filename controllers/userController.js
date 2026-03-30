@@ -7,6 +7,9 @@ const User = require("../models/User");
 const bcrypt = require("bcryptjs");
 const generateToken = require("../utils/generateToken");
 const Banner = require("../models/Banner");
+const Program = require("../models/Program");
+const mongoose = require("mongoose");
+const Category = require("../models/Category");
 
 exports.register = async (req, res) => {
   try {
@@ -22,35 +25,83 @@ exports.register = async (req, res) => {
       skillLevel,
       medicalCondition,
       comments,
-      programType,
+      category,
+      program,
+      jerseyNumber,
     } = req.body;
+
     if (
       !fullName ||
       !phone ||
       !password ||
       !preferredFoot ||
       !skillLevel ||
-      !programType
+      !program ||
+      !category
     ) {
       return res.status(400).json({
         message: "Required fields missing",
       });
     }
 
-    const validPrograms = ["ONE_ON_ONE", "DEVELOPMENT", "ELITE", "GROUP"];
-
-    if (!validPrograms.includes(programType)) {
+    // ✅ Validate ObjectIds
+    if (!mongoose.Types.ObjectId.isValid(program)) {
       return res.status(400).json({
-        message: "Invalid program type",
+        message: "Invalid program ID",
       });
     }
 
+    if (!mongoose.Types.ObjectId.isValid(category)) {
+      return res.status(400).json({
+        message: "Invalid category ID",
+      });
+    }
+
+    // ✅ Check category exists
+    const categoryData = await Category.findById(category);
+    if (!categoryData) {
+      return res.status(400).json({
+        message: "Category not found",
+      });
+    }
+
+    // ✅ Check program exists
+    const programData = await Program.findById(program);
+    if (!programData) {
+      return res.status(400).json({
+        message: "Program not found",
+      });
+    }
+
+    // 🔥 IMPORTANT: validate program belongs to category
+    if (programData.category.toString() !== category) {
+      return res.status(400).json({
+        message: "Program does not belong to selected category",
+      });
+    }
+
+    // ✅ Skill validation
     if (skillLevel < 1 || skillLevel > 5) {
       return res.status(400).json({
         message: "Skill level must be between 1 and 5",
       });
     }
 
+    let parsedDob;
+
+    if (dob) {
+      const [day, month, year] = dob.split("/");
+
+      parsedDob = new Date(`${year}-${month}-${day}`);
+
+      if (isNaN(parsedDob)) {
+        return res.status(400).json({
+          message: "Invalid DOB format. Use dd/mm/yyyy",
+        });
+      }
+    }
+
+    // ✅ Preferred foot validation
     const validFoot = ["LEFT", "RIGHT", "AMBIDEXTROUS"];
     if (!validFoot.includes(preferredFoot)) {
       return res.status(400).json({
@@ -58,6 +109,17 @@ exports.register = async (req, res) => {
       });
     }
 
+    // ✅ Jersey validation (optional)
+    if (
+      jerseyNumber !== undefined &&
+      (jerseyNumber < 0 || jerseyNumber > 99)
+    ) {
+      return res.status(400).json({
+        message: "Jersey number must be between 0 and 99",
+      });
+    }
+
+    // ✅ Check existing user
     const existingUser = await User.findOne({
       $or: [{ email }, { phone }],
     });
@@ -68,23 +130,28 @@ exports.register = async (req, res) => {
       });
     }
 
+    // ✅ Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
+    // ✅ Create user
     const user = await User.create({
       fullName,
       email,
       password: hashedPassword,
       phone,
-      dob,
+      dob: parsedDob,
       club,
       contactName,
       preferredFoot,
       skillLevel,
       medicalCondition,
       comments,
-      programType,
+      category, // ✅ save category
+      program,
+      jerseyNumber: jerseyNumber || undefined,
     });
 
+    // ✅ Emails
     if (email) {
       sendEmail(
         email,
@@ -105,6 +172,13 @@ exports.register = async (req, res) => {
     });
 
   } catch (err) {
+    // ✅ Handle duplicate jersey
+    if (err.code === 11000 && err.keyPattern?.jerseyNumber) {
+      return res.status(400).json({
+        message: "Jersey number already taken in this program",
+      });
+    }
+
     res.status(500).json({ message: err.message });
   }
 };
@@ -207,4 +281,17 @@ exports.getActiveBanners = async (req, res) => {
       message: error.message,
     });
   }
+};
+
+exports.getCategories = async (req, res) => {
+  const categories = await Category.find();
+  res.json(categories);
+};
+
+exports.getProgramsByCategory = async (req, res) => {
+  const { categoryId } = req.params;
+
+  const programs = await Program.find({ category: categoryId });
+
+  res.json(programs);
 };

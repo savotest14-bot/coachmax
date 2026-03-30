@@ -1,5 +1,5 @@
 const express = require("express");
-const { register, login, getActiveBanners } = require("../controllers/userController");
+const { register, login, getActiveBanners, getCategories, getProgramsByCategory } = require("../controllers/userController");
 const { logout } = require("../controllers/adminAuthController");
 const auth = require("../middleware/authMiddleware");
 const { getAllEventsForUser, registerForEvent, cancelRegistration, getMyEvents, getEventDetails } = require("../controllers/eventController");
@@ -22,6 +22,10 @@ router.post("/cancelRegistration", auth, cancelRegistration);
 
 router.get("/getMyEvents", auth, getMyEvents);
 
-router.get("/getEventDetails/:eventId",auth, getEventDetails)
+router.get("/getEventDetails/:eventId", auth, getEventDetails);
+
+router.get("/getCategories", getCategories);
+
+router.get("/getProgramsByCategory/:categoryId", getProgramsByCategory)
 
 module.exports = router;
