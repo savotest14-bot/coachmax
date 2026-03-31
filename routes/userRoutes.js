@@ -1,6 +1,6 @@
 const express = require("express");
 const { register, login, getActiveBanners, getCategories, getProgramsByCategory } = require("../controllers/userController");
-const { logout } = require("../controllers/adminAuthController");
+const { logout, createCoach, getAllCoaches, getCoachById, updateCoach } = require("../controllers/adminAuthController");
 const auth = require("../middleware/authMiddleware");
 const { getAllEventsForUser, registerForEvent, cancelRegistration, getMyEvents, getEventDetails } = require("../controllers/eventController");
 

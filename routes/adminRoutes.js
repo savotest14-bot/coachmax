@@ -1,5 +1,5 @@
 const express = require("express");
-const { adminLogin, logout, getPendingUsers, updateUserStatus, getUsers, createBanner, updateBanner, deleteBanner, getAllBanners, toggleBannerStatus, exportUsers, createCategory, createProgram, assignClassToUser, createTerm, getAllTerms, getTermById, updateTerm, createClass, getAllClasses, getClassById, updateClass, getCurrentYearTerms, getClassesByTerm, markAttendance, getAttendanceByClass, getClassSessions } = require("../controllers/adminAuthController");
+const { adminLogin, logout, getPendingUsers, updateUserStatus, getUsers, createBanner, updateBanner, deleteBanner, getAllBanners, toggleBannerStatus, exportUsers, createCategory, createProgram, assignClassToUser, createTerm, getAllTerms, getTermById, updateTerm, createClass, getAllClasses, getClassById, updateClass, getCurrentYearTerms, getClassesByTerm, markAttendance, getAttendanceByClass, getClassSessions, createCoach, getAllCoaches, getCoachById, updateCoach, getClassPlayers } = require("../controllers/adminAuthController");
 const auth = require("../middleware/authMiddleware");
 const isAdmin = require("../middleware/isAdmin");
 const { uploads } = require("../utils/upload");
@@ -86,4 +86,11 @@ router.get("/getClassesByTerm/:termId", auth, isAdmin, getClassesByTerm)
 router.post("/markAttendance/:classId", markAttendance);
 router.get("/getAttendanceByClass/:classId", getAttendanceByClass);
 router.get("/getClassSessions/:classId", getClassSessions);
+
+router.post("/createCoach", createCoach);
+router.get("/getAllCoaches", getAllCoaches);
+router.get("/getCoachById/:id", getCoachById);
+router.put("/updateCoach/:id", updateCoach);
+
+router.get("/getClassPlayers/:classId", getClassPlayers)
 module.exports = router;

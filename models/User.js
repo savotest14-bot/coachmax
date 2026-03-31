@@ -47,16 +47,23 @@ const userSchema = new mongoose.Schema(
     category: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Category",
-      required: true,
+      required: function () {
+        return this.role === "PLAYER";
+      },
     },
 
-    // ✅ Program reference
     program: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Program",
-      required: true,
+      required: function () {
+        return this.role === "PLAYER";
+      },
     },
-
+    role: {
+      type: String,
+      enum: ["PLAYER", "COACH"],
+      default: "PLAYER",
+    },
     // ✅ Jersey Number
     jerseyNumber: {
       type: Number,
@@ -95,7 +102,7 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-     assignedClasses: [
+    assignedClasses: [
       {
         type: mongoose.Schema.Types.ObjectId,
         ref: "Class",

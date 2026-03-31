@@ -91,7 +91,6 @@ exports.getUsers = async (req, res) => {
       search = "",
     } = req.query;
 
-    // ✅ Validate status
     const validStatus = ["PENDING", "APPROVED", "REJECTED"];
 
     if (status && !validStatus.includes(status)) {
@@ -103,7 +102,9 @@ exports.getUsers = async (req, res) => {
     page = Number(page);
     limit = Number(limit);
 
-    const query = {};
+    const query = {
+      role: "PLAYER",
+    };
 
     if (status) {
       query.status = status;
@@ -122,6 +123,16 @@ exports.getUsers = async (req, res) => {
     const users = await User.find(query)
       .populate("approvedBy", "name email")
       .populate("rejectedBy", "name email")
+
+      // ✅ IMPORTANT: populate assigned classes
+      .populate({
+        path: "assignedClasses",
+        populate: [
+          { path: "term", select: "name year" },
+          { path: "coach", select: "fullName email" },
+        ],
+      })
+
       .select("-password -tokens")
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
@@ -804,15 +815,14 @@ exports.createClass = async (req, res) => {
       capacity,
     } = req.body;
 
-    // ✅ Required fields
     if (
-      !name ||
       !term ||
       !program ||
       !category ||
       !dayOfWeek ||
       !startTime ||
       !endTime ||
+      !location ||
       !coach ||
       !capacity
     ) {
@@ -821,73 +831,28 @@ exports.createClass = async (req, res) => {
       });
     }
 
-    // ✅ Validate ObjectIds
-    if (!mongoose.Types.ObjectId.isValid(term)) {
-      return res.status(400).json({ message: "Invalid term ID" });
-    }
-
-    if (!mongoose.Types.ObjectId.isValid(program)) {
-      return res.status(400).json({ message: "Invalid program ID" });
-    }
-
-    if (!mongoose.Types.ObjectId.isValid(category)) {
-      return res.status(400).json({ message: "Invalid category ID" });
-    }
-
-    if (!mongoose.Types.ObjectId.isValid(coach)) {
-      return res.status(400).json({ message: "Invalid coach ID" });
-    }
-
-    // ✅ Check existence
     const termData = await Term.findById(term);
-    if (!termData) {
-      return res.status(400).json({ message: "Term not found" });
-    }
+    if (!termData) throw new Error("Term not found");
 
     const programData = await Program.findById(program);
-    if (!programData) {
-      return res.status(400).json({ message: "Program not found" });
-    }
+    if (!programData) throw new Error("Program not found");
 
-    const categoryData = await Category.findById(category);
-    if (!categoryData) {
-      return res.status(400).json({ message: "Category not found" });
-    }
-
-    // ✅ Program must belong to category
-    if (programData.category.toString() !== category) {
+    if (programData.category.toString() !== category.toString()) {
       return res.status(400).json({
-        message: "Program does not belong to selected category",
+        message: "Program does not belong to category",
       });
     }
 
-    // ✅ Day validation
     const validDays = [
-      "MONDAY",
-      "TUESDAY",
-      "WEDNESDAY",
-      "THURSDAY",
-      "FRIDAY",
-      "SATURDAY",
-      "SUNDAY",
+      "MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY","SUNDAY"
     ];
 
-    if (!validDays.includes(dayOfWeek)) {
-      return res.status(400).json({
-        message: "Invalid day of week",
-      });
+    const day = dayOfWeek.toUpperCase();
+
+    if (!validDays.includes(day)) {
+      return res.status(400).json({ message: "Invalid day" });
     }
 
-    // ✅ Time validation (HH:mm)
-    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
-
-    if (!timeRegex.test(startTime) || !timeRegex.test(endTime)) {
-      return res.status(400).json({
-        message: "Time must be in HH:mm format",
-      });
-    }
-
-    // Convert to minutes for comparison
     const toMinutes = (t) => {
       const [h, m] = t.split(":").map(Number);
       return h * 60 + m;
@@ -899,34 +864,27 @@ exports.createClass = async (req, res) => {
       });
     }
 
-    // ✅ Capacity validation
-    if (capacity < 1 || capacity > 200) {
-      return res.status(400).json({
-        message: "Capacity must be between 1 and 200",
-      });
-    }
-
-    // ✅ Optional: prevent duplicate class timing (same coach + time + day)
-    const existingClass = await Class.findOne({
+    // ✅ Overlapping check
+    const overlap = await Class.findOne({
       coach,
-      dayOfWeek,
-      startTime,
-      endTime,
+      term,
+      dayOfWeek: day,
+      startTime: { $lt: endTime },
+      endTime: { $gt: startTime },
     });
 
-    if (existingClass) {
+    if (overlap) {
       return res.status(400).json({
-        message: "Coach already has a class at this time",
+        message: "Coach already has overlapping class",
       });
     }
 
-    // ✅ Create class
     const classData = await Class.create({
       name,
       term,
       program,
       category,
-      dayOfWeek,
+      dayOfWeek: day,
       startTime,
       endTime,
       location,
@@ -938,6 +896,7 @@ exports.createClass = async (req, res) => {
       message: "Class created successfully",
       data: classData,
     });
+
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -1295,6 +1254,145 @@ exports.getAttendanceByClass = async (req, res) => {
     }).populate("records.player");
 
     res.json({ data });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.createCoach = async (req, res) => {
+  try {
+    const { fullName, email, phone, password } = req.body;
+
+    if (!fullName || !email || !phone || !password) {
+      return res.status(400).json({
+        message: "All fields are required",
+      });
+    }
+
+    const existing = await Admin.findOne({
+      $or: [{ email }, { phone }],
+    });
+
+    if (existing) {
+      return res.status(400).json({
+        message: "Email or phone already exists",
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const coach = await Admin.create({
+      fullName,
+      email,
+      mobile:phone,
+      password: hashedPassword,
+      role: "COACH",
+    });
+
+    res.json({
+      message: "Coach created successfully",
+      data: coach,
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getAllCoaches = async (req, res) => {
+  try {
+    const coaches = await Admin.find({ role: "COACH" })
+      .select("-password")
+      .sort({ createdAt: -1 });
+
+    res.json({ data: coaches });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getCoachById = async (req, res) => {
+  try {
+    const coach = await Admin.findOne({
+      _id: req.params.id,
+      role: "COACH",
+    }).select("-password");
+
+    if (!coach) {
+      return res.status(404).json({
+        message: "Coach not found",
+      });
+    }
+
+    res.json({ data: coach });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.updateCoach = async (req, res) => {
+  try {
+    const coach = await Admin.findOneAndUpdate(
+      { _id: req.params.id, role: "COACH" },
+      req.body,
+      { new: true }
+    ).select("-password");
+
+    if (!coach) {
+      return res.status(404).json({
+        message: "Coach not found",
+      });
+    }
+
+    res.json({
+      message: "Coach updated successfully",
+      data: coach,
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+
+exports.getClassPlayers = async (req, res) => {
+  try {
+    const { classId } = req.params;
+
+    const classData = await Class.findById(classId)
+      .populate({
+        path: "players",
+        select: "-password -tokens",
+        populate: [
+          { path: "category", select: "name" },
+          { path: "program", select: "name" },
+        ],
+      })
+      .populate("coach", "fullName email")
+      .populate("term", "name year");
+
+    if (!classData) {
+      return res.status(404).json({
+        message: "Class not found",
+      });
+    }
+
+    res.json({
+      class: {
+        _id: classData._id,
+        dayOfWeek: classData.dayOfWeek,
+        startTime: classData.startTime,
+        endTime: classData.endTime,
+        location: classData.location,
+        coach: classData.coach,
+        term: classData.term,
+      },
+      totalPlayers: classData.players.length,
+      players: classData.players,
+    });
 
   } catch (err) {
     res.status(500).json({ message: err.message });

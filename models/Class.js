@@ -34,7 +34,7 @@ const classSchema = new mongoose.Schema(
 
     coach: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
+      ref: "Admin",
     },
 
     capacity: Number,
