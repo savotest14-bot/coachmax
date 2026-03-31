@@ -1283,7 +1283,7 @@ exports.createCoach = async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const coach = await Admin.create({
-      fullName,
+      name:fullName,
       email,
       mobile:phone,
       password: hashedPassword,
