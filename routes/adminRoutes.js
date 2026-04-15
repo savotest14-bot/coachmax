@@ -1,5 +1,5 @@
 const express = require("express");
-const { adminLogin, logout, getPendingUsers, updateUserStatus, getUsers, createBanner, updateBanner, deleteBanner, getAllBanners, toggleBannerStatus, exportUsers, createCategory, createProgram, assignClassToUser, createTerm, getAllTerms, getTermById, updateTerm, createClass, getAllClasses, getClassById, updateClass, getCurrentYearTerms, getClassesByTerm, markAttendance, getAttendanceByClass, getClassSessions, createCoach, getAllCoaches, getCoachById, updateCoach, getClassPlayers } = require("../controllers/adminAuthController");
+const { adminLogin, logout, getPendingUsers, updateUserStatus, getUsers, createBanner, updateBanner, deleteBanner, getAllBanners, toggleBannerStatus, exportUsers, createCategory, createProgram, assignClassToUser, createTerm, getAllTerms, getTermById, updateTerm, createClass, getAllClasses, getClassById, updateClass, getCurrentYearTerms, getClassesByTerm, markAttendance, getAttendanceByClass, getClassSessions, createCoach, getAllCoaches, getCoachById, updateCoach, getClassPlayers, markSingleAttendance, getAttendanceByDate, assignCoachToClass, getCoachClassesWithSessions,  getClassFullTable, getClassFiltersWithTimeSlots, updateAdminNote, exportClassCSV, getAllClassesForAssign } = require("../controllers/adminAuthController");
 const auth = require("../middleware/authMiddleware");
 const isAdmin = require("../middleware/isAdmin");
 const { uploads } = require("../utils/upload");
@@ -16,6 +16,8 @@ router.get("/getUsers", auth, getUsers);
 router.put("/updateStatus/:userId", auth, isAdmin, updateUserStatus);
 
 router.post("/assignClass/:userId", auth, isAdmin, assignClassToUser);
+
+router.post("/assignCoachToClass/:classId", auth, isAdmin, assignCoachToClass);
 
 router.post(
     "/createBanner",
@@ -78,19 +80,32 @@ router.put("/updateTerm/:id", auth, isAdmin, updateTerm);
 // Class
 router.post("/createClass", auth, isAdmin, createClass);
 router.get("/getAllClasses", auth, isAdmin, getAllClasses);
+router.get("/getAllClassesForAssign",  getAllClassesForAssign);
 router.get("/getClassById/:id", auth, isAdmin, getClassById);
 router.put("/updateClass/:id", auth, isAdmin, updateClass);
 
 router.get("/getCurrentYearTerms", auth, isAdmin, getCurrentYearTerms)
 router.get("/getClassesByTerm/:termId", auth, isAdmin, getClassesByTerm)
-router.post("/markAttendance/:classId", markAttendance);
-router.get("/getAttendanceByClass/:classId", getAttendanceByClass);
-router.get("/getClassSessions/:classId", getClassSessions);
+router.post("/markAttendance/:classId", auth, markAttendance);
+router.post("/markSingleAttendance/:classId", auth, markSingleAttendance);
+router.get("/getAttendanceByClass/:classId", auth, getAttendanceByClass);
+router.get("/getAttendanceByDate/:classId", auth, getAttendanceByDate);
+router.get("/getClassSessions/:classId", auth, getClassSessions);
 
-router.post("/createCoach", createCoach);
-router.get("/getAllCoaches", getAllCoaches);
-router.get("/getCoachById/:id", getCoachById);
-router.put("/updateCoach/:id", updateCoach);
+router.post("/createCoach", auth, isAdmin, createCoach);
+router.get("/getAllCoaches", auth, isAdmin, getAllCoaches);
+router.get("/getCoachById/:id", auth, isAdmin, getCoachById);
+router.put("/updateCoach/:id", auth, isAdmin, updateCoach);
 
-router.get("/getClassPlayers/:classId", getClassPlayers)
+router.get("/getClassPlayers/:classId", auth, isAdmin, getClassPlayers);
+
+router.get("/getCoachClassesWithSessions/:coachId", auth, getCoachClassesWithSessions);
+
+router.get("/getClassFiltersWithTimeSlots",  getClassFiltersWithTimeSlots);
+
+router.get("/getClassFullTable", auth, getClassFullTable);
+
+router.get("/exportClassCSV", auth, exportClassCSV);
+
+router.put("/updateAdminNote/:id", auth, updateAdminNote);
 module.exports = router;

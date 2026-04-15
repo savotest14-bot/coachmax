@@ -13,6 +13,8 @@ const mongoose = require("mongoose");
 const Program = require("../models/Program");
 const Term = require("../models/Term");
 const Class = require("../models/Class");
+const Attendance = require("../models/Attendance");
+const { Parser } = require("json2csv");
 
 exports.adminLogin = async (req, res) => {
   try {
@@ -106,9 +108,7 @@ exports.getUsers = async (req, res) => {
       role: "PLAYER",
     };
 
-    if (status) {
-      query.status = status;
-    }
+    if (status) query.status = status;
 
     if (search) {
       query.$or = [
@@ -124,12 +124,18 @@ exports.getUsers = async (req, res) => {
       .populate("approvedBy", "name email")
       .populate("rejectedBy", "name email")
 
-      // ✅ IMPORTANT: populate assigned classes
+      // ✅ NEW: populate category & program
+      .populate("category", "name")
+      .populate("program", "name")
+
+      // ✅ assigned classes
       .populate({
         path: "assignedClasses",
         populate: [
           { path: "term", select: "name year" },
           { path: "coach", select: "fullName email" },
+          { path: "program", select: "name" },
+          { path: "category", select: "name" },
         ],
       })
 
@@ -294,6 +300,47 @@ exports.assignClassToUser = async (req, res) => {
     res.status(400).json({ message: err.message });
   }
 };
+
+exports.assignCoachToClass = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { classId } = req.params;
+    const { coachId } = req.body;
+
+    const classData = await Class.findById(classId).session(session);
+    const coach = await Admin.findById(coachId).session(session);
+
+    if (!classData) throw new Error("Class not found");
+    if (!coach) throw new Error("Coach not found");
+
+    // ✅ Optional: check role
+    if (coach.role !== "COACH") {
+      throw new Error("User is not a coach");
+    }
+
+    // ✅ Assign coach (overwrite or prevent duplicate)
+    classData.coach = coachId;
+
+    await classData.save({ session });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    res.json({
+      message: "Coach assigned successfully",
+      data: classData,
+    });
+
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+
+    res.status(400).json({ message: err.message });
+  }
+};
+
 exports.createBanner = async (req, res) => {
   try {
     const { title, subtitle, link } = req.body;
@@ -844,7 +891,7 @@ exports.createClass = async (req, res) => {
     }
 
     const validDays = [
-      "MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY","SUNDAY"
+      "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"
     ];
 
     const day = dayOfWeek.toUpperCase();
@@ -915,6 +962,27 @@ exports.getAllClasses = async (req, res) => {
 
     const classes = await Class.find(filter)
       .populate("term program category coach")
+      .sort({ dayOfWeek: 1, startTime: 1 });
+
+    res.json({ data: classes });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getAllClassesForAssign = async (req, res) => {
+  try {
+    const { term, dayOfWeek, program, category } = req.query;
+
+    let filter = {};
+
+    if (term) filter.term = term;
+    if (dayOfWeek) filter.dayOfWeek = dayOfWeek;
+    if (program) filter.program = program;
+    if (category) filter.category = category;
+
+    const classes = await Class.find(filter)
+      .select("-players") // ✅ EXCLUDE players field
       .sort({ dayOfWeek: 1, startTime: 1 });
 
     res.json({ data: classes });
@@ -1165,7 +1233,10 @@ const generateClassSessions = (term, classObj) => {
   const sessions = [];
 
   const start = new Date(term.startDate);
+  start.setUTCHours(0, 0, 0, 0);
+
   const end = new Date(term.endDate);
+  end.setUTCHours(0, 0, 0, 0);
 
   const dayMap = {
     SUNDAY: 0,
@@ -1181,13 +1252,16 @@ const generateClassSessions = (term, classObj) => {
 
   let current = new Date(start);
 
-  while (current <= end) {
-    if (current.getDay() === targetDay) {
-      sessions.push(new Date(current));
-    }
+  // move to correct weekday (UTC)
+  while (current.getUTCDay() !== targetDay) {
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
 
-    current = new Date(current);
-    current.setDate(current.getDate() + 1);
+  // weekly loop
+  while (current <= end) {
+    sessions.push(new Date(current));
+
+    current.setUTCDate(current.getUTCDate() + 7);
   }
 
   return sessions;
@@ -1203,9 +1277,31 @@ exports.getClassSessions = async (req, res) => {
 
     const sessions = generateClassSessions(classData.term, classData);
 
+    // ✅ Convert to UI format
+    const formatted = sessions.map((date) => ({
+      fullDate: date,
+      day: date.getUTCDate(),
+      month: date.getUTCMonth() + 1,
+      year: date.getUTCFullYear(),
+    }));
+
+    // ✅ Group by month (VERY IMPORTANT)
+    const grouped = {};
+
+    formatted.forEach((s) => {
+      const key = `${s.month}-${s.year}`;
+
+      if (!grouped[key]) {
+        grouped[key] = [];
+      }
+
+      grouped[key].push(s.day);
+    });
+
     res.json({
       totalSessions: sessions.length,
-      sessions,
+      sessions: formatted,
+      groupedByMonth: grouped,
     });
 
   } catch (err) {
@@ -1218,42 +1314,217 @@ exports.markAttendance = async (req, res) => {
     const { classId } = req.params;
     const { sessionDate, records } = req.body;
 
-    // records = [{ player, status }]
-
-    const existing = await Attendance.findOne({
-      class: classId,
-      sessionDate,
-    });
-
-    if (existing) {
-      // update existing
-      existing.records = records;
-      await existing.save();
-
-      return res.json({ message: "Attendance updated" });
+    if (!sessionDate || !records?.length) {
+      return res.status(400).json({
+        message: "sessionDate and records are required",
+      });
     }
 
-    // create new
-    const attendance = await Attendance.create({
+    // ✅ normalize date (important)
+    const date = new Date(sessionDate);
+    date.setUTCHours(0, 0, 0, 0);
+
+    let attendance = await Attendance.findOne({
       class: classId,
-      sessionDate,
-      records,
+      sessionDate: date,
     });
 
-    res.json({ message: "Attendance marked", data: attendance });
+    if (attendance) {
+      attendance.records = records;
+      attendance.markedBy = req.user?.id;
+
+      await attendance.save();
+
+      return res.json({
+        message: "Attendance updated",
+        data: attendance,
+      });
+    }
+
+    attendance = await Attendance.create({
+      class: classId,
+      sessionDate: date,
+      records,
+      markedBy: req.user?.id,
+    });
+
+    res.json({
+      message: "Attendance marked",
+      data: attendance,
+    });
+
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(400).json({
+        message: "Attendance already exists",
+      });
+    }
+
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.markSingleAttendance = async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const { sessionDate, playerId, status } = req.body;
+
+    if (!sessionDate || !playerId || !status) {
+      return res.status(400).json({
+        message: "sessionDate, playerId and status are required",
+      });
+    }
+
+    // ✅ normalize date (VERY IMPORTANT)
+    const date = new Date(sessionDate);
+    date.setUTCHours(0, 0, 0, 0);
+
+    // ✅ find existing attendance for that session
+    let attendance = await Attendance.findOne({
+      class: classId,
+      sessionDate: date,
+    });
+
+    // ✅ if not exists → create
+    if (!attendance) {
+      attendance = await Attendance.create({
+        class: classId,
+        sessionDate: date,
+        records: [],
+        markedBy: req.user?.id,
+      });
+    }
+
+    // ✅ find player record
+    const existingRecord = attendance.records.find(
+      (r) => r.player.toString() === playerId
+    );
+
+    if (existingRecord) {
+      // 🔁 update existing
+      existingRecord.status = status;
+    } else {
+      // ➕ add new
+      attendance.records.push({
+        player: playerId,
+        status,
+      });
+    }
+
+    await attendance.save();
+
+    res.json({
+      message: "Attendance updated successfully",
+      data: {
+        classId,
+        sessionDate: date,
+        playerId,
+        status,
+      },
+    });
 
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 };
 
+
 exports.getAttendanceByClass = async (req, res) => {
   try {
-    const data = await Attendance.find({
-      class: req.params.classId,
-    }).populate("records.player");
+    const { classId } = req.params;
 
-    res.json({ data });
+    const data = await Attendance.find({ class: classId })
+      .select("sessionDate records")
+      .populate({
+        path: "records.player",
+        select: "fullName profile email phone jerseyNumber", // ✅ only needed fields
+      })
+      .sort({ sessionDate: 1 });
+
+    const attendanceMap = {};
+
+    data.forEach((att) => {
+      const date = att.sessionDate.toISOString().split("T")[0];
+
+      attendanceMap[date] = {};
+
+      att.records.forEach((r) => {
+        const player = r.player;
+
+        attendanceMap[date][player._id] = {
+          status: r.status,
+          fullName: player.fullName,
+          profile: player.profile,
+          email: player.email,
+          phone: player.phone,
+          jerseyNumber: player.jerseyNumber,
+        };
+      });
+    });
+
+    res.json({
+      attendanceMap,
+      totalSessions: data.length,
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+
+exports.getAttendanceByDate = async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const { date } = req.query;
+
+    if (!date) {
+      return res.status(400).json({
+        message: "date is required",
+      });
+    }
+
+    const sessionDate = new Date(date);
+    sessionDate.setUTCHours(0, 0, 0, 0);
+
+    const attendance = await Attendance.findOne({
+      class: classId,
+      sessionDate,
+    }).populate({
+      path: "records.player",
+      select: "fullName profile email phone jerseyNumber",
+    });
+
+    // ✅ If no attendance → return empty structure
+    if (!attendance) {
+      return res.json({
+        sessionDate,
+        records: [],
+        attendanceMap: {},
+      });
+    }
+
+    // ✅ Transform data for UI
+    const attendanceMap = {};
+
+    attendance.records.forEach((r) => {
+      const player = r.player;
+
+      attendanceMap[player._id] = {
+        status: r.status,
+        fullName: player.fullName,
+        profile: player.profile,
+        email: player.email,
+        phone: player.phone,
+        jerseyNumber: player.jerseyNumber,
+      };
+    });
+
+    res.json({
+      sessionDate: attendance.sessionDate,
+      attendanceMap,
+      totalPlayers: attendance.records.length,
+    });
 
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -1283,9 +1554,9 @@ exports.createCoach = async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const coach = await Admin.create({
-      name:fullName,
+      name: fullName,
       email,
-      mobile:phone,
+      mobile: phone,
       password: hashedPassword,
       role: "COACH",
     });
@@ -1294,7 +1565,6 @@ exports.createCoach = async (req, res) => {
       message: "Coach created successfully",
       data: coach,
     });
-
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -1397,4 +1667,317 @@ exports.getClassPlayers = async (req, res) => {
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
+};
+
+exports.getCoachClassesWithSessions = async (req, res) => {
+  try {
+    // const coachId = req.user._id;
+    const coachId = req.params.coachId;
+
+    // ✅ fetch classes assigned to coach
+    const classes = await Class.find({ coach: coachId })
+      .populate("term", "name startDate endDate")
+      .populate("program", "name")
+      .populate("category", "name")
+      .populate("players", "fullName jerseyNumber profile")
+      .sort({ createdAt: -1 });
+
+    const result = [];
+
+    for (const cls of classes) {
+      // ✅ generate sessions
+      const sessions = generateClassSessions(cls.term, cls);
+
+      // ✅ format sessions for UI
+      const formattedSessions = sessions.map((date) => {
+        const d = new Date(date);
+
+        return {
+          date: d.toISOString().split("T")[0], // ✅ consistent
+          day: d.getUTCDate(),
+          month: d.getUTCMonth() + 1,
+          year: d.getUTCFullYear(),
+        };
+      });
+
+      result.push({
+        classId: cls._id,
+        className: cls.name,
+        dayOfWeek: cls.dayOfWeek,
+        startTime: cls.startTime,
+        endTime: cls.endTime,
+        location: cls.location,
+
+        term: cls.term,
+        program: cls.program,
+        category: cls.category,
+
+        totalPlayers: cls.players.length,
+        players: cls.players,
+
+        totalSessions: formattedSessions.length,
+        sessions: formattedSessions,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Coach classes with sessions fetched",
+      totalClasses: result.length,
+      data: result,
+    });
+
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+exports.getClassFiltersWithTimeSlots = async (req, res) => {
+  try {
+    const { categoryId, programId, day } = req.query;
+
+    // ✅ base query
+    const query = {};
+    if (categoryId) query.category = categoryId;
+    if (programId) query.program = programId;
+    if (day) query.dayOfWeek = day;
+
+    const classes = await Class.find(query)
+      .populate("category", "name")
+      .populate("program", "name");
+
+    // ✅ categories
+    const categories = [...new Map(
+      classes.map(c => [c.category._id, c.category])
+    ).values()];
+
+    // ✅ programs
+    const programs = [...new Map(
+      classes.map(c => [c.program._id, c.program])
+    ).values()];
+
+    // ✅ days
+    const days = [...new Set(classes.map(c => c.dayOfWeek))];
+
+    // ✅ time slots (only if day is selected)
+    let timeSlots = [];
+
+    if (day) {
+      timeSlots = classes.map((c) => ({
+        classId: c._id,
+        startTime: c.startTime,
+        endTime: c.endTime,
+      }));
+    }
+
+    res.json({
+      categories,
+      programs,
+      days,
+      timeSlots, // 👈 added here
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getClassFullTable = async (req, res) => {
+  try {
+    const { classId } = req.query;
+
+    const cls = await Class.findById(classId)
+      .populate("term")
+      .populate("players", "fullName jerseyNumber email dob phone contactName adminNote");
+
+    if (!cls) {
+      return res.status(404).json({ message: "Class not found" });
+    }
+
+    // ✅ 1. Generate sessions
+    const allSessions = generateClassSessions(cls.term, cls);
+
+    const sessionDates = allSessions.map((d) =>
+      new Date(d).toISOString().split("T")[0]
+    );
+
+    // ✅ 2. Fetch attendance
+    const attendanceData = await Attendance.find({
+      class: classId,
+    }).select("sessionDate records");
+
+    // ✅ 3. Convert attendance to map
+    const attendanceMap = {};
+
+    attendanceData.forEach((att) => {
+      const date = new Date(att.sessionDate)
+        .toISOString()
+        .split("T")[0];
+
+      attendanceMap[date] = {};
+
+      att.records.forEach((r) => {
+        attendanceMap[date][r.player.toString()] = r.status;
+      });
+    });
+
+    // ✅ 4. Build player rows
+    const players = cls.players.map((player) => {
+      const attendance = {};
+
+      sessionDates.forEach((date) => {
+        attendance[date] =
+          attendanceMap[date]?.[player._id] || "NOT_MARKED";
+      });
+
+      return {
+        playerId: player._id,
+        name: player.fullName,
+        jerseyNumber: player.jerseyNumber,
+        email: player.email,
+        dob: player.dob,
+        phone: player.phone,
+        gurdian: player.contactName,
+        adminNote: player.adminNote,
+        attendance,
+      };
+    });
+
+    res.json({
+      classId: cls._id,
+      className: cls.name,
+      totalSessions: sessionDates.length,
+      sessions: sessionDates,
+      players,
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.exportClassCSV = async (req, res) => {
+  const { classId } = req.query;
+
+  const cls = await Class.findById(classId)
+    .populate("term")
+    .populate(
+      "players",
+      "fullName jerseyNumber email dob phone contactName adminNote"
+    );
+
+  if (!cls) {
+    return res.status(404).json({ message: "Class not found" });
+  }
+
+  // ✅ 1. Generate sessions
+  const allSessions = generateClassSessions(cls.term, cls);
+
+  const sessionDates = allSessions.map(
+    (d) => new Date(d).toISOString().split("T")[0]
+  );
+
+  // ✅ 2. Fetch attendance
+  const attendanceData = await Attendance.find({
+    class: classId,
+  }).select("sessionDate records");
+
+  // ✅ 3. Build attendance map
+  const attendanceMap = {};
+
+  attendanceData.forEach((att) => {
+    const date = new Date(att.sessionDate)
+      .toISOString()
+      .split("T")[0];
+
+    attendanceMap[date] = {};
+
+    att.records.forEach((r) => {
+      attendanceMap[date][r.player.toString()] = r.status;
+    });
+  });
+
+  // ✅ 4. Prepare CSV rows
+  const rows = cls.players.map((player) => {
+    const row = {
+      Name: player.fullName,
+      Jersey: player.jerseyNumber,
+      Email: player.email,
+      DOB: player.dob ? new Date(player.dob).toISOString().split("T")[0] : "",
+      Phone: player.phone,
+      Guardian: player.contactName,
+      AdminNote: player.adminNote || "",
+    };
+
+    // Add session columns
+    sessionDates.forEach((date) => {
+      const status =
+        attendanceMap[date]?.[player._id] || "NOT_MARKED";
+
+      // Convert to symbols like your UI
+      let symbol = "";
+      if (status === "PRESENT") symbol = "✔";
+      else if (status === "ABSENT") symbol = "✘";
+      else symbol = "";
+
+      row[date] = symbol;
+    });
+
+    return row;
+  });
+
+  // ✅ 5. CSV fields (order matters)
+  const fields = [
+    "Name",
+    "Jersey",
+    "Email",
+    "DOB",
+    "Phone",
+    "Guardian",
+    "AdminNote",
+    ...sessionDates, // dynamic columns
+  ];
+
+  const parser = new Parser({ fields });
+  const csv = parser.parse(rows);
+
+  // ✅ 6. Send as downloadable file
+  res.header("Content-Type", "text/csv");
+  res.attachment(`class-${cls.name}-attendance.csv`);
+  res.send(csv);
+};
+
+exports.updateAdminNote = async (req, res) => {
+  const { id } = req.params;
+  const { adminNote } = req.body;
+
+  // ✅ Validation
+  if (adminNote === undefined) {
+    return res.status(400).json({
+      success: false,
+      message: "adminNote is required",
+    });
+  }
+
+  const user = await User.findById(id);
+
+  if (!user) {
+    return res.status(404).json({
+      success: false,
+      message: "User not found",
+    });
+  }
+
+  // ✅ Update note
+  user.adminNote = adminNote;
+  await user.save();
+
+  res.status(200).json({
+    success: true,
+    message: "Admin note updated successfully",
+    data: user,
+  });
 };

@@ -102,6 +102,10 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    adminNote: {
+      type: String,
+      default: "",
+    },
     assignedClasses: [
       {
         type: mongoose.Schema.Types.ObjectId,

@@ -9,7 +9,6 @@ const classSchema = new mongoose.Schema(
       ref: "Term",
       required: true,
     },
-
     program: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Program",

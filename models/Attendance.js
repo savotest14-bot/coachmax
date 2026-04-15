@@ -18,19 +18,25 @@ const attendanceSchema = new mongoose.Schema(
         player: {
           type: mongoose.Schema.Types.ObjectId,
           ref: "User",
+          required: true,
         },
-
         status: {
           type: String,
           enum: ["PRESENT", "ABSENT", "LATE"],
-          default: "PRESENT",
+          default: "ABSENT",
         },
       },
     ],
+
+    markedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Admin",
+    },
   },
   { timestamps: true }
 );
 
+// 🔥 prevent duplicate attendance per session
 attendanceSchema.index({ class: 1, sessionDate: 1 }, { unique: true });
 
 module.exports = mongoose.model("Attendance", attendanceSchema);

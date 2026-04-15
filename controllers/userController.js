@@ -10,6 +10,8 @@ const Banner = require("../models/Banner");
 const Program = require("../models/Program");
 const mongoose = require("mongoose");
 const Category = require("../models/Category");
+const Attendance = require("../models/Attendance");
+const Class = require("../models/Class");
 
 exports.register = async (req, res) => {
   try {
@@ -294,4 +296,362 @@ exports.getProgramsByCategory = async (req, res) => {
   const programs = await Program.find({ category: categoryId });
 
   res.json(programs);
+};
+
+
+const generateClassSessions = (term, classObj) => {
+  const sessions = [];
+
+  // ✅ normalize start & end to UTC midnight
+  const start = new Date(term.startDate);
+  start.setUTCHours(0, 0, 0, 0);
+
+  const end = new Date(term.endDate);
+  end.setUTCHours(0, 0, 0, 0);
+
+  const dayMap = {
+    SUNDAY: 0,
+    MONDAY: 1,
+    TUESDAY: 2,
+    WEDNESDAY: 3,
+    THURSDAY: 4,
+    FRIDAY: 5,
+    SATURDAY: 6,
+  };
+
+  const targetDay = dayMap[classObj.dayOfWeek];
+
+  let current = new Date(start);
+
+  // ✅ move to correct weekday
+  while (current.getUTCDay() !== targetDay) {
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
+
+  // ✅ weekly loop
+  while (current <= end) {
+    sessions.push(new Date(current));
+
+    current.setUTCDate(current.getUTCDate() + 7);
+  }
+
+  return sessions;
+};
+
+
+// exports.getMyClasses = async (req, res) => {
+//   try {
+//     const userId = req.user._id;
+
+//     const user = await User.findById(userId)
+//       .populate({
+//         path: "assignedClasses",
+//         populate: [
+//           { path: "term", select: "name startDate endDate" },
+//           { path: "program", select: "name" },
+//           { path: "category", select: "name" },
+//           { path: "coach", select: "name email phone" },
+//         ],
+//       })
+//       .select("fullName email assignedClasses");
+
+//     if (!user) {
+//       return res.status(404).json({
+//         success: false,
+//         message: "User not found",
+//       });
+//     }
+
+//     // ✅ Day name mapping
+//     const dayNames = [
+//       "SUNDAY",
+//       "MONDAY",
+//       "TUESDAY",
+//       "WEDNESDAY",
+//       "THURSDAY",
+//       "FRIDAY",
+//       "SATURDAY",
+//     ];
+
+//     const result = [];
+
+//     for (const cls of user.assignedClasses) {
+//       const allSessions = generateClassSessions(cls.term, cls);
+
+//       const sessions = allSessions.map((d) => {
+//         const date = new Date(d);
+
+//         return {
+//           date: date.toISOString().split("T")[0], // ✅ YYYY-MM-DD
+//           day: dayNames[date.getUTCDay()],        // ✅ MONDAY
+//           startTime: cls.startTime,               // ✅ class time
+//           endTime: cls.endTime,                   // ✅ class time
+//         };
+//       });
+
+//       result.push({
+//         classId: cls._id,
+//         className: cls.name,
+//         term: cls.term,
+//         program: cls.program,
+//         category: cls.category,
+//         coach: cls.coach,
+
+//         totalSessions: sessions.length,
+//         sessions,
+//       });
+//     }
+
+//     res.json({
+//       success: true,
+//       message: "Classes fetched successfully",
+//       data: result,
+//     });
+
+//   } catch (error) {
+//     console.error(error);
+//     res.status(500).json({
+//       success: false,
+//       message: error.message,
+//     });
+//   }
+// };
+
+exports.getMyAttendanceByClass = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { classId } = req.params;
+
+    // ✅ get class with term
+    const cls = await Class.findById(classId)
+      .populate({
+        path: "term",
+        select: "startDate endDate",
+      });
+
+    if (!cls) {
+      return res.status(404).json({
+        message: "Class not found",
+      });
+    }
+
+    // ✅ 1. generate all sessions
+    const allSessions = generateClassSessions(cls.term, cls);
+
+    const sessionDates = allSessions.map((d) =>
+      new Date(d).toISOString().split("T")[0]
+    );
+
+    // ✅ 2. get attendance for this class
+    const attendanceData = await Attendance.find({
+      class: classId,
+    }).select("sessionDate records");
+
+    // ✅ 3. convert attendance to map
+    const attendanceMap = {};
+
+    attendanceData.forEach((att) => {
+      const date = new Date(att.sessionDate)
+        .toISOString()
+        .split("T")[0];
+
+      const record = att.records.find(
+        (r) => r.player.toString() === userId.toString()
+      );
+
+      if (record) {
+        attendanceMap[date] = record.status;
+      }
+    });
+
+    // ✅ 4. calculate stats
+    let presentCount = 0;
+    let missedSessions = 0;
+
+    const sessions = sessionDates.map((date) => {
+      let status = attendanceMap[date] || "NOT_MARKED";
+
+      if (status === "PRESENT") presentCount++;
+      else if (status === "ABSENT") missedSessions++;
+
+      return {
+        date,
+        status,
+      };
+    });
+
+    const totalSessions = sessionDates.length;
+
+    const attendancePercentage =
+      totalSessions > 0
+        ? Number(
+          ((presentCount / totalSessions) * 100).toFixed(1)
+        )
+        : 0;
+
+    res.json({
+      success: true,
+      data: {
+        classId,
+        totalSessions,
+        presentCount,
+        missedSessions,
+        attendancePercentage,
+        sessions,
+      },
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getMyClasses = async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    const user = await User.findById(userId)
+      .populate({
+        path: "assignedClasses",
+        populate: [
+          { path: "term", select: "name startDate endDate" },
+          { path: "program", select: "name" },
+          { path: "category", select: "name" },
+          { path: "coach", select: "name email phone" },
+        ],
+      })
+      .select("fullName email assignedClasses");
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    const classIds = user.assignedClasses.map((c) => c._id);
+
+    // fetch all attendance
+    const allAttendance = await Attendance.find({
+      class: { $in: classIds },
+    }).select("class sessionDate records");
+
+    // group attendance by class
+    const attendanceByClass = {};
+
+    allAttendance.forEach((att) => {
+      const classId = att.class.toString();
+
+      if (!attendanceByClass[classId]) {
+        attendanceByClass[classId] = [];
+      }
+
+      attendanceByClass[classId].push(att);
+    });
+
+    const result = [];
+
+    for (const cls of user.assignedClasses) {
+      const classAttendance =
+        attendanceByClass[cls._id.toString()] || [];
+
+      // ✅ generate ALL sessions
+      const allSessions = generateClassSessions(cls.term, cls);
+
+      const sessions = [];
+
+      let presentCount = 0;
+      let missedSessions = 0;
+
+      const dayNames = [
+        "SUNDAY",
+        "MONDAY",
+        "TUESDAY",
+        "WEDNESDAY",
+        "THURSDAY",
+        "FRIDAY",
+        "SATURDAY",
+      ];
+
+      allSessions.forEach((sessionDate) => {
+        const normalizedDate = new Date(sessionDate);
+        normalizedDate.setUTCHours(0, 0, 0, 0);
+
+        // ✅ match attendance safely
+        const attendanceRecord = classAttendance.find((att) => {
+          const dbDate = new Date(att.sessionDate);
+          dbDate.setUTCHours(0, 0, 0, 0);
+
+          return dbDate.getTime() === normalizedDate.getTime();
+        });
+
+        let status = "NOT_MARKED"; // ✅ FIXED
+
+        if (attendanceRecord) {
+          const record = attendanceRecord.records.find(
+            (r) => r.player.toString() === userId.toString()
+          );
+
+          if (record) {
+            status = record.status; // PRESENT / ABSENT / LATE
+          } else {
+            status = "ABSENT"; // session marked but player missing
+          }
+        }
+
+        if (status === "PRESENT") presentCount++;
+        else if (status === "ABSENT") missedSessions++;
+
+        // sessions.push({
+        //   date: normalizedDate.toISOString().split("T")[0],
+        //   status,
+        // });
+        sessions.push({
+          date: normalizedDate.toISOString().split("T")[0],
+          day: dayNames[normalizedDate.getUTCDay()], // ✅ added
+          startTime: cls.startTime,                  // ✅ added
+          endTime: cls.endTime,                      // ✅ added
+          status,
+        });
+      });
+
+      const totalSessions = allSessions.length;
+
+      const attendancePercentage =
+        totalSessions > 0
+          ? Number(
+            ((presentCount / totalSessions) * 100).toFixed(1)
+          )
+          : 0;
+
+      result.push({
+        classId: cls._id,
+        className: cls.name,
+        term: cls.term,
+        program: cls.program,
+        category: cls.category,
+        coach: cls.coach,
+
+        // ✅ attendance data
+        attendancePercentage,
+        presentCount,
+        missedSessions,
+        totalSessions,
+        sessions,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Classes with attendance fetched successfully",
+      data: result,
+    });
+
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
 };
