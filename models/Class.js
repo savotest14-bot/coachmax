@@ -29,9 +29,14 @@ const classSchema = new mongoose.Schema(
     startTime: String,
     endTime: String,
 
-    location: String,
+    location: String, // Kept for backward compatibility
+    venue: String, // Added
 
     coach: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Admin",
+    },
+    assistantCoach: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Admin",
     },
@@ -44,6 +49,25 @@ const classSchema = new mongoose.Schema(
         ref: "User",
       },
     ],
+
+    trainingType: {
+      type: String,
+      default: "REGULAR",
+    },
+    sessionDuration: {
+      type: Number, // in minutes
+      default: 60,
+    },
+    equipmentRequired: [
+      {
+        type: String,
+      },
+    ],
+    status: {
+      type: String,
+      enum: ["ACTIVE", "INACTIVE"],
+      default: "ACTIVE",
+    },
   },
   { timestamps: true }
 );

@@ -2,37 +2,68 @@ const mongoose = require("mongoose");
 
 const userSchema = new mongoose.Schema(
   {
-    fullName: String,
+    firstName: String,
+    lastName: String,
+    fullName: String, // Calculated or stored directly
+
     email: {
       type: String,
-      unique: true,
-      sparse: true,
+      default: null,
     },
-    password: String,
     phone: {
       type: String,
-      unique: true,
+      default: null,
     },
-    otp: String,
-    otpExpire: Date,
-    isOtpVerified: { type: Boolean, default: false },
     dob: Date,
-    profile: String,
+    gender: {
+      type: String,
+      enum: ["MALE", "FEMALE", "OTHER"],
+    },
+    profileImage: String, // Added
+
+    parentId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Parent",
+      required: true,
+    },
+
     club: String,
     contactName: String,
-
+    relationship: String,
+    skillLevel: {
+      type: String,
+      enum: ['BEGINNER', 'INTERMEDIATE', 'ADVANCED'],
+    },
+    group: {
+      type: String,
+      enum: ['U6', 'U8', 'U10', 'U12', 'U14', 'U16', 'U19', 'SENIOR'],
+      required: true,
+    },
+    additionalComments: {
+      type: String,
+      default: '',
+    },
+    medicalConditions: {
+      type: String,
+      default: '',
+    },
     preferredFoot: {
       type: String,
       enum: ["LEFT", "RIGHT", "AMBIDEXTROUS"],
     },
-
-    skillLevel: {
+    weakFootRating: {
       type: Number,
       min: 1,
       max: 5,
     },
-
-    medicalCondition: String,
+    dominantPosition: String,
+    secondaryPosition: String,
+    height: Number, // in cm
+    weight: Number, // in kg
+    bloodGroup: String,
+    nationality: String,
+    school: String,
+    academy: String,
     comments: String,
 
     status: {
@@ -41,30 +72,21 @@ const userSchema = new mongoose.Schema(
       default: "PENDING",
     },
 
-    tokens: [{ type: String }],
-
-    // ✅ NEW: Category reference
     category: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Category",
-      required: function () {
-        return this.role === "PLAYER";
-      },
     },
 
     program: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Program",
-      required: function () {
-        return this.role === "PLAYER";
-      },
     },
-    role: {
-      type: String,
-      enum: ["PLAYER", "COACH"],
-      default: "PLAYER",
+
+    term: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Term",
     },
-    // ✅ Jersey Number
+
     jerseyNumber: {
       type: Number,
       min: 0,
@@ -102,10 +124,12 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+
     adminNote: {
       type: String,
       default: "",
     },
+
     assignedClasses: [
       {
         type: mongoose.Schema.Types.ObjectId,
@@ -113,15 +137,51 @@ const userSchema = new mongoose.Schema(
       },
     ],
 
-    term: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Term",
+    joinedDate: {
+      type: Date,
+      default: Date.now,
+    },
+    statistics: {
+      appearances: {
+        type: Number,
+        default: 0,
+      },
+      goals: {
+        type: Number,
+        default: 0,
+      },
+      assists: {
+        type: Number,
+        default: 0,
+      },
+      cleanSheets: {
+        type: Number,
+        default: 0,
+      },
+      yellowCards: {
+        type: Number,
+        default: 0,
+      },
+      redCards: {
+        type: Number,
+        default: 0,
+      },
+      minutesPlayed: {
+        type: Number,
+        default: 0,
+      },
+    },
+    attendancePercentage: {
+      type: Number,
+      min: 0,
+      max: 100,
+      default: 0,
     },
   },
   { timestamps: true }
 );
 
-// ✅ Unique jersey per program
+// ✅ Unique jersey per program (if jerseyNumber is present)
 userSchema.index(
   { program: 1, jerseyNumber: 1 },
   { unique: true, sparse: true }

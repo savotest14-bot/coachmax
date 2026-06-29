@@ -1,14 +1,22 @@
 const mongoose = require("mongoose");
 
-const termSchema = new mongoose.Schema(
+const leagueSchema = new mongoose.Schema(
   {
     name: {
-      type: String, // Term 1, Term 2
+      type: String,
       required: true,
     },
-    year: {
-      type: Number,
+    season: {
+      type: String,
       required: true,
+    },
+    logo: {
+      type: String,
+      default: "",
+    },
+    description: {
+      type: String,
+      default: "",
     },
     startDate: {
       type: Date,
@@ -18,23 +26,13 @@ const termSchema = new mongoose.Schema(
       type: Date,
       required: true,
     },
-    registrationStart: {
-      type: Date,
-    },
-    registrationEnd: {
-      type: Date,
-    },
     status: {
       type: String,
       enum: ["UPCOMING", "ACTIVE", "COMPLETED"],
       default: "ACTIVE",
     },
-    notes: {
-      type: String,
-      default: "",
-    },
   },
   { timestamps: true }
 );
 
-module.exports = mongoose.model("Term", termSchema);
+module.exports = mongoose.model("League", leagueSchema);

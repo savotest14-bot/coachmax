@@ -15,6 +15,7 @@ const Term = require("../models/Term");
 const Class = require("../models/Class");
 const Attendance = require("../models/Attendance");
 const { Parser } = require("json2csv");
+const Parent = require("../models/Parent");
 
 exports.adminLogin = async (req, res) => {
   try {
@@ -105,7 +106,7 @@ exports.getUsers = async (req, res) => {
     limit = Number(limit);
 
     const query = {
-      role: "PLAYER",
+      parentId: { $exists: true },
     };
 
     if (status) query.status = status;
@@ -113,8 +114,8 @@ exports.getUsers = async (req, res) => {
     if (search) {
       query.$or = [
         { fullName: { $regex: search, $options: "i" } },
-        { email: { $regex: search, $options: "i" } },
-        { phone: { $regex: search, $options: "i" } },
+        { firstName: { $regex: search, $options: "i" } },
+        { lastName: { $regex: search, $options: "i" } },
       ];
     }
 
@@ -123,6 +124,7 @@ exports.getUsers = async (req, res) => {
     const users = await User.find(query)
       .populate("approvedBy", "name email")
       .populate("rejectedBy", "name email")
+      .populate("parentId", "fullName email phone address city state postcode country emergencyContact relationship")
 
       // ✅ NEW: populate category & program
       .populate("category", "name")
@@ -138,12 +140,10 @@ exports.getUsers = async (req, res) => {
           { path: "category", select: "name" },
         ],
       })
-
       .select("-password -tokens")
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit);
-
     res.json({
       success: true,
       page,
@@ -152,7 +152,6 @@ exports.getUsers = async (req, res) => {
       totalPages: Math.ceil(total / limit),
       users,
     });
-
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -224,6 +223,116 @@ exports.updateUserStatus = async (req, res) => {
   }
 };
 
+
+
+exports.updateParentStatus = async (req, res) => {
+  try {
+    const { parentId } = req.params;
+    const { status, reason } = req.body;
+
+    const validStatus = ["APPROVED", "REJECTED"];
+
+    if (!validStatus.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid status",
+      });
+    }
+
+    if (status === "REJECTED" && !reason) {
+      return res.status(400).json({
+        success: false,
+        message: "Rejection reason is required",
+      });
+    }
+
+    const parent = await Parent.findById(parentId);
+
+    if (!parent) {
+      return res.status(404).json({
+        success: false,
+        message: "Parent not found",
+      });
+    }
+
+    parent.status = status;
+
+    if (status === "APPROVED") {
+      parent.rejectReason = null;
+      parent.approvedBy = req.admin._id;
+      parent.rejectedBy = null;
+      parent.approvedAt = new Date();
+      parent.rejectedAt = null;
+
+      // ✅ Approve all existing players of this parent
+      await User.updateMany(
+        {
+          parentId: parent._id,
+        },
+        {
+          $set: {
+            status: "APPROVED",
+            rejectReason: null,
+            approvedBy: req.admin._id,
+            rejectedBy: null,
+            approvedAt: new Date(),
+            rejectedAt: null,
+          },
+        }
+      );
+    } else {
+      parent.rejectReason = reason;
+      parent.rejectedBy = req.admin._id;
+      parent.approvedBy = null;
+      parent.rejectedAt = new Date();
+      parent.approvedAt = null;
+
+      // ✅ Reject all pending players of this parent
+      await User.updateMany(
+        {
+          parentId: parent._id,
+          status: "PENDING",
+        },
+        {
+          $set: {
+            status: "REJECTED",
+            rejectReason: reason,
+            rejectedBy: req.admin._id,
+            approvedBy: null,
+            rejectedAt: new Date(),
+            approvedAt: null,
+          },
+        }
+      );
+    }
+
+    await parent.save();
+
+    // Send Email
+    if (parent.email) {
+      const subject =
+        status === "APPROVED"
+          ? "🎉 Your CoachMax Parent Account is Approved"
+          : "❌ Your CoachMax Parent Application Status";
+
+      const html = getStatusEmailTemplate(parent, status, reason);
+
+      await sendEmail(parent.email, subject, html);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Parent ${status.toLowerCase()} successfully`,
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
 exports.assignClassToUser = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -231,7 +340,8 @@ exports.assignClassToUser = async (req, res) => {
   try {
     const { userId } = req.params;
     const { classId } = req.body;
-
+console.log("Assigning class to user:", userId);
+console.log("Class ID:", classId);
     const user = await User.findById(userId).session(session);
     const classData = await Class.findById(classId).session(session);
 
@@ -254,7 +364,7 @@ exports.assignClassToUser = async (req, res) => {
     const alreadyAssigned = classData.players.some(
       (id) => id.toString() === userId
     );
-
+    console.log("Already assigned:", alreadyAssigned);
     if (alreadyAssigned) {
       throw new Error("User already assigned");
     }
@@ -743,7 +853,6 @@ exports.createProgram = async (req, res) => {
 exports.createTerm = async (req, res) => {
   try {
     const { name, year, startDate, endDate } = req.body;
-
     const parseDate = (dateStr) => {
       const [day, month, year] = dateStr.split("/").map(Number);
       return new Date(year, month - 1, day);

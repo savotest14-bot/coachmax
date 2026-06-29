@@ -6,9 +6,13 @@ const fs = require("fs");
 const BASE_UPLOAD_PATH = path.join(process.cwd(), "uploads");
 
 const UPLOAD_PATHS = Object.freeze({
-  profile: "profile",
-  bannerImg:"bannerImg",
-  eventImg:"eventImg"
+  profiles: "profiles",
+  bannerImg: "bannerImg",
+  eventImg: "eventImg",
+  document: "documents",
+  images: "images",
+  attachments: "training",
+  file: "chat",
 });
 
 const ensureDir = (dir) => {
@@ -20,11 +24,7 @@ const ensureDir = (dir) => {
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const baseField = file.fieldname.replace(/\[\d+\]$/, "");
-    const folder = UPLOAD_PATHS[baseField];
-
-    if (!folder) {
-      return cb(new Error("Invalid upload field"));
-    }
+    const folder = UPLOAD_PATHS[baseField] || "misc";
 
     const fullPath = path.join(BASE_UPLOAD_PATH, folder);
     ensureDir(fullPath);
@@ -50,7 +50,6 @@ const ALLOWED_MIME_TYPES = new Set([
   "text/csv",
   "application/vnd.ms-excel",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-
   "video/mp4",
   "video/webm",
   "video/ogg",
@@ -75,7 +74,5 @@ const uploads = multer({
     fileSize: 25 * 1024 * 1024,
   },
 });
-
-
 
 module.exports = { uploads };

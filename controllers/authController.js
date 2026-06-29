@@ -1,12 +1,13 @@
 const Admin = require("../models/Admin");
+const Parent = require("../models/Parent");
 const bcrypt = require("bcryptjs");
 const generateToken = require("../utils/generateToken");
-const User = require("../models/User");
 const { getStatusEmailTemplate, forgotEmail } = require("../utils/emailTemplates");
 const sendEmail = require("../utils/sendEmail");
 const generateOTP = require("../utils/generateOTP");
 const fs = require("fs");
 const path = require("path");
+const User = require("../models/User");
 
 exports.forgotPassword = async (req, res) => {
   try {
@@ -18,9 +19,8 @@ exports.forgotPassword = async (req, res) => {
       });
     }
 
-    const Model = role === "ADMIN" ? Admin : User;
-
-    const user = await Model.findOne({ email });
+    const Model = role === "ADMIN" ? Admin : Parent;
+    const user = await Model.findOne({ email: email.toLowerCase() });
 
     if (!user) {
       return res.status(404).json({
@@ -29,20 +29,18 @@ exports.forgotPassword = async (req, res) => {
     }
 
     const otp = generateOTP();
-
     user.otp = otp;
     user.otpExpire = Date.now() + 10 * 60 * 1000;
-
     await user.save();
-    const html = forgotEmail(user, otp);
 
+    const html = forgotEmail(user, otp);
     sendEmail(user.email, "Reset Password OTP", html);
 
     res.json({
       message: "OTP sent to email",
-      userId: user._id
+      otp: otp,
+      userId: user._id,
     });
-
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -58,9 +56,8 @@ exports.resendOTP = async (req, res) => {
       });
     }
 
-    const Model = role === "ADMIN" ? Admin : User;
-
-    const user = await Model.findOne({ email });
+    const Model = role === "ADMIN" ? Admin : Parent;
+    const user = await Model.findOne({ email: email.toLowerCase() });
 
     if (!user) {
       return res.status(404).json({
@@ -75,21 +72,18 @@ exports.resendOTP = async (req, res) => {
     }
 
     const otp = generateOTP();
-
     user.otp = otp;
     user.otpExpire = Date.now() + 10 * 60 * 1000;
-
     await user.save();
 
     const html = forgotEmail(user, otp);
-
     sendEmail(user.email, "Resend OTP - Password Reset", html);
 
     res.json({
       message: "OTP resent successfully",
-      userId: user._id
+      otp: otp,
+      userId: user._id,
     });
-
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -101,12 +95,11 @@ exports.verifyOtp = async (req, res) => {
 
     if (!userId || !role || !otp) {
       return res.status(400).json({
-        message: "Email, role and OTP are required",
+        message: "User ID, role and OTP are required",
       });
     }
 
-    const Model = role === "ADMIN" ? Admin : User;
-
+    const Model = role === "ADMIN" ? Admin : Parent;
     const user = await Model.findOne({ _id: userId });
 
     if (!user) {
@@ -135,7 +128,6 @@ exports.verifyOtp = async (req, res) => {
       userId: user._id,
       message: "OTP verified successfully",
     });
-
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -151,8 +143,7 @@ exports.resetPassword = async (req, res) => {
       });
     }
 
-    const Model = role === "ADMIN" ? Admin : User;
-
+    const Model = role === "ADMIN" ? Admin : Parent;
     const user = await Model.findOne({ _id: userId });
 
     if (!user) {
@@ -168,19 +159,16 @@ exports.resetPassword = async (req, res) => {
     }
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
-
     user.password = hashedPassword;
     user.otp = null;
     user.otpExpire = null;
     user.isOtpVerified = false;
-
     await user.save();
 
     res.json({
       success: true,
       message: "Password reset successful",
     });
-
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -188,28 +176,40 @@ exports.resetPassword = async (req, res) => {
 
 exports.getMyProfile = async (req, res) => {
   try {
-    let data;
-
-    if (req.role === "ADMIN") {
-      data = req.admin;
-    } else {
-      data = req.user;
-    }
+    let data = req.role === "ADMIN" ? req.admin : req.user;
 
     data = data.toObject();
+
+    // Remove sensitive fields
     delete data.password;
     delete data.tokens;
     delete data.otp;
     delete data.otpExpire;
 
+    let players = [];
+
+    // If logged in user is a Parent, fetch players
+    if (req.role !== "ADMIN") {
+      players = await User.find({ parentId: data._id })
+        .populate("category", "name")
+        .populate("program", "name")
+        .populate("term", "name")
+        .select("-__v");
+    }
+
     res.json({
       success: true,
       role: req.role,
-      data,
+      data: {
+        ...data,
+        players,
+      },
     });
-
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 };
 
@@ -219,20 +219,23 @@ exports.updateMyProfile = async (req, res) => {
     let currentUser;
 
     if (req.role === "ADMIN") {
-      Model = require("../models/Admin");
+      Model = Admin;
       currentUser = req.admin;
     } else {
-      Model = require("../models/User");
+      Model = Parent;
       currentUser = req.user;
     }
 
     let updateFields = {};
 
     if (req.file) {
-       updateFields.profile = `uploads/profile/${req.file.filename}`;
+      const imgPath = `uploads/profile/${req.file.filename}`;
+      updateFields.profile = imgPath;
+      updateFields.profileImage = imgPath;
 
-      if (currentUser.profile) {
-        const oldPath = path.resolve(currentUser.profile);
+      const oldProfilePath = currentUser.profile || currentUser.profileImage;
+      if (oldProfilePath) {
+        const oldPath = path.resolve(oldProfilePath);
         fs.access(oldPath, fs.constants.F_OK, (err) => {
           if (!err) {
             fs.unlink(oldPath, (err) => {
@@ -255,15 +258,24 @@ exports.updateMyProfile = async (req, res) => {
         ...updateFields,
         fullName: req.body.fullName,
         phone: req.body.phone,
-        dob: req.body.dob,
-        club: req.body.club,
-        contactName: req.body.contactName,
-        preferredFoot: req.body.preferredFoot,
-        skillLevel: req.body.skillLevel,
-        medicalCondition: req.body.medicalCondition,
-        comments: req.body.comments,
-        programType: req.body.programType,
+        address: req.body.address,
+        city: req.body.city,
+        state: req.body.state,
+        postcode: req.body.postcode,
+        country: req.body.country,
+        emergencyContact: req.body.emergencyContact,
+        relationship: req.body.relationship,
       };
+
+      if (req.body.notificationSettings) {
+        try {
+          updateFields.notificationSettings = typeof req.body.notificationSettings === "string"
+            ? JSON.parse(req.body.notificationSettings)
+            : req.body.notificationSettings;
+        } catch (e) {
+          // ignore parsing error
+        }
+      }
     }
 
     Object.keys(updateFields).forEach(
@@ -286,9 +298,7 @@ exports.updateMyProfile = async (req, res) => {
       message: "Profile updated successfully",
       data: updated,
     });
-
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 };
-

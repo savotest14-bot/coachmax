@@ -1,271 +1,428 @@
 const sendEmail = require("../utils/sendEmail");
-const {
-  welcomeEmail,
-  newUserAdminEmail,
-} = require("../utils/emailTemplates");
+const { welcomeEmail, newUserAdminEmail } = require("../utils/emailTemplates");
 const User = require("../models/User");
-const bcrypt = require("bcryptjs");
-const generateToken = require("../utils/generateToken");
+const Parent = require("../models/Parent");
+const MedicalProfile = require("../models/MedicalProfile");
 const Banner = require("../models/Banner");
 const Program = require("../models/Program");
-const mongoose = require("mongoose");
 const Category = require("../models/Category");
+const Term = require("../models/Term");
 const Attendance = require("../models/Attendance");
 const Class = require("../models/Class");
+const News = require("../models/News");
+const Invoice = require("../models/Invoice");
+const Fixture = require("../models/Fixture");
+const bcrypt = require("bcryptjs");
+const generateToken = require("../utils/generateToken");
+const mongoose = require("mongoose");
 
+// ✅ Parent registration with child
 exports.register = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+console.log("body", req.body)
+console.log("files", req.files)
   try {
-    const {
+    let {
       fullName,
       email,
-      password,
       phone,
-      dob,
-      club,
-      contactName,
-      preferredFoot,
-      skillLevel,
-      medicalCondition,
-      comments,
-      category,
-      program,
-      jerseyNumber,
+      password,
+      address,
+      city,
+      state,
+      postcode,
+      country,
+      emergencyContact,
+      relationship,
+      players,
     } = req.body;
 
+    // Parse players if sent as string in multipart/form-data
+    if (typeof players === "string") {
+      players = JSON.parse(players);
+    }
+
+    // Parent validation
     if (
       !fullName ||
+      !email ||
       !phone ||
       !password ||
-      !preferredFoot ||
-      !skillLevel ||
-      !program ||
-      !category
+      !emergencyContact ||
+      !relationship ||
+      !players ||
+      !Array.isArray(players) ||
+      players.length === 0
     ) {
       return res.status(400).json({
+        success: false,
         message: "Required fields missing",
       });
     }
 
-    // ✅ Validate ObjectIds
-    if (!mongoose.Types.ObjectId.isValid(program)) {
-      return res.status(400).json({
-        message: "Invalid program ID",
-      });
-    }
-
-    if (!mongoose.Types.ObjectId.isValid(category)) {
-      return res.status(400).json({
-        message: "Invalid category ID",
-      });
-    }
-
-    // ✅ Check category exists
-    const categoryData = await Category.findById(category);
-    if (!categoryData) {
-      return res.status(400).json({
-        message: "Category not found",
-      });
-    }
-
-    // ✅ Check program exists
-    const programData = await Program.findById(program);
-    if (!programData) {
-      return res.status(400).json({
-        message: "Program not found",
-      });
-    }
-
-    // 🔥 IMPORTANT: validate program belongs to category
-    if (programData.category.toString() !== category) {
-      return res.status(400).json({
-        message: "Program does not belong to selected category",
-      });
-    }
-
-    // ✅ Skill validation
-    if (skillLevel < 1 || skillLevel > 5) {
-      return res.status(400).json({
-        message: "Skill level must be between 1 and 5",
-      });
-    }
-
-    let parsedDob;
-
-    if (dob) {
-      const [day, month, year] = dob.split("/");
-
-      parsedDob = new Date(`${year}-${month}-${day}`);
-
-      if (isNaN(parsedDob)) {
-        return res.status(400).json({
-          message: "Invalid DOB format. Use dd/mm/yyyy",
-        });
-      }
-    }
-
-    // ✅ Preferred foot validation
-    const validFoot = ["LEFT", "RIGHT", "AMBIDEXTROUS"];
-    if (!validFoot.includes(preferredFoot)) {
-      return res.status(400).json({
-        message: "Invalid preferred foot",
-      });
-    }
-
-    // ✅ Jersey validation (optional)
-    if (
-      jerseyNumber !== undefined &&
-      (jerseyNumber < 0 || jerseyNumber > 99)
-    ) {
-      return res.status(400).json({
-        message: "Jersey number must be between 0 and 99",
-      });
-    }
-
-    // ✅ Check existing user
-    const existingUser = await User.findOne({
-      $or: [{ email }, { phone }],
+    // Check existing parent
+    const existingParent = await Parent.findOne({
+      $or: [
+        { email: email.toLowerCase() },
+        { phone }
+      ],
     });
 
-    if (existingUser) {
+    if (existingParent) {
       return res.status(400).json({
-        message: "User already exists",
+        success: false,
+        message: "Parent with this email or phone already exists",
       });
     }
 
-    // ✅ Hash password
+    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // ✅ Create user
-    const user = await User.create({
-      fullName,
-      email,
-      password: hashedPassword,
-      phone,
-      dob: parsedDob,
-      club,
-      contactName,
-      preferredFoot,
-      skillLevel,
-      medicalCondition,
-      comments,
-      category, // ✅ save category
-      program,
-      jerseyNumber: jerseyNumber || undefined,
-    });
+    // Create Parent
+    const parent = await Parent.create(
+      [
+        {
+          fullName,
+          email: email.toLowerCase(),
+          phone,
+          password: hashedPassword,
+          address,
+          city,
+          state,
+          postcode,
+          country,
+          emergencyContact,
+          relationship,
+          emailVerified: false,
+          phoneVerified: false,
+        },
+      ],
+      { session }
+    );
 
-    // ✅ Emails
-    if (email) {
-      sendEmail(
+    const parentId = parent[0]._id;
+
+    const uploadedFiles = req.files || [];
+    const createdPlayers = [];
+
+    for (let i = 0; i < players.length; i++) {
+      const player = players[i];
+
+      const {
+        firstName,
+        lastName,
         email,
-        "Welcome to CoachMax 🎉",
-        welcomeEmail(fullName)
+        phone,
+        dob,
+        gender,
+        preferredFoot,
+        weakFootRating,
+        school,
+        category,
+        program,
+        term,
+        jerseyNumber,
+        club,
+        contactName,
+        skillLevel,
+        group,
+        additionalComments,
+        medicalConditions,
+        dominantPosition,
+        secondaryPosition,
+        height,
+        weight,
+        bloodGroup,
+        nationality,
+        academy,
+        comments,
+        allergies,
+      } = player;
+
+      // Required player validation
+      if (
+        !firstName ||
+        !lastName ||
+        !dob ||
+        !preferredFoot ||
+        !group ||
+        !category ||
+        !program ||
+        !term
+      ) {
+        throw new Error(
+          `Required fields missing for player ${firstName || i + 1}`
+        );
+      }
+
+      // Validate references
+      const [categoryData, programData, termData] =
+        await Promise.all([
+          Category.findById(category),
+          Program.findById(program),
+          Term.findById(term),
+        ]);
+
+      if (!categoryData) {
+        throw new Error(
+          `Category not found for ${firstName}`
+        );
+      }
+
+      if (!programData) {
+        throw new Error(
+          `Program not found for ${firstName}`
+        );
+      }
+
+      if (!termData) {
+        throw new Error(
+          `Term not found for ${firstName}`
+        );
+      }
+
+      // Check jersey uniqueness
+      if (
+        jerseyNumber !== undefined &&
+        jerseyNumber !== null &&
+        jerseyNumber !== ""
+      ) {
+        const existingJersey =
+          await User.findOne({
+            program,
+            jerseyNumber,
+          });
+
+        if (existingJersey) {
+          throw new Error(
+            `Jersey number ${jerseyNumber} already exists in selected program`
+          );
+        }
+      }
+
+      // Parse DOB
+      let parsedDob = null;
+
+      if (dob) {
+        const parts = dob.split("/");
+
+        if (parts.length === 3) {
+          parsedDob = new Date(
+            `${parts[2]}-${parts[1]}-${parts[0]}`
+          );
+        } else {
+          parsedDob = new Date(dob);
+        }
+      }
+
+      // Profile image
+      let profileImage = null;
+
+      if (uploadedFiles[i]) {
+        profileImage = `uploads/profiles/${uploadedFiles[i].filename}`;
+      }
+
+      // Create Player
+      const playerDoc = await User.create(
+        [
+          {
+            firstName,
+            lastName,
+            fullName: `${firstName} ${lastName}`,
+
+            email: email || null,
+            phone: phone || null,
+
+            dob: parsedDob,
+            gender,
+
+            parentId,
+
+            club,
+            contactName,
+            relationship,
+
+            skillLevel,
+            group,
+
+            additionalComments:
+              additionalComments || "",
+
+            medicalConditions:
+              medicalConditions || "",
+
+            preferredFoot,
+
+            weakFootRating:
+              weakFootRating || 3,
+
+            dominantPosition,
+            secondaryPosition,
+
+            height,
+            weight,
+
+            bloodGroup,
+            nationality,
+
+            school,
+            academy,
+            comments,
+
+            status: "PENDING",
+
+            category,
+            program,
+            term,
+
+            jerseyNumber:
+              jerseyNumber || null,
+
+            profileImage,
+
+            assignedClasses: [],
+
+            attendancePercentage: 0,
+          },
+        ],
+        { session }
       );
+
+      const playerId = playerDoc[0]._id;
+
+      // Create Medical Profile
+      await MedicalProfile.create(
+        [
+          {
+            player: playerId,
+            medicalConditions:
+              medicalConditions || "",
+            allergies: Array.isArray(allergies)
+              ? allergies
+              : allergies
+              ? [allergies]
+              : [],
+          },
+        ],
+        { session }
+      );
+
+      createdPlayers.push(playerDoc[0]);
     }
+
+    await session.commitTransaction();
+    session.endSession();
+
+    // Send Emails (non-blocking)
+    sendEmail(
+      email,
+      "Welcome to CoachMax 🎉",
+      welcomeEmail(fullName)
+    );
 
     sendEmail(
       process.env.ADMIN_EMAIL,
-      "🚨 New Player Registration",
-      newUserAdminEmail(user)
+      "🚨 New Parent & Players Registration",
+      newUserAdminEmail(createdPlayers[0])
     );
 
-    res.json({
-      message: "Registered. Waiting for admin approval",
-      user,
+    return res.status(201).json({
+      success: true,
+      message:
+        "Parent and players registered successfully. Waiting for admin approval.",
+      data: {
+        parent: {
+          _id: parentId,
+          fullName: parent[0].fullName,
+          email: parent[0].email,
+          phone: parent[0].phone,
+        },
+        players: createdPlayers,
+      },
     });
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
 
-  } catch (err) {
-    // ✅ Handle duplicate jersey
-    if (err.code === 11000 && err.keyPattern?.jerseyNumber) {
-      return res.status(400).json({
-        message: "Jersey number already taken in this program",
-      });
-    }
-
-    res.status(500).json({ message: err.message });
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
 
+// ✅ Parent Login
 exports.login = async (req, res) => {
   try {
     const { email, phone, password } = req.body;
 
     if ((!email && !phone) || !password) {
       return res.status(400).json({
-        message: "Email/Phone and password required",
+        success: false,
+        message: "Email/Phone and password are required",
       });
     }
 
-    const user = await User.findOne({
-      $or: [{ email }, { phone }],
-    });
+    const query = email ? { email: email.toLowerCase() } : { phone };
+    const parent = await Parent.findOne(query);
 
-    if (!user) {
-      return res.status(404).json({
-        message: "User not found",
-      });
+    if (!parent) {
+      return res.status(404).json({ success: false, message: "Parent not found" });
     }
 
-    const isMatch = await bcrypt.compare(password, user.password);
-
+    const isMatch = await bcrypt.compare(password, parent.password);
     if (!isMatch) {
-      return res.status(401).json({
-        message: "Invalid credentials",
-      });
+      return res.status(401).json({ success: false, message: "Invalid credentials" });
     }
 
-    if (user.status === "PENDING") {
+    if (parent.isBlocked) {
       return res.status(403).json({
-        message: "Your account is pending approval",
-      });
-    }
-
-    if (user.status === "REJECTED") {
-      return res.status(403).json({
-        message: `Your account was rejected. Reason: ${user.rejectReason || "N/A"}`,
-      });
-    }
-
-    if (user.isBlocked) {
-      return res.status(403).json({
+        success: false,
         message: "Your account is blocked. Contact admin.",
       });
     }
 
-    const token = generateToken(user._id);
+    const token = generateToken(parent._id);
+    parent.tokens = parent.tokens || [];
+    parent.tokens.push(token);
+    await parent.save();
 
-    user.tokens.push(token);
+    // Fetch parent's children
+    const children = await User.find({ parentId: parent._id })
+      .populate("category", "name")
+      .populate("program", "name")
+      .populate("term", "name");
 
-    await user.save();
-    const userObj = user.toObject();
-    delete userObj.password;
-    delete userObj.tokens;
+    const parentObj = parent.toObject();
+    delete parentObj.password;
+    delete parentObj.tokens;
 
     res.json({
+      success: true,
       message: "Login successful",
       token,
-      user: userObj,
+      parent: parentObj,
+      children,
     });
-
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 
+// ✅ Parent Logout
 exports.logout = async (req, res) => {
   try {
     const token = req.token;
-
-    req.user.tokens = req.user.tokens.filter(t => t !== token);
-
-    await req.user.save();
-
-    res.json({ message: "Logged out" });
-
+    req.parent.tokens = req.parent.tokens.filter((t) => t !== token);
+    await req.parent.save();
+    res.json({ success: true, message: "Logged out successfully" });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 
+// ✅ Retrieve Banners
 exports.getActiveBanners = async (req, res) => {
   try {
     const banners = await Banner.find({ isActive: true })
@@ -278,31 +435,138 @@ exports.getActiveBanners = async (req, res) => {
       data: banners,
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
+// ✅ Retrieve Categories
 exports.getCategories = async (req, res) => {
-  const categories = await Category.find();
-  res.json(categories);
+  try {
+    const categories = await Category.find().sort({ displayOrder: 1 });
+    res.json(categories);
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 };
 
+// ✅ Retrieve Programs by Category
 exports.getProgramsByCategory = async (req, res) => {
-  const { categoryId } = req.params;
-
-  const programs = await Program.find({ category: categoryId });
-
-  res.json(programs);
+  try {
+    const { categoryId } = req.params;
+    const programs = await Program.find({ category: categoryId, status: "ACTIVE" });
+    res.json(programs);
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 };
 
+// ✅ Retrieve Parent's Children
+exports.getChildren = async (req, res) => {
+  try {
+    const children = await User.find({ parentId: req.parent._id })
+      .populate("category", "name")
+      .populate("program", "name")
+      .populate("term", "name");
+
+    res.json({ success: true, data: children });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ✅ Add Child Profile under Parent
+exports.addChild = async (req, res) => {
+  try {
+    const {
+      firstName,
+      lastName,
+      dob,
+      gender,
+      preferredFoot,
+      weakFootRating,
+      school,
+      medicalConditions,
+      allergies,
+      jerseyNumber,
+      category,
+      program,
+      term,
+    } = req.body;
+
+    if (!firstName || !lastName || !dob || !preferredFoot || !category || !program || !term) {
+      return res.status(400).json({ success: false, message: "Required fields missing" });
+    }
+
+    // Set DOB
+    let parsedDob;
+    if (dob) {
+      const parts = dob.split("/");
+      if (parts.length === 3) {
+        parsedDob = new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
+      } else {
+        parsedDob = new Date(dob);
+      }
+    }
+
+    // Validate jersey number unique per program
+    if (jerseyNumber !== undefined) {
+      const existingJersey = await User.findOne({ program, jerseyNumber });
+      if (existingJersey) {
+        return res.status(400).json({
+          success: false,
+          message: "Jersey number already taken in this program",
+        });
+      }
+    }
+
+    let profilePhotoPath = null;
+    if (req.file) {
+      profilePhotoPath = `uploads/profile/${req.file.filename}`;
+    }
+
+    const playerFullName = `${firstName} ${lastName}`;
+    const newPlayer = await User.create({
+      firstName,
+      lastName,
+      fullName: playerFullName,
+      dob: parsedDob,
+      gender,
+      preferredFoot,
+      weakFootRating: weakFootRating || 3,
+      school,
+      jerseyNumber,
+      category,
+      program,
+      term,
+      parentId: req.parent._id,
+      profile: profilePhotoPath,
+      profileImage: profilePhotoPath,
+      status: "PENDING",
+    });
+
+    const allergiesList = Array.isArray(allergies)
+      ? allergies
+      : allergies
+      ? [allergies]
+      : [];
+    await MedicalProfile.create({
+      player: newPlayer._id,
+      medicalConditions: medicalConditions || "",
+      allergies: allergiesList,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Child profile added successfully. Waiting for admin approval.",
+      data: newPlayer,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
 
 const generateClassSessions = (term, classObj) => {
   const sessions = [];
-
-  // ✅ normalize start & end to UTC midnight
   const start = new Date(term.startDate);
   start.setUTCHours(0, 0, 0, 0);
 
@@ -320,197 +584,40 @@ const generateClassSessions = (term, classObj) => {
   };
 
   const targetDay = dayMap[classObj.dayOfWeek];
-
   let current = new Date(start);
 
-  // ✅ move to correct weekday
   while (current.getUTCDay() !== targetDay) {
     current.setUTCDate(current.getUTCDate() + 1);
   }
 
-  // ✅ weekly loop
   while (current <= end) {
     sessions.push(new Date(current));
-
     current.setUTCDate(current.getUTCDate() + 7);
   }
 
   return sessions;
 };
 
-
-// exports.getMyClasses = async (req, res) => {
-//   try {
-//     const userId = req.user._id;
-
-//     const user = await User.findById(userId)
-//       .populate({
-//         path: "assignedClasses",
-//         populate: [
-//           { path: "term", select: "name startDate endDate" },
-//           { path: "program", select: "name" },
-//           { path: "category", select: "name" },
-//           { path: "coach", select: "name email phone" },
-//         ],
-//       })
-//       .select("fullName email assignedClasses");
-
-//     if (!user) {
-//       return res.status(404).json({
-//         success: false,
-//         message: "User not found",
-//       });
-//     }
-
-//     // ✅ Day name mapping
-//     const dayNames = [
-//       "SUNDAY",
-//       "MONDAY",
-//       "TUESDAY",
-//       "WEDNESDAY",
-//       "THURSDAY",
-//       "FRIDAY",
-//       "SATURDAY",
-//     ];
-
-//     const result = [];
-
-//     for (const cls of user.assignedClasses) {
-//       const allSessions = generateClassSessions(cls.term, cls);
-
-//       const sessions = allSessions.map((d) => {
-//         const date = new Date(d);
-
-//         return {
-//           date: date.toISOString().split("T")[0], // ✅ YYYY-MM-DD
-//           day: dayNames[date.getUTCDay()],        // ✅ MONDAY
-//           startTime: cls.startTime,               // ✅ class time
-//           endTime: cls.endTime,                   // ✅ class time
-//         };
-//       });
-
-//       result.push({
-//         classId: cls._id,
-//         className: cls.name,
-//         term: cls.term,
-//         program: cls.program,
-//         category: cls.category,
-//         coach: cls.coach,
-
-//         totalSessions: sessions.length,
-//         sessions,
-//       });
-//     }
-
-//     res.json({
-//       success: true,
-//       message: "Classes fetched successfully",
-//       data: result,
-//     });
-
-//   } catch (error) {
-//     console.error(error);
-//     res.status(500).json({
-//       success: false,
-//       message: error.message,
-//     });
-//   }
-// };
-
-exports.getMyAttendanceByClass = async (req, res) => {
-  try {
-    const userId = req.user._id;
-    const { classId } = req.params;
-
-    // ✅ get class with term
-    const cls = await Class.findById(classId)
-      .populate({
-        path: "term",
-        select: "startDate endDate",
-      });
-
-    if (!cls) {
-      return res.status(404).json({
-        message: "Class not found",
-      });
-    }
-
-    // ✅ 1. generate all sessions
-    const allSessions = generateClassSessions(cls.term, cls);
-
-    const sessionDates = allSessions.map((d) =>
-      new Date(d).toISOString().split("T")[0]
-    );
-
-    // ✅ 2. get attendance for this class
-    const attendanceData = await Attendance.find({
-      class: classId,
-    }).select("sessionDate records");
-
-    // ✅ 3. convert attendance to map
-    const attendanceMap = {};
-
-    attendanceData.forEach((att) => {
-      const date = new Date(att.sessionDate)
-        .toISOString()
-        .split("T")[0];
-
-      const record = att.records.find(
-        (r) => r.player.toString() === userId.toString()
-      );
-
-      if (record) {
-        attendanceMap[date] = record.status;
-      }
-    });
-
-    // ✅ 4. calculate stats
-    let presentCount = 0;
-    let missedSessions = 0;
-
-    const sessions = sessionDates.map((date) => {
-      let status = attendanceMap[date] || "NOT_MARKED";
-
-      if (status === "PRESENT") presentCount++;
-      else if (status === "ABSENT") missedSessions++;
-
-      return {
-        date,
-        status,
-      };
-    });
-
-    const totalSessions = sessionDates.length;
-
-    const attendancePercentage =
-      totalSessions > 0
-        ? Number(
-          ((presentCount / totalSessions) * 100).toFixed(1)
-        )
-        : 0;
-
-    res.json({
-      success: true,
-      data: {
-        classId,
-        totalSessions,
-        presentCount,
-        missedSessions,
-        attendancePercentage,
-        sessions,
-      },
-    });
-
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-};
-
+// ✅ Fetch Classes with Attendance for Child
 exports.getMyClasses = async (req, res) => {
   try {
-    const userId = req.user._id;
+    // Determine player ID (query param or default to parent's first child)
+    let playerId = req.query.playerId;
+    if (!playerId) {
+      const firstChild = await User.findOne({ parentId: req.parent._id });
+      if (!firstChild) {
+        return res.status(200).json({ success: true, data: [] });
+      }
+      playerId = firstChild._id;
+    } else {
+      // Validate child ownership
+      const child = await User.findOne({ _id: playerId, parentId: req.parent._id });
+      if (!child) {
+        return res.status(403).json({ success: false, message: "Unauthorized child profile" });
+      }
+    }
 
-    const user = await User.findById(userId)
+    const player = await User.findById(playerId)
       .populate({
         path: "assignedClasses",
         populate: [
@@ -522,106 +629,73 @@ exports.getMyClasses = async (req, res) => {
       })
       .select("fullName email assignedClasses");
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
+    if (!player) {
+      return res.status(404).json({ success: false, message: "Player not found" });
     }
 
-    const classIds = user.assignedClasses.map((c) => c._id);
-
-    // fetch all attendance
+    const classIds = player.assignedClasses.map((c) => c._id);
     const allAttendance = await Attendance.find({
       class: { $in: classIds },
     }).select("class sessionDate records");
 
-    // group attendance by class
     const attendanceByClass = {};
-
     allAttendance.forEach((att) => {
       const classId = att.class.toString();
-
       if (!attendanceByClass[classId]) {
         attendanceByClass[classId] = [];
       }
-
       attendanceByClass[classId].push(att);
     });
 
     const result = [];
-
-    for (const cls of user.assignedClasses) {
-      const classAttendance =
-        attendanceByClass[cls._id.toString()] || [];
-
-      // ✅ generate ALL sessions
+    for (const cls of player.assignedClasses) {
+      const classAttendance = attendanceByClass[cls._id.toString()] || [];
       const allSessions = generateClassSessions(cls.term, cls);
-
       const sessions = [];
 
       let presentCount = 0;
       let missedSessions = 0;
 
-      const dayNames = [
-        "SUNDAY",
-        "MONDAY",
-        "TUESDAY",
-        "WEDNESDAY",
-        "THURSDAY",
-        "FRIDAY",
-        "SATURDAY",
-      ];
+      const dayNames = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
 
       allSessions.forEach((sessionDate) => {
         const normalizedDate = new Date(sessionDate);
         normalizedDate.setUTCHours(0, 0, 0, 0);
 
-        // ✅ match attendance safely
         const attendanceRecord = classAttendance.find((att) => {
           const dbDate = new Date(att.sessionDate);
           dbDate.setUTCHours(0, 0, 0, 0);
-
           return dbDate.getTime() === normalizedDate.getTime();
         });
 
-        let status = "NOT_MARKED"; // ✅ FIXED
-
+        let status = "NOT_MARKED";
         if (attendanceRecord) {
           const record = attendanceRecord.records.find(
-            (r) => r.player.toString() === userId.toString()
+            (r) => r.player.toString() === playerId.toString()
           );
-
           if (record) {
-            status = record.status; // PRESENT / ABSENT / LATE
+            status = record.status;
           } else {
-            status = "ABSENT"; // session marked but player missing
+            status = "ABSENT";
           }
         }
 
         if (status === "PRESENT") presentCount++;
         else if (status === "ABSENT") missedSessions++;
 
-        // sessions.push({
-        //   date: normalizedDate.toISOString().split("T")[0],
-        //   status,
-        // });
         sessions.push({
           date: normalizedDate.toISOString().split("T")[0],
-          day: dayNames[normalizedDate.getUTCDay()], // ✅ added
-          startTime: cls.startTime,                  // ✅ added
-          endTime: cls.endTime,                      // ✅ added
+          day: dayNames[normalizedDate.getUTCDay()],
+          startTime: cls.startTime,
+          endTime: cls.endTime,
           status,
         });
       });
 
       const totalSessions = allSessions.length;
-
       const attendancePercentage =
         totalSessions > 0
-          ? Number(
-            ((presentCount / totalSessions) * 100).toFixed(1)
-          )
+          ? Number(((presentCount / totalSessions) * 100).toFixed(1))
           : 0;
 
       result.push({
@@ -631,8 +705,6 @@ exports.getMyClasses = async (req, res) => {
         program: cls.program,
         category: cls.category,
         coach: cls.coach,
-
-        // ✅ attendance data
         attendancePercentage,
         presentCount,
         missedSessions,
@@ -646,12 +718,190 @@ exports.getMyClasses = async (req, res) => {
       message: "Classes with attendance fetched successfully",
       data: result,
     });
-
   } catch (error) {
     console.error(error);
-    return res.status(500).json({
-      success: false,
-      message: "Something went wrong",
+    return res.status(500).json({ success: false, message: "Something went wrong" });
+  }
+};
+
+// ✅ Fetch Attendance for Child by Class ID
+exports.getMyAttendanceByClass = async (req, res) => {
+  try {
+    let playerId = req.query.playerId;
+    if (!playerId) {
+      const firstChild = await User.findOne({ parentId: req.parent._id });
+      if (!firstChild) {
+        return res.status(400).json({ success: false, message: "No children profiles found" });
+      }
+      playerId = firstChild._id;
+    } else {
+      // Validate ownership
+      const child = await User.findOne({ _id: playerId, parentId: req.parent._id });
+      if (!child) {
+        return res.status(403).json({ success: false, message: "Unauthorized child profile" });
+      }
+    }
+
+    const { classId } = req.params;
+    const cls = await Class.findById(classId).populate({
+      path: "term",
+      select: "startDate endDate",
     });
+
+    if (!cls) {
+      return res.status(404).json({ success: false, message: "Class not found" });
+    }
+
+    const allSessions = generateClassSessions(cls.term, cls);
+    const sessionDates = allSessions.map((d) => new Date(d).toISOString().split("T")[0]);
+
+    const attendanceData = await Attendance.find({ class: classId }).select("sessionDate records");
+    const attendanceMap = {};
+
+    attendanceData.forEach((att) => {
+      const date = new Date(att.sessionDate).toISOString().split("T")[0];
+      const record = att.records.find((r) => r.player.toString() === playerId.toString());
+      if (record) {
+        attendanceMap[date] = record.status;
+      }
+    });
+
+    let presentCount = 0;
+    let missedSessions = 0;
+
+    const sessions = sessionDates.map((date) => {
+      let status = attendanceMap[date] || "NOT_MARKED";
+      if (status === "PRESENT") presentCount++;
+      else if (status === "ABSENT") missedSessions++;
+
+      return { date, status };
+    });
+
+    const totalSessions = sessionDates.length;
+    const attendancePercentage =
+      totalSessions > 0
+        ? Number(((presentCount / totalSessions) * 100).toFixed(1))
+        : 0;
+
+    res.json({
+      success: true,
+      data: {
+        classId,
+        totalSessions,
+        presentCount,
+        missedSessions,
+        attendancePercentage,
+        sessions,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ✅ Parent Dashboard Overview
+exports.getDashboard = async (req, res) => {
+  try {
+    const parentId = req.parent._id;
+
+    // 1. Fetch children
+    const children = await User.find({ parentId }).select("_id fullName assignedClasses goals assists appearances");
+    const childIds = children.map((c) => c._id);
+
+    // 2. Upcoming training session (first child's next weekly class)
+    let upcomingTraining = null;
+    const classes = await Class.find({ players: { $in: childIds } })
+      .populate("term", "startDate endDate")
+      .populate("coach", "name email");
+
+    if (classes.length > 0) {
+      // Pick first class
+      const cls = classes[0];
+      const nextSessions = generateClassSessions(cls.term, cls).filter((d) => d >= new Date());
+      if (nextSessions.length > 0) {
+        upcomingTraining = {
+          classId: cls._id,
+          className: cls.name,
+          date: nextSessions[0].toISOString().split("T")[0],
+          dayOfWeek: cls.dayOfWeek,
+          startTime: cls.startTime,
+          endTime: cls.endTime,
+          venue: cls.venue || cls.location,
+          coach: cls.coach?.name || "N/A",
+        };
+      }
+    }
+
+    // 3. Next match (Fixtures involving teams where our children belong)
+    // Find fixtures where children teams might play.
+    const teams = await mongoose.model("Team").find({ players: { $in: childIds } }).select("_id");
+    const teamIds = teams.map((t) => t._id);
+    const nextMatchDoc = await Fixture.findOne({
+      $or: [{ homeTeam: { $in: teamIds } }, { awayTeam: { $in: teamIds } }],
+      kickoffTime: { $gte: new Date() },
+    })
+      .populate("homeTeam", "teamName logo")
+      .populate("awayTeam", "teamName logo")
+      .sort({ kickoffTime: 1 });
+
+    let nextMatch = null;
+    if (nextMatchDoc) {
+      nextMatch = {
+        fixtureId: nextMatchDoc._id,
+        homeTeam: nextMatchDoc.homeTeam.teamName,
+        awayTeam: nextMatchDoc.awayTeam.teamName,
+        venue: nextMatchDoc.venue,
+        kickoffTime: nextMatchDoc.kickoffTime,
+      };
+    }
+
+    // 4. Combined Stats
+    let totalGoals = 0;
+    let totalAssists = 0;
+    let totalAppearances = 0;
+    children.forEach((c) => {
+      totalGoals += c.goals || 0;
+      totalAssists += c.assists || 0;
+      totalAppearances += c.appearances || 0;
+    });
+
+    // 5. Outstanding Payments (Invoices pending)
+    const unpaidInvoices = await Invoice.find({ parent: parentId, status: { $in: ["PENDING", "OVERDUE"] } });
+    const outstandingPayments = unpaidInvoices.reduce((sum, inv) => sum + inv.amount, 0);
+
+    // 6. Latest News (Featured news)
+    const latestNews = await News.find()
+      .sort({ publishedAt: -1 })
+      .limit(3)
+      .populate("publishedBy", "name");
+
+    res.json({
+      success: true,
+      data: {
+        upcomingTraining,
+        nextMatch,
+        stats: {
+          goals: totalGoals,
+          assists: totalAssists,
+          appearances: totalAppearances,
+        },
+        outstandingPayments,
+        latestNews,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.getAllTerms = async (req, res) => {
+  try {
+    const terms = await Term.find().sort({ startDate: 1 });
+
+    res.json({
+      data: terms,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 };

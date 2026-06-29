@@ -11,10 +11,10 @@ router.post("/resendOtp", resendOTP);
 
 router.post("/verifyOtp", verifyOtp);
 
-router.post("/resetPassword", resetPassword)
+router.post("/resetPassword", resetPassword);
 
-router.get("/getMyProfile", auth, getMyProfile)
+router.get("/getMyProfile", auth, getMyProfile);
 
-router.put("/updateMyProfile",auth, uploads.single("profile"), updateMyProfile)
+router.put("/updateMyProfile",auth, uploads.single("profile"), updateMyProfile);
 
 module.exports = router;

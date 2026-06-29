@@ -2,7 +2,10 @@ const mongoose = require("mongoose");
 
 const eventSchema = new mongoose.Schema(
   {
-    title: String,
+    title: {
+      type: String,
+      required: true,
+    },
     description: String,
     category: String,
     maxParticipants: Number,
@@ -12,7 +15,8 @@ const eventSchema = new mongoose.Schema(
     startTime: String,
     endTime: String,
 
-    venueName: String,
+    venueName: String, // Kept for backward compatibility
+    venue: String, // Added
     address: String,
     googleMapLink: String,
 
@@ -39,6 +43,30 @@ const eventSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Admin",
     },
+
+    // Added fields
+    eventType: {
+      type: String,
+      default: "TOURNAMENT",
+    },
+    registrationFee: {
+      type: Number,
+      default: 0,
+    },
+    documentsRequired: [
+      {
+        type: String,
+      },
+    ],
+    organizer: {
+      type: String,
+      default: "",
+    },
+    sponsors: [
+      {
+        type: String,
+      },
+    ],
   },
   { timestamps: true }
 );

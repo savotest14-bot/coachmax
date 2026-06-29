@@ -13,6 +13,11 @@ const attendanceSchema = new mongoose.Schema(
       required: true,
     },
 
+    trainingSessionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "TrainingSession",
+    },
+
     records: [
       {
         player: {
@@ -25,6 +30,19 @@ const attendanceSchema = new mongoose.Schema(
           enum: ["PRESENT", "ABSENT", "LATE"],
           default: "ABSENT",
         },
+        remarks: {
+          type: String,
+          default: "",
+        },
+        lateArrival: {
+          type: Boolean,
+          default: false,
+        },
+        attendanceType: {
+          type: String,
+          enum: ["REGULAR", "MAKEUP", "TRIAL"],
+          default: "REGULAR",
+        },
       },
     ],
 
@@ -36,7 +54,10 @@ const attendanceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// 🔥 prevent duplicate attendance per session
+// 🔥 prevent duplicate attendance per session/date
 attendanceSchema.index({ class: 1, sessionDate: 1 }, { unique: true });
+
+// prevent duplicate attendance per training session
+attendanceSchema.index({ trainingSessionId: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model("Attendance", attendanceSchema);
