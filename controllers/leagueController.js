@@ -9,30 +9,211 @@ const User = require("../models/User");
 // ✅ Create League (Admin only)
 exports.createLeague = async (req, res) => {
   try {
-    const { name, season, logo, description, startDate, endDate } = req.body;
+    const {
+      name,
+      season,
+      description,
+      startDate,
+      endDate,
+    } = req.body;
+
     if (!name || !season || !startDate || !endDate) {
-      return res.status(400).json({ success: false, message: "Required fields missing" });
+      return res.status(400).json({
+        success: false,
+        message: "Name, season, start date and end date are required.",
+      });
     }
 
-    const league = await League.create({ name, season, logo, description, startDate, endDate });
-    res.status(201).json({ success: true, message: "League created successfully", data: league });
+    const existingLeague = await League.findOne({
+      name: name.trim(),
+      season: season.trim(),
+    });
+
+    if (existingLeague) {
+      return res.status(409).json({
+        success: false,
+        message: "League already exists for this season.",
+      });
+    }
+
+    const logo = req.file
+      ? `/uploads/leaguelogos/${req.file.filename}`
+      : "";
+
+    const league = await League.create({
+      name: name.trim(),
+      season: season.trim(),
+      logo,
+      description: description || "",
+      startDate,
+      endDate,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "League created successfully",
+      data: league,
+    });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+exports.getAllLeagues = async (req, res) => {
+  try {
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 10;
+    const search = req.query.search?.trim() || "";
+
+    const skip = (page - 1) * limit;
+
+    const filter = {};
+
+    if (search) {
+      filter.$or = [
+        {
+          name: {
+            $regex: search,
+            $options: "i",
+          },
+        },
+        {
+          season: {
+            $regex: search,
+            $options: "i",
+          },
+        },
+      ];
+    }
+
+    const [leagues, total] = await Promise.all([
+      League.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+
+      League.countDocuments(filter),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      message: "Leagues fetched successfully",
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+        hasNextPage: page < Math.ceil(total / limit),
+        hasPreviousPage: page > 1,
+      },
+      data: leagues,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
 
 // ✅ Create Team (Admin only)
 exports.createTeam = async (req, res) => {
   try {
-    const { teamName, logo, coach, assistantCoach, ageGroup } = req.body;
+    const { teamName, coach, assistantCoach, ageGroup } = req.body;
+
     if (!teamName) {
-      return res.status(400).json({ success: false, message: "teamName is required" });
+      return res.status(400).json({
+        success: false,
+        message: "Team name is required",
+      });
     }
 
-    const team = await Team.create({ teamName, logo, coach, assistantCoach, ageGroup });
-    res.status(201).json({ success: true, message: "Team created successfully", data: team });
+    const existingTeam = await Team.findOne({
+      teamName: teamName.trim(),
+    });
+
+    if (existingTeam) {
+      return res.status(409).json({
+        success: false,
+        message: "Team already exists",
+      });
+    }
+
+    const logo = req.file ? `uploads/teamlogos/${req.file.filename}` : "";
+
+    const team = await Team.create({
+      teamName: teamName.trim(),
+      logo,
+      coach: coach || null,
+      assistantCoach: assistantCoach || null,
+      ageGroup: ageGroup || "",
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Team created successfully",
+      data: team,
+    });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+exports.getAllTeams = async (req, res) => {
+  try {
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 10;
+    const search = req.query.search?.trim() || "";
+
+    const skip = (page - 1) * limit;
+
+    const filter = {};
+
+    if (search) {
+      filter.teamName = {
+        $regex: search,
+        $options: "i",
+      };
+    }
+
+    const [teams, total] = await Promise.all([
+      Team.find(filter)
+        .populate("coach", "name email profileImage")
+        .populate("assistantCoach", "name email profileImage")
+        .populate("captain", "name email profileImage")
+        .populate("viceCaptain", "name email profileImage")
+        .populate("players", "name email profileImage")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+
+      Team.countDocuments(filter),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      message: "Teams fetched successfully",
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+        hasNextPage: page < Math.ceil(total / limit),
+        hasPreviousPage: page > 1,
+      },
+      data: teams,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
 
@@ -66,24 +247,102 @@ exports.assignPlayerToTeam = async (req, res) => {
 // ✅ Create Fixture (Admin only)
 exports.createFixture = async (req, res) => {
   try {
-    const { league, kickoffTime, venue, referee, homeTeam, awayTeam } = req.body;
-    if (!league || !kickoffTime || !venue || !homeTeam || !awayTeam) {
-      return res.status(400).json({ success: false, message: "Required fields missing" });
-    }
-
-    const fixture = await Fixture.create({
+    const {
       league,
       kickoffTime,
       venue,
       referee,
       homeTeam,
       awayTeam,
+    } = req.body;
+
+    if (!league || !kickoffTime || !venue || !homeTeam || !awayTeam) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "League, kickoff time, venue, home team and away team are required.",
+      });
+    }
+
+    if (
+      !mongoose.Types.ObjectId.isValid(league) ||
+      !mongoose.Types.ObjectId.isValid(homeTeam) ||
+      !mongoose.Types.ObjectId.isValid(awayTeam)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid League or Team ID.",
+      });
+    }
+
+    if (homeTeam === awayTeam) {
+      return res.status(400).json({
+        success: false,
+        message: "Home team and away team cannot be the same.",
+      });
+    }
+
+    const [leagueExists, homeTeamExists, awayTeamExists] = await Promise.all([
+      League.findById(league),
+      Team.findById(homeTeam),
+      Team.findById(awayTeam),
+    ]);
+
+    if (!leagueExists) {
+      return res.status(404).json({
+        success: false,
+        message: "League not found.",
+      });
+    }
+
+    if (!homeTeamExists || !awayTeamExists) {
+      return res.status(404).json({
+        success: false,
+        message: "One or both teams not found.",
+      });
+    }
+
+    const existingFixture = await Fixture.findOne({
+      league,
+      kickoffTime: new Date(kickoffTime),
+      $or: [
+        { homeTeam, awayTeam },
+        { homeTeam: awayTeam, awayTeam: homeTeam },
+      ],
+    });
+
+    if (existingFixture) {
+      return res.status(409).json({
+        success: false,
+        message: "Fixture already exists.",
+      });
+    }
+
+    const fixture = await Fixture.create({
+      league,
+      kickoffTime: new Date(kickoffTime),
+      venue: venue.trim(),
+      referee: referee || "",
+      homeTeam,
+      awayTeam,
       status: "SCHEDULED",
     });
 
-    res.status(201).json({ success: true, message: "Fixture created successfully", data: fixture });
+    const data = await Fixture.findById(fixture._id)
+      .populate("league", "name season")
+      .populate("homeTeam", "teamName logo")
+      .populate("awayTeam", "teamName logo");
+
+    return res.status(201).json({
+      success: true,
+      message: "Fixture created successfully.",
+      data,
+    });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 };
 
@@ -164,113 +423,244 @@ exports.recordMatchEvent = async (req, res) => {
 exports.completeMatch = async (req, res) => {
   try {
     const { matchId } = req.params;
-    const { homeScore, awayScore, playerRatings, minutesPlayedMap, cleanSheetPlayers } = req.body;
+    const { homeScore, awayScore, players = [] } = req.body;
 
     const match = await Fixture.findById(matchId);
-    if (!match || match.status === "COMPLETED") {
-      return res.status(400).json({ success: false, message: "Match not found or already completed" });
+
+    if (!match) {
+      return res.status(404).json({
+        success: false,
+        message: "Match not found",
+      });
     }
 
-    if (homeScore !== undefined) match.score.homeScore = homeScore;
-    if (awayScore !== undefined) match.score.awayScore = awayScore;
-    if (playerRatings) match.playerRatings = playerRatings;
+    if (match.status === "COMPLETED") {
+      return res.status(400).json({
+        success: false,
+        message: "Match already completed",
+      });
+    }
+
+    match.score.homeScore = Number(homeScore);
+    match.score.awayScore = Number(awayScore);
+
+    match.playerRatings = players.map((player) => ({
+      player: player.player,
+      rating: player.rating || 0,
+    }));
+
     match.status = "COMPLETED";
 
     await match.save();
 
-    const homeId = match.homeTeam.toString();
-    const awayId = match.awayTeam.toString();
-    const finalHomeScore = match.score.homeScore;
-    const finalAwayScore = match.score.awayScore;
+    const homeGoals = Number(homeScore);
+    const awayGoals = Number(awayScore);
 
-    // Determine results
-    let homeWon = 0, homeDrawn = 0, homeLost = 0, homePoints = 0;
-    let awayWon = 0, awayDrawn = 0, awayLost = 0, awayPoints = 0;
+    let homeWon = 0,
+      homeDrawn = 0,
+      homeLost = 0,
+      homePoints = 0;
 
-    if (finalHomeScore > finalAwayScore) {
-      homeWon = 1; homePoints = 3;
+    let awayWon = 0,
+      awayDrawn = 0,
+      awayLost = 0,
+      awayPoints = 0;
+
+    if (homeGoals > awayGoals) {
+      homeWon = 1;
       awayLost = 1;
-    } else if (finalHomeScore < finalAwayScore) {
-      awayWon = 1; awayPoints = 3;
+      homePoints = 3;
+    } else if (awayGoals > homeGoals) {
+      awayWon = 1;
       homeLost = 1;
+      awayPoints = 3;
     } else {
-      homeDrawn = 1; homePoints = 1;
-      awayDrawn = 1; awayPoints = 1;
+      homeDrawn = 1;
+      awayDrawn = 1;
+      homePoints = 1;
+      awayPoints = 1;
     }
 
-    // Upsert Standings home team
     await Standing.findOneAndUpdate(
-      { league: match.league, team: homeId },
+      {
+        league: match.league,
+        team: match.homeTeam,
+      },
       {
         $inc: {
           played: 1,
           won: homeWon,
           drawn: homeDrawn,
           lost: homeLost,
-          goalsFor: finalHomeScore,
-          goalsAgainst: finalAwayScore,
-          goalDifference: finalHomeScore - finalAwayScore,
+          goalsFor: homeGoals,
+          goalsAgainst: awayGoals,
+          goalDifference: homeGoals - awayGoals,
           points: homePoints,
         },
       },
-      { upsert: true }
+      {
+        upsert: true,
+        new: true,
+      }
     );
 
-    // Upsert Standings away team
     await Standing.findOneAndUpdate(
-      { league: match.league, team: awayId },
+      {
+        league: match.league,
+        team: match.awayTeam,
+      },
       {
         $inc: {
           played: 1,
           won: awayWon,
           drawn: awayDrawn,
           lost: awayLost,
-          goalsFor: finalAwayScore,
-          goalsAgainst: finalHomeScore,
-          goalDifference: finalAwayScore - finalHomeScore,
+          goalsFor: awayGoals,
+          goalsAgainst: homeGoals,
+          goalDifference: awayGoals - homeGoals,
           points: awayPoints,
         },
       },
-      { upsert: true }
+      {
+        upsert: true,
+        new: true,
+      }
     );
 
-    // Increment player appearances, ratings and minutes played
-    if (minutesPlayedMap) {
-      for (const [playerId, mins] of Object.entries(minutesPlayedMap)) {
-        await User.findByIdAndUpdate(playerId, { $inc: { appearances: 1, minutesPlayed: mins } });
+    for (const player of players) {
+      const team = await Team.findOne({
+        players: player.player,
+      });
 
-        const teamId = (await Team.findOne({ players: playerId }))?._id;
-        if (teamId) {
-          await PlayerStatistics.findOneAndUpdate(
-            { player: playerId, league: match.league, team: teamId },
-            { $inc: { appearances: 1, minutesPlayed: mins } },
-            { upsert: true }
-          );
-        }
+      await User.findByIdAndUpdate(player.player, {
+        $inc: {
+          "statistics.appearances": 1,
+          "statistics.minutesPlayed": player.minutesPlayed || 0,
+          "statistics.goals": player.goals || 0,
+          "statistics.assists": player.assists || 0,
+          "statistics.cleanSheets": player.cleanSheet ? 1 : 0,
+          "statistics.yellowCards": player.yellowCards || 0,
+          "statistics.redCards": player.redCards || 0,
+        },
+      });
+
+      if (team) {
+        await PlayerStatistics.findOneAndUpdate(
+          {
+            player: player.player,
+            league: match.league,
+            team: team._id,
+          },
+          {
+            $inc: {
+              appearances: 1,
+              minutesPlayed: player.minutesPlayed || 0,
+              goals: player.goals || 0,
+              assists: player.assists || 0,
+              cleanSheets: player.cleanSheet ? 1 : 0,
+              yellowCards: player.yellowCards || 0,
+              redCards: player.redCards || 0,
+            },
+            $set: {
+              rating: player.rating || 0,
+            },
+          },
+          {
+            upsert: true,
+            new: true,
+          }
+        );
       }
     }
 
-    // Update Clean Sheets
-    if (cleanSheetPlayers) {
-      for (const playerId of cleanSheetPlayers) {
-        await User.findByIdAndUpdate(playerId, { $inc: { cleanSheets: 1 } });
-        const teamId = (await Team.findOne({ players: playerId }))?._id;
-        if (teamId) {
-          await PlayerStatistics.findOneAndUpdate(
-            { player: playerId, league: match.league, team: teamId },
-            { $inc: { cleanSheets: 1 } },
-            { upsert: true }
-          );
-        }
-      }
-    }
+    const completedMatch = await Fixture.findById(match._id)
+      .populate("league", "name season")
+      .populate("homeTeam", "teamName logo")
+      .populate("awayTeam", "teamName logo");
 
-    res.json({ success: true, message: "Match completed. League tables updated.", data: match });
+    return res.status(200).json({
+      success: true,
+      message: "Match completed successfully.",
+      data: completedMatch,
+    });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 };
 
+
+exports.updatePlayerStatistics = async (req, res) => {
+  try {
+    const { playerId } = req.params;
+
+    const {
+      appearances,
+      goals,
+      assists,
+      cleanSheets,
+      yellowCards,
+      redCards,
+      minutesPlayed,
+    } = req.body;
+
+    const player = await User.findById(playerId);
+
+    if (!player) {
+      return res.status(404).json({
+        success: false,
+        message: "Player not found.",
+      });
+    }
+
+    const updateData = {};
+
+    if (appearances !== undefined)
+      updateData["statistics.appearances"] = appearances;
+
+    if (goals !== undefined)
+      updateData["statistics.goals"] = goals;
+
+    if (assists !== undefined)
+      updateData["statistics.assists"] = assists;
+
+    if (cleanSheets !== undefined)
+      updateData["statistics.cleanSheets"] = cleanSheets;
+
+    if (yellowCards !== undefined)
+      updateData["statistics.yellowCards"] = yellowCards;
+
+    if (redCards !== undefined)
+      updateData["statistics.redCards"] = redCards;
+
+    if (minutesPlayed !== undefined)
+      updateData["statistics.minutesPlayed"] = minutesPlayed;
+
+    const updatedPlayer = await User.findByIdAndUpdate(
+      playerId,
+      {
+        $set: updateData,
+      },
+      {
+        new: true,
+        runValidators: true,
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Player statistics updated successfully.",
+      data: updatedPlayer.statistics,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
 // ✅ Fetch Standings Table
 exports.getLeagueStandings = async (req, res) => {
   try {

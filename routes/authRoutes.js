@@ -2,6 +2,7 @@ const express = require("express");
 const auth = require("../middleware/authMiddleware");
 const { forgotPassword, resendOTP, verifyOtp, resetPassword, getMyProfile, updateMyProfile } = require("../controllers/authController");
 const { uploads } = require("../utils/upload");
+const { getMyRole } = require("../controllers/adminAuthController");
 
 const router = express.Router();
 
@@ -16,5 +17,7 @@ router.post("/resetPassword", resetPassword);
 router.get("/getMyProfile", auth, getMyProfile);
 
 router.put("/updateMyProfile",auth, uploads.single("profile"), updateMyProfile);
+
+router.get("/my-role", auth, getMyRole);
 
 module.exports = router;

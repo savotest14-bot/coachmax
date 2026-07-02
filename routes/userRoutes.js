@@ -12,6 +12,7 @@ const {
   addChild,
   getDashboard,
   getAllTerms,
+  getPlayerProfile,
 } = require("../controllers/userController");
 
 const {
@@ -45,6 +46,7 @@ const {
   addToCart,
   getCart,
   checkout,
+  getAllCategories,
 } = require("../controllers/storeController");
 
 const {
@@ -129,6 +131,7 @@ router.post("/payments/pay", auth, recordPayment);
 router.get("/payments/history", auth, getPaymentHistory);
 
 // Store
+router.get("/store/categories", auth, getAllCategories);
 router.get("/store/products", getProducts);
 router.get("/store/cart", auth, getCart);
 router.post("/store/cart/add", auth, addToCart);
@@ -146,5 +149,7 @@ router.get("/chat/rooms", auth, getMyRooms);
 // Documents Verification
 router.post("/documents/upload", auth, uploads.single("document"), uploadDocument);
 router.get("/documents/:playerId", auth, getPlayerDocuments);
+
+router.get("/player/profile/:playerId", auth, getPlayerProfile);
 
 module.exports = router;

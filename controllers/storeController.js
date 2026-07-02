@@ -20,57 +20,237 @@ exports.createCategory = async (req, res) => {
   }
 };
 
+exports.getAllCategories = async (req, res) => {
+  try {
+    const { search = "" } = req.query;
+
+    const filter = {};
+
+    if (search) {
+      filter.name = {
+        $regex: search,
+        $options: "i",
+      };
+    }
+
+    const categories = await ProductCategory.find(filter)
+      .sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      count: categories.length,
+      data: categories,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+exports.updateCategory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, description } = req.body;
+
+    const category = await ProductCategory.findById(id);
+
+    if (!category) {
+      return res.status(404).json({
+        success: false,
+        message: "Category not found",
+      });
+    }
+
+    if (name) category.name = name;
+    if (description !== undefined) category.description = description;
+
+    await category.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Category updated successfully",
+      data: category,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+exports.deleteCategory = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const category = await ProductCategory.findById(id);
+
+    if (!category) {
+      return res.status(404).json({
+        success: false,
+        message: "Category not found",
+      });
+    }
+
+    const productExists = await Product.exists({
+      category: id,
+    });
+
+    if (productExists) {
+      return res.status(400).json({
+        success: false,
+        message: "Category cannot be deleted because it is assigned to one or more products.",
+      });
+    }
+
+    await ProductCategory.findByIdAndDelete(id);
+
+    res.status(200).json({
+      success: true,
+      message: "Category deleted successfully",
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
 // ✅ Product Create (Admin only)
 exports.createProduct = async (req, res) => {
   try {
-    const { name, description, category, price, stock, sizes, colors } = req.body;
+    const {
+      name,
+      shortHighlight,
+      description,
+      category,
+      price,
+      stock,
+      sizes,
+      colors,
+      availabilityStatus,
+    } = req.body;
 
-    if (!name || !category || price === undefined || stock === undefined) {
-      return res.status(400).json({ success: false, message: "Required fields missing" });
+    if (!name || !category || !price) {
+      return res.status(400).json({
+        success: false,
+        message: "Product name, category and price are required.",
+      });
     }
 
     let images = [];
-    if (req.files) {
-      images = req.files.map((file) => `uploads/products/${file.filename}`);
-    } else if (req.file) {
-      images = [`uploads/products/${req.file.filename}`];
+
+    if (req.files && req.files.length > 0) {
+      images = req.files.map(
+        (file) => `uploads/products/${file.filename}`
+      );
     }
 
     const product = await Product.create({
       name,
+      shortHighlight,
       description,
-      images,
       category,
-      price,
-      stock,
-      sizes: sizes ? (Array.isArray(sizes) ? sizes : [sizes]) : [],
-      colors: colors ? (Array.isArray(colors) ? colors : [colors]) : [],
+      price: Number(price),
+      stock: Number(stock || 0),
+      availabilityStatus:
+        availabilityStatus || "IN_STOCK",
+      images,
+      sizes: sizes
+        ? Array.isArray(sizes)
+          ? sizes
+          : JSON.parse(sizes)
+        : [],
+      colors: colors
+        ? Array.isArray(colors)
+          ? colors
+          : JSON.parse(colors)
+        : [],
     });
 
-    res.status(201).json({ success: true, message: "Product created successfully", data: product });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    return res.status(201).json({
+      success: true,
+      message: "Product created successfully.",
+      data: product,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
 
 // ✅ Get Products List
 exports.getProducts = async (req, res) => {
   try {
-    const { categoryId, search } = req.query;
-    const query = { status: "ACTIVE" };
+    const {
+      categoryId,
+      search,
+      page = 1,
+      limit = 10,
+    } = req.query;
 
-    if (categoryId) query.category = categoryId;
+    const query = {
+      status: "ACTIVE",
+    };
+
+    if (categoryId) {
+      query.category = categoryId;
+    }
+
     if (search) {
       query.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { description: { $regex: search, $options: "i" } },
+        {
+          name: {
+            $regex: search,
+            $options: "i",
+          },
+        },
+        {
+          description: {
+            $regex: search,
+            $options: "i",
+          },
+        },
       ];
     }
 
-    const products = await Product.find(query).populate("category", "name");
-    res.json({ success: true, data: products });
+    const currentPage = Number(page);
+    const pageLimit = Number(limit);
+    const skip = (currentPage - 1) * pageLimit;
+
+    const [products, total] = await Promise.all([
+      Product.find(query)
+        .populate("category", "name")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(pageLimit),
+      Product.countDocuments(query),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: products,
+      pagination: {
+        page: currentPage,
+        limit: pageLimit,
+        total,
+        hasMore: skip + products.length < total,
+        nextPage:
+          skip + products.length < total
+            ? currentPage + 1
+            : null,
+      },
+    });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 };
 

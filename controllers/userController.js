@@ -20,8 +20,6 @@ const mongoose = require("mongoose");
 exports.register = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
-console.log("body", req.body)
-console.log("files", req.files)
   try {
     let {
       fullName,
@@ -480,88 +478,201 @@ exports.addChild = async (req, res) => {
     const {
       firstName,
       lastName,
+      email,
+      phone,
       dob,
       gender,
       preferredFoot,
       weakFootRating,
       school,
-      medicalConditions,
-      allergies,
-      jerseyNumber,
       category,
       program,
       term,
+      jerseyNumber,
+      club,
+      contactName,
+      relationship,
+      skillLevel,
+      group,
+      additionalComments,
+      medicalConditions,
+      dominantPosition,
+      secondaryPosition,
+      height,
+      weight,
+      bloodGroup,
+      nationality,
+      academy,
+      comments,
+      allergies,
     } = req.body;
 
-    if (!firstName || !lastName || !dob || !preferredFoot || !category || !program || !term) {
-      return res.status(400).json({ success: false, message: "Required fields missing" });
+    // Required fields
+    if (
+      !firstName ||
+      !lastName ||
+      !dob ||
+      !preferredFoot ||
+      !group ||
+      !category ||
+      !program ||
+      !term
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Required fields missing",
+      });
     }
 
-    // Set DOB
-    let parsedDob;
+    // Validate references
+    const [categoryData, programData, termData] = await Promise.all([
+      Category.findById(category),
+      Program.findById(program),
+      Term.findById(term),
+    ]);
+
+    if (!categoryData) {
+      return res.status(404).json({
+        success: false,
+        message: "Category not found",
+      });
+    }
+
+    if (!programData) {
+      return res.status(404).json({
+        success: false,
+        message: "Program not found",
+      });
+    }
+
+    if (!termData) {
+      return res.status(404).json({
+        success: false,
+        message: "Term not found",
+      });
+    }
+
+    // Check jersey number uniqueness
+    if (
+      jerseyNumber !== undefined &&
+      jerseyNumber !== null &&
+      jerseyNumber !== ""
+    ) {
+      const existingJersey = await User.findOne({
+        program,
+        jerseyNumber,
+      });
+
+      if (existingJersey) {
+        return res.status(400).json({
+          success: false,
+          message: `Jersey number ${jerseyNumber} already exists in selected program`,
+        });
+      }
+    }
+
+    // Parse DOB
+    let parsedDob = null;
+
     if (dob) {
       const parts = dob.split("/");
+
       if (parts.length === 3) {
-        parsedDob = new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
+        parsedDob = new Date(
+          `${parts[2]}-${parts[1]}-${parts[0]}`
+        );
       } else {
         parsedDob = new Date(dob);
       }
     }
 
-    // Validate jersey number unique per program
-    if (jerseyNumber !== undefined) {
-      const existingJersey = await User.findOne({ program, jerseyNumber });
-      if (existingJersey) {
-        return res.status(400).json({
-          success: false,
-          message: "Jersey number already taken in this program",
-        });
-      }
-    }
+    // Profile image
+    let profileImage = null;
 
-    let profilePhotoPath = null;
     if (req.file) {
-      profilePhotoPath = `uploads/profile/${req.file.filename}`;
+      profileImage = `uploads/profiles/${req.file.filename}`;
     }
 
-    const playerFullName = `${firstName} ${lastName}`;
-    const newPlayer = await User.create({
+    // Create Player
+    const player = await User.create({
       firstName,
       lastName,
-      fullName: playerFullName,
+      fullName: `${firstName} ${lastName}`,
+
+      email: email || null,
+      phone: phone || null,
+
       dob: parsedDob,
       gender,
+
+      parentId: req.parent._id,
+
+      club,
+      contactName,
+      relationship,
+
+      skillLevel,
+      group,
+
+      additionalComments: additionalComments || "",
+
+      medicalConditions: medicalConditions || "",
+
       preferredFoot,
+
       weakFootRating: weakFootRating || 3,
+
+      dominantPosition,
+      secondaryPosition,
+
+      height,
+      weight,
+
+      bloodGroup,
+      nationality,
+
       school,
-      jerseyNumber,
+      academy,
+      comments,
+
       category,
       program,
       term,
-      parentId: req.parent._id,
-      profile: profilePhotoPath,
-      profileImage: profilePhotoPath,
+
+      jerseyNumber: jerseyNumber || null,
+
+      profileImage,
+      profile: profileImage,
+
+      assignedClasses: [],
+
+      attendancePercentage: 0,
+
       status: "PENDING",
     });
 
-    const allergiesList = Array.isArray(allergies)
-      ? allergies
-      : allergies
-      ? [allergies]
-      : [];
+    // Medical Profile
     await MedicalProfile.create({
-      player: newPlayer._id,
+      player: player._id,
       medicalConditions: medicalConditions || "",
-      allergies: allergiesList,
+      allergies: Array.isArray(allergies)
+        ? allergies
+        : allergies
+        ? [allergies]
+        : [],
     });
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
-      message: "Child profile added successfully. Waiting for admin approval.",
-      data: newPlayer,
+      message:
+        "Child profile added successfully. Waiting for admin approval.",
+      data: player,
     });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
 
@@ -903,5 +1014,116 @@ exports.getAllTerms = async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getPlayerProfile = async (req, res) => {
+  try {
+    const { playerId } = req.params;
+
+    const player = await User.findById(playerId)
+      .populate(
+        "parentId",
+        "fullName email phone address city state postcode country emergencyContact relationship"
+      )
+      .populate("category", "name")
+      .populate("program", "name")
+      .populate("term", "name")
+      .populate("assignedClasses", "title classDate startTime endTime");
+
+    if (!player) {
+      return res.status(404).json({
+        success: false,
+        message: "Player not found",
+      });
+    }
+
+    const medicalProfile = await MedicalProfile.findOne({
+      player: player._id,
+    });
+
+    // Calculate age
+    let age = null;
+
+    if (player.dob) {
+      const today = new Date();
+      age = today.getFullYear() - player.dob.getFullYear();
+
+      const month = today.getMonth() - player.dob.getMonth();
+
+      if (
+        month < 0 ||
+        (month === 0 && today.getDate() < player.dob.getDate())
+      ) {
+        age--;
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        _id: player._id,
+
+        firstName: player.firstName,
+        lastName: player.lastName,
+        fullName: player.fullName,
+
+        profileImage: player.profileImage,
+
+        age,
+        dob: player.dob,
+        joinedDate: player.joinedDate,
+
+        email: player.email,
+        phone: player.phone,
+
+        gender: player.gender,
+
+        club: player.club,
+        academy: player.academy,
+        school: player.school,
+
+        group: player.group,
+        skillLevel: player.skillLevel,
+
+        category: player.category,
+        program: player.program,
+        term: player.term,
+
+        jerseyNumber: player.jerseyNumber,
+
+        preferredFoot: player.preferredFoot,
+        weakFootRating: player.weakFootRating,
+
+        dominantPosition: player.dominantPosition,
+        secondaryPosition: player.secondaryPosition,
+
+        height: player.height,
+        weight: player.weight,
+
+        bloodGroup: player.bloodGroup,
+        nationality: player.nationality,
+
+        attendancePercentage: player.attendancePercentage,
+
+        statistics: player.statistics,
+
+        medicalProfile,
+
+        additionalComments: player.additionalComments,
+        comments: player.comments,
+
+        parent: player.parentId,
+
+        assignedClasses: player.assignedClasses,
+
+        status: player.status,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };

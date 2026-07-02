@@ -60,11 +60,17 @@ const {
   createFixture,
   recordMatchEvent,
   completeMatch,
+  getAllTeams,
+  getAllLeagues,
+  updatePlayerStatistics,
 } = require("../controllers/leagueController");
 
 const {
   createCategory: createStoreCategory,
   createProduct,
+  getAllCategories,
+  updateCategory,
+  deleteCategory,
 } = require("../controllers/storeController");
 
 const {
@@ -163,15 +169,31 @@ router.post("/training", auth, uploads.array("attachments", 5), createTrainingSe
 router.put("/training/:sessionId", auth, uploads.array("attachments", 5), updateTrainingSession);
 
 // ✅ NEW: League Tournament configurations (Admin only)
-router.post("/leagues", auth, isAdmin, createLeague);
-router.post("/teams", auth, isAdmin, createTeam);
+router.post("/leagues", auth, isAdmin, uploads.single("leagueLogo"), createLeague);
+router.get(
+  "/leagues",
+  auth,
+  isAdmin,
+  getAllLeagues
+);
+router.post("/teams", auth, isAdmin, uploads.single("teamLogo"), createTeam);
+router.get("/getAllTeams", auth, isAdmin, getAllTeams)
 router.post("/teams/:teamId/assign", auth, isAdmin, assignPlayerToTeam);
 router.post("/fixtures", auth, isAdmin, createFixture);
 router.post("/fixtures/:matchId/events", auth, recordMatchEvent);
 router.post("/fixtures/:matchId/complete", auth, completeMatch);
+router.put(
+  "/player-statistics/:playerId",
+  auth,
+  isAdmin,
+  updatePlayerStatistics
+);
 
 // ✅ NEW: Store setups (Admin only)
 router.post("/store/categories", auth, isAdmin, createStoreCategory);
+router.get("/store/categories", auth, isAdmin, getAllCategories);
+router.put("/store/categories/:id", auth, isAdmin, updateCategory);
+router.delete("/store/categories/:id", auth, isAdmin, deleteCategory);
 router.post("/store/products", auth, isAdmin, uploads.array("images", 5), createProduct);
 
 // ✅ NEW: News setups (Admin only)

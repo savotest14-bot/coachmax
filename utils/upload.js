@@ -9,6 +9,8 @@ const UPLOAD_PATHS = Object.freeze({
   profiles: "profiles",
   bannerImg: "bannerImg",
   eventImg: "eventImg",
+  teamLogo: "teamlogos",
+  leagueLogo: "leaguelogos",
   document: "documents",
   images: "images",
   attachments: "training",

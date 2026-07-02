@@ -2090,3 +2090,37 @@ exports.updateAdminNote = async (req, res) => {
     data: user,
   });
 };
+
+exports.getMyRole = async (req, res) => {
+  try {
+    // Admin or Coach
+    if (req.admin) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          role: req.admin.role, // SUPER_ADMIN or COACH
+        },
+      });
+    }
+
+    // Parent
+    if (req.parent) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          role: "PARENT",
+        },
+      });
+    }
+
+    return res.status(401).json({
+      success: false,
+      message: "Unauthorized",
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
