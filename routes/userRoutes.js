@@ -13,6 +13,7 @@ const {
   getDashboard,
   getAllTerms,
   getPlayerProfile,
+  getAllPrograms,
 } = require("../controllers/userController");
 
 const {
@@ -47,6 +48,8 @@ const {
   getCart,
   checkout,
   getAllCategories,
+  updateCartQuantity,
+  removeCartItem,
 } = require("../controllers/storeController");
 
 const {
@@ -89,6 +92,7 @@ router.post("/logout", auth, logout);
 // Banners & Catalog
 router.get("/getActiveBanners", auth, getActiveBanners);
 router.get("/getCategories", getCategories);
+router.get("/getAllPrograms", auth, getAllPrograms);
 router.get("/getProgramsByCategory/:categoryId", getProgramsByCategory);
 
 router.get("/getAllTerms", getAllTerms);
@@ -135,6 +139,8 @@ router.get("/store/categories", auth, getAllCategories);
 router.get("/store/products", getProducts);
 router.get("/store/cart", auth, getCart);
 router.post("/store/cart/add", auth, addToCart);
+router.patch("/store/cart/update-quantity", auth, updateCartQuantity);
+router.delete("/store/cart/items/:cartItemId", auth, removeCartItem);
 router.post("/store/checkout", auth, checkout);
 
 // News / Announcements

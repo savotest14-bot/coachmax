@@ -447,6 +447,23 @@ exports.getCategories = async (req, res) => {
   }
 };
 
+
+exports.getAllPrograms = async (req, res) => {
+  try {
+    const programs = await Program.find({ status: "ACTIVE" });
+
+    res.status(200).json({
+      success: true,
+      count: programs.length,
+      data: programs,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
 // ✅ Retrieve Programs by Category
 exports.getProgramsByCategory = async (req, res) => {
   try {

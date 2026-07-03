@@ -63,6 +63,7 @@ const {
   getAllTeams,
   getAllLeagues,
   updatePlayerStatistics,
+  getAvailablePlayers,
 } = require("../controllers/leagueController");
 
 const {
@@ -179,6 +180,7 @@ router.get(
 router.post("/teams", auth, isAdmin, uploads.single("teamLogo"), createTeam);
 router.get("/getAllTeams", auth, isAdmin, getAllTeams)
 router.post("/teams/:teamId/assign", auth, isAdmin, assignPlayerToTeam);
+router.get("/available-players", auth, isAdmin, getAvailablePlayers);
 router.post("/fixtures", auth, isAdmin, createFixture);
 router.post("/fixtures/:matchId/events", auth, recordMatchEvent);
 router.post("/fixtures/:matchId/complete", auth, completeMatch);

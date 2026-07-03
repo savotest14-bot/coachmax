@@ -245,6 +245,41 @@ exports.assignPlayerToTeam = async (req, res) => {
   }
 };
 
+exports.getAvailablePlayers = async (req, res) => {
+  try {
+    // Get all assigned player IDs
+    const teams = await Team.find({}, "players");
+
+    const assignedPlayerIds = teams.flatMap(team =>
+      team.players.map(player => player.toString())
+    );
+
+    // Get players not assigned to any team
+    const availablePlayers = await User.find({
+      isBlocked: false,
+      status: "APPROVED", // Optional: only approved players
+      _id: { $nin: assignedPlayerIds },
+    })
+      .populate("category", "name")
+      .populate("program", "name")
+      .populate("term", "name")
+      .select(
+        "firstName lastName fullName profileImage jerseyNumber dominantPosition secondaryPosition group category program term phone email"
+      );
+
+    return res.status(200).json({
+      success: true,
+      count: availablePlayers.length,
+      data: availablePlayers,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
 // ✅ Create Fixture (Admin only)
 exports.createFixture = async (req, res) => {
   try {
