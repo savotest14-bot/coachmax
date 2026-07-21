@@ -1,0 +1,180 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "CoachMax Player Enrollment API Specification",
+    "description": "Production-ready API documentation for Player Enrollment Workflow (No Approval System).",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:5000/api",
+      "description": "Local Development Server"
+    }
+  ],
+  "paths": {
+    "/user/register": {
+      "post": {
+        "summary": "Parent Registration & Player Onboarding",
+        "description": "Registers parent account and creates initial player(s) with term=null. Automatically creates PENDING RegistrationRequest for each player and triggers admin notification.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["fullName", "email", "phone", "password", "emergencyContact", "relationship", "players"],
+                "properties": {
+                  "fullName": { "type": "string", "example": "John Smith" },
+                  "email": { "type": "string", "example": "john@example.com" },
+                  "phone": { "type": "string", "example": "+1234567890" },
+                  "password": { "type": "string", "example": "Password123!" },
+                  "emergencyContact": { "type": "string", "example": "+1987654321" },
+                  "relationship": { "type": "string", "example": "FATHER" },
+                  "players": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["firstName", "lastName", "dob", "category", "programs"],
+                      "properties": {
+                        "firstName": { "type": "string", "example": "Alex" },
+                        "lastName": { "type": "string", "example": "Smith" },
+                        "dob": { "type": "string", "example": "2015-05-15" },
+                        "gender": { "type": "string", "example": "MALE" },
+                        "school": { "type": "string", "example": "Oakridge High" },
+                        "nationality": { "type": "string", "example": "American" },
+                        "category": { "type": "string", "example": "607d1f77bcf86cd799439011" },
+                        "programs": {
+                          "type": "array",
+                          "items": { "type": "string" },
+                          "example": ["607d1f77bcf86cd799439022"]
+                        },
+                        "preferredTerm": { "type": "string", "example": "607d1f77bcf86cd799439033" },
+                        "preferredClasses": {
+                          "type": "array",
+                          "items": { "type": "string" },
+                          "example": ["607d1f77bcf86cd799439044"]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Parent and players registered successfully with pending registration requests created." },
+          "400": { "description": "Validation Error or missing required fields." }
+        }
+      }
+    },
+    "/user/request-program": {
+      "post": {
+        "summary": "Request Additional Program for Existing Player",
+        "description": "Creates a PENDING RegistrationRequest (requestType: ADD_PROGRAM) for an existing player without modifying player allocation directly.",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["playerId", "category", "programs"],
+                "properties": {
+                  "playerId": { "type": "string", "example": "607d1f77bcf86cd799439000" },
+                  "category": { "type": "string", "example": "607d1f77bcf86cd799439011" },
+                  "programs": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "example": ["607d1f77bcf86cd799439022"]
+                  },
+                  "preferredTerm": { "type": "string", "example": "607d1f77bcf86cd799439033" },
+                  "preferredClasses": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "example": ["607d1f77bcf86cd799439044"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Program addition request submitted successfully." },
+          "400": { "description": "Bad request / Validation error." },
+          "403": { "description": "Forbidden - Player does not belong to parent." }
+        }
+      }
+    },
+    "/admin/registration-requests": {
+      "get": {
+        "summary": "List & Filter Registration Requests (Admin)",
+        "description": "Fetches paginated registration requests filtered by status, requestType, category, program, searchParent, or searchPlayer.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string", "enum": ["PENDING", "COMPLETED"] } },
+          { "name": "requestType", "in": "query", "schema": { "type": "string", "enum": ["NEW_PLAYER", "ADD_PROGRAM"] } },
+          { "name": "category", "in": "query", "schema": { "type": "string" } },
+          { "name": "program", "in": "query", "schema": { "type": "string" } },
+          { "name": "searchParent", "in": "query", "schema": { "type": "string" } },
+          { "name": "searchPlayer", "in": "query", "schema": { "type": "string" } },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 10 } }
+        ],
+        "responses": {
+          "200": { "description": "Registration requests list returned with populates." }
+        }
+      }
+    },
+    "/admin/players/unallocated": {
+      "get": {
+        "summary": "Get Unallocated Players by Category and Program (Admin)",
+        "description": "Returns players that have a PENDING RegistrationRequest for the specified Category and Program.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "category", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "program", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Unallocated players returned successfully." },
+          "400": { "description": "Category and program parameters missing." }
+        }
+      }
+    },
+    "/admin/player/{playerId}/assign-classes": {
+      "patch": {
+        "summary": "Assign Classes to Player (Admin Allocation)",
+        "description": "Assigns classes to player, automatically derives Term from classes, updates paymentStatus, sets RegistrationRequest status to COMPLETED, and notifies parent.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "playerId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["registrationRequestId", "classIds", "paymentStatus"],
+                "properties": {
+                  "registrationRequestId": { "type": "string", "example": "607d1f77bcf86cd799439088" },
+                  "classIds": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "example": ["607d1f77bcf86cd799439044", "607d1f77bcf86cd799439055"]
+                  },
+                  "paymentStatus": { "type": "string", "enum": ["TRIAL", "UNPAID", "PAID", "OVER_DUE"], "example": "PAID" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Player allocated to classes and enrolled successfully." },
+          "400": { "description": "Validation failed (e.g. classes belong to different terms or categories)." },
+          "404": { "description": "Player or classes or registration request not found." }
+        }
+      }
+    }
+  }
+}

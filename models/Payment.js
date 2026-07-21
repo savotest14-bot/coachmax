@@ -12,26 +12,42 @@ const paymentSchema = new mongoose.Schema(
       ref: "Parent",
       required: true,
     },
-    amountPaid: {
+    amount: {
       type: Number,
       required: true,
     },
     paymentMethod: {
       type: String,
+      enum: ["ONLINE", "COD"],
       required: true,
     },
     transactionId: {
       type: String,
       default: "",
     },
-    paymentDate: {
-      type: Date,
-      default: Date.now,
+    paymentScreenshot: {
+      type: String,
+      default: "",
+    },
+    remarks: {
+      type: String,
+      default: "",
     },
     status: {
       type: String,
-      enum: ["PENDING", "COMPLETED", "FAILED"],
+      enum: ["PENDING", "APPROVED", "REJECTED"],
       default: "PENDING",
+    },
+    approvedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Admin",
+    },
+    approvedAt: {
+      type: Date,
+    },
+    rejectionReason: {
+      type: String,
+      default: "",
     },
   },
   { timestamps: true }

@@ -2,7 +2,7 @@ const Admin = require("../models/Admin");
 const Parent = require("../models/Parent");
 const bcrypt = require("bcryptjs");
 const generateToken = require("../utils/generateToken");
-const { getStatusEmailTemplate, forgotEmail } = require("../utils/emailTemplates");
+const { forgotEmail } = require("../utils/emailTemplates");
 const sendEmail = require("../utils/sendEmail");
 const generateOTP = require("../utils/generateOTP");
 const fs = require("fs");
@@ -192,7 +192,7 @@ exports.getMyProfile = async (req, res) => {
     if (req.role !== "ADMIN") {
       players = await User.find({ parentId: data._id })
         .populate("category", "name")
-        .populate("program", "name")
+        .populate("programs", "name")
         .populate("term", "name")
         .select("-__v");
     }

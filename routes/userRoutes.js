@@ -10,10 +10,12 @@ const {
   getMyAttendanceByClass,
   getChildren,
   addChild,
+  requestAddProgram,
   getDashboard,
   getAllTerms,
   getPlayerProfile,
   getAllPrograms,
+  getClasses,
 } = require("../controllers/userController");
 
 const {
@@ -37,10 +39,20 @@ const {
 } = require("../controllers/leagueController");
 
 const {
-  getInvoices,
-  recordPayment,
-  getPaymentHistory,
+  getParentInvoices,
+  getParentInvoiceById,
+} = require("../controllers/invoiceController");
+
+const {
+  payCOD,
+  payOnline,
+  resubmitPayment,
+  getParentPayments,
 } = require("../controllers/paymentController");
+
+const {
+  getBankDetails,
+} = require("../controllers/bankDetailsController");
 
 const {
   getProducts,
@@ -50,6 +62,7 @@ const {
   getAllCategories,
   updateCartQuantity,
   removeCartItem,
+  getMyOrders,
 } = require("../controllers/storeController");
 
 const {
@@ -100,6 +113,8 @@ router.get("/getAllTerms", getAllTerms);
 // Parent Child Management
 router.get("/getChildren", auth, getChildren);
 router.post("/addChild", auth, uploads.single("profile"), addChild);
+router.post("/request-program", auth, requestAddProgram);
+router.post("/requestAddProgram", auth, requestAddProgram);
 router.get("/getDashboard", auth, getDashboard);
 
 // Classes & Attendance
@@ -129,10 +144,26 @@ router.get("/leagues/:leagueId/standings", getLeagueStandings);
 router.get("/leagues/:leagueId/leaderboard", getLeagueLeaderboard);
 router.get("/leagues/:leagueId/fixtures", getFixtures);
 
-// Payments & Invoicing
-router.get("/invoices", auth, getInvoices);
-router.post("/payments/pay", auth, recordPayment);
-router.get("/payments/history", auth, getPaymentHistory);
+// Bank Details
+router.get("/bank-details", getBankDetails);
+
+// Payments & Invoicing (Parent)
+router.get("/invoices", auth, getParentInvoices);
+router.get("/parent/invoices", auth, getParentInvoices);
+router.get("/invoices/:id", auth, getParentInvoiceById);
+router.get("/parent/invoices/:id", auth, getParentInvoiceById);
+
+router.post("/invoices/:invoiceId/pay-cod", auth, payCOD);
+router.post("/parent/invoices/:invoiceId/pay-cod", auth, payCOD);
+
+router.post("/invoices/:invoiceId/pay-online", auth, uploads.single("paymentScreenshot"), payOnline);
+router.post("/parent/invoices/:invoiceId/pay-online", auth, uploads.single("paymentScreenshot"), payOnline);
+
+router.post("/payments/:paymentId/resubmit", auth, uploads.single("paymentScreenshot"), resubmitPayment);
+router.post("/parent/payments/:paymentId/resubmit", auth, uploads.single("paymentScreenshot"), resubmitPayment);
+
+router.get("/payments/history", auth, getParentPayments);
+router.get("/parent/payments", auth, getParentPayments);
 
 // Store
 router.get("/store/categories", auth, getAllCategories);
@@ -142,6 +173,8 @@ router.post("/store/cart/add", auth, addToCart);
 router.patch("/store/cart/update-quantity", auth, updateCartQuantity);
 router.delete("/store/cart/items/:cartItemId", auth, removeCartItem);
 router.post("/store/checkout", auth, checkout);
+router.get("/store/orders", auth, getMyOrders);
+router.get("/store/my-orders", auth, getMyOrders);
 
 // News / Announcements
 router.get("/news", getAllNews);
@@ -157,5 +190,7 @@ router.post("/documents/upload", auth, uploads.single("document"), uploadDocumen
 router.get("/documents/:playerId", auth, getPlayerDocuments);
 
 router.get("/player/profile/:playerId", auth, getPlayerProfile);
+
+router.get("/classes", getClasses);
 
 module.exports = router;

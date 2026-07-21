@@ -15,6 +15,9 @@ const UPLOAD_PATHS = Object.freeze({
   images: "images",
   attachments: "training",
   file: "chat",
+  paymentScreenshot: "payment-screenshots",
+  qrCodeImage: "bank-details",
+  receipt: "payment-screenshots",
 });
 
 const ensureDir = (dir) => {

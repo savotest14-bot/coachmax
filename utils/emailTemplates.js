@@ -12,16 +12,12 @@ exports.welcomeEmail = (name) => {
 
         <p>Thank you for registering with <b>CoachMax</b>.</p>
 
-        <p>Your account is currently 
-          <span style="color:#f39c12; font-weight:bold;">Pending Approval</span>.
-        </p>
-
-        <p>Our team will review your profile and notify you once approved.</p>
+        <p>Your account has been created successfully. You can now log in and start using CoachMax.</p>
 
         <div style="margin:30px 0; text-align:center;">
-          <span style="background:#f1f3f5; padding:10px 20px; border-radius:20px; font-size:14px;">
-            ⏳ Awaiting Approval
-          </span>
+          <a href="#" style="background:#0d6efd; color:#fff; padding:10px 20px; text-decoration:none; border-radius:5px;">
+            Login Now
+          </a>
         </div>
 
         <p>If you have any questions, feel free to contact us.</p>
@@ -70,14 +66,6 @@ exports.newUserAdminEmail = (user) => {
             <td>${user.skillLevel} ⭐</td>
           </tr>
           <tr>
-            <td style="padding:8px; font-weight:bold;">Preferred Foot:</td>
-            <td>${user.preferredFoot}</td>
-          </tr>
-          <tr>
-            <td style="padding:8px; font-weight:bold;">Program:</td>
-            <td>${user.programType}</td>
-          </tr>
-          <tr>
             <td style="padding:8px; font-weight:bold;">Club:</td>
             <td>${user.club || "N/A"}</td>
           </tr>
@@ -85,11 +73,9 @@ exports.newUserAdminEmail = (user) => {
 
         <div style="margin:30px 0; text-align:center;">
           <a href="#" style="background:#0d6efd; color:#fff; padding:12px 25px; text-decoration:none; border-radius:5px;">
-            Review in Admin Panel
+            View in Admin Panel
           </a>
         </div>
-
-        <p>Please review and approve/reject this player.</p>
 
         <br/>
 
@@ -105,52 +91,7 @@ exports.newUserAdminEmail = (user) => {
   `;
 };
 
-exports.getStatusEmailTemplate = (user, status, reason) => {
-  const isApproved = status === "APPROVED";
 
-  return `
-  <div style="font-family: Arial; max-width: 600px; margin: auto; border: 1px solid #eee; padding: 20px; border-radius: 10px;">
-    
-    <h2 style="color: ${isApproved ? "#28a745" : "#dc3545"};">
-      ${isApproved ? "🎉 Congratulations!" : "⚠️ Application Update"}
-    </h2>
-
-    <p>Hello <b>${user.fullName}</b>,</p>
-
-    <p>
-      ${
-        isApproved
-          ? "Your account has been <b>approved</b>. You can now login and start using CoachMax."
-          : "We regret to inform you that your application has been <b>rejected</b>."
-      }
-    </p>
-
-    ${
-      !isApproved
-        ? `<p><b>Reason:</b> ${reason}</p>`
-        : ""
-    }
-
-    <div style="margin-top: 20px;">
-      ${
-        isApproved
-          ? `<a href="#" style="background: #28a745; color: #fff; padding: 10px 20px; text-decoration: none; border-radius: 5px;">
-              Login Now
-            </a>`
-          : ""
-      }
-    </div>
-
-    <hr style="margin: 20px 0;" />
-
-    <p style="font-size: 12px; color: #888;">
-      CoachMax Team<br/>
-      If you have questions, contact support.
-    </p>
-
-  </div>
-  `;
-};
 
 exports.forgotEmail = (user, otp) => { 
   return `

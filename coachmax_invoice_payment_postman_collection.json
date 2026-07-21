@@ -1,0 +1,487 @@
+{
+  "info": {
+    "_postman_id": "b3e945c1-92fa-4d92-9118-091932fa9012",
+    "name": "CoachMax - Redesigned Invoice & Payment API Collection",
+    "description": "Complete Postman Collection for the redesigned Manual Payment, Invoice, Bank Details, and Checkout module with RBAC support.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:5000",
+      "type": "string"
+    },
+    {
+      "key": "admin_token",
+      "value": "YOUR_ADMIN_JWT_TOKEN",
+      "type": "string"
+    },
+    {
+      "key": "parent_token",
+      "value": "YOUR_PARENT_JWT_TOKEN",
+      "type": "string"
+    },
+    {
+      "key": "parent_id",
+      "value": "607d1f77bcf86cd799439001",
+      "type": "string"
+    },
+    {
+      "key": "player_id",
+      "value": "607d1f77bcf86cd799439002",
+      "type": "string"
+    },
+    {
+      "key": "invoice_id",
+      "value": "607d1f77bcf86cd799439003",
+      "type": "string"
+    },
+    {
+      "key": "payment_id",
+      "value": "607d1f77bcf86cd799439004",
+      "type": "string"
+    },
+    {
+      "key": "bank_details_id",
+      "value": "607d1f77bcf86cd799439005",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Bank Details Management",
+      "item": [
+        {
+          "name": "1. Create Bank Details (Admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{admin_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "accountName", "value": "CoachMax Sports Academy Ltd", "type": "text" },
+                { "key": "bankName", "value": "Standard Chartered Bank", "type": "text" },
+                { "key": "accountNumber", "value": "998877665544", "type": "text" },
+                { "key": "iban", "value": "GB82WEST12345698765432", "type": "text" },
+                { "key": "swiftCode", "value": "SCBLGB2LXXX", "type": "text" },
+                { "key": "branch", "value": "Central London Branch", "type": "text" },
+                { "key": "instructions", "value": "Please add your Invoice Number as reference in transaction notes.", "type": "text" },
+                { "key": "isActive", "value": "true", "type": "text" },
+                { "key": "qrCodeImage", "type": "file", "src": "sample_qr.png" }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/admin/bank-details",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "bank-details"]
+            },
+            "description": "Admin creates active bank account details for parent payments."
+          },
+          "response": [
+            {
+              "name": "Success Response",
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"success\": true,\n  \"message\": \"Bank details created successfully\",\n  \"data\": {\n    \"_id\": \"{{bank_details_id}}\",\n    \"accountName\": \"CoachMax Sports Academy Ltd\",\n    \"bankName\": \"Standard Chartered Bank\",\n    \"accountNumber\": \"998877665544\",\n    \"iban\": \"GB82WEST12345698765432\",\n    \"swiftCode\": \"SCBLGB2LXXX\",\n    \"branch\": \"Central London Branch\",\n    \"qrCodeImage\": \"uploads/bank-details/sample_qr.png\",\n    \"instructions\": \"Please add your Invoice Number as reference in transaction notes.\",\n    \"isActive\": true\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "2. Update Bank Details (Admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{admin_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "accountName", "value": "CoachMax Global Sports LLC", "type": "text" },
+                { "key": "instructions", "value": "Updated transfer instructions: Use Invoice Number as reference.", "type": "text" }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/admin/bank-details/{{bank_details_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "bank-details", "{{bank_details_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "3. Get Active Bank Details (Parent & Public)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/bank-details",
+              "host": ["{{base_url}}"],
+              "path": ["api", "bank-details"]
+            }
+          },
+          "response": [
+            {
+              "name": "Success Response",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"_id\": \"{{bank_details_id}}\",\n    \"accountName\": \"CoachMax Sports Academy Ltd\",\n    \"bankName\": \"Standard Chartered Bank\",\n    \"accountNumber\": \"998877665544\",\n    \"iban\": \"GB82WEST12345698765432\",\n    \"swiftCode\": \"SCBLGB2LXXX\",\n    \"qrCodeImage\": \"uploads/bank-details/sample_qr.png\",\n    \"instructions\": \"Please add your Invoice Number as reference in transaction notes.\",\n    \"isActive\": true\n  }\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Admin Invoice Operations",
+      "item": [
+        {
+          "name": "1. Create Invoice (Admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{admin_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"parentId\": \"{{parent_id}}\",\n  \"players\": [\"{{player_id}}\"],\n  \"items\": [\n    {\n      \"title\": \"Academy Term 1 Coaching Fee\",\n      \"description\": \"12 Coaching Sessions\",\n      \"amount\": 300\n    },\n    {\n      \"title\": \"Official Training Kit\",\n      \"description\": \"Jersey + Shorts\",\n      \"amount\": 50\n    }\n  ],\n  \"discount\": 20,\n  \"dueDate\": \"2026-08-15\",\n  \"type\": \"ACADEMY_FEE\",\n  \"description\": \"Term 1 Training and Kit Invoice\",\n  \"notes\": \"Payment due within 14 days.\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/admin/invoices",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "invoices"]
+            }
+          },
+          "response": [
+            {
+              "name": "Success Response",
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"success\": true,\n  \"message\": \"Invoice created successfully\",\n  \"data\": {\n    \"_id\": \"{{invoice_id}}\",\n    \"invoiceNumber\": \"INV-2026-000001\",\n    \"parent\": \"{{parent_id}}\",\n    \"players\": [\"{{player_id}}\"],\n    \"items\": [\n      { \"title\": \"Academy Term 1 Coaching Fee\", \"amount\": 300 },\n      { \"title\": \"Official Training Kit\", \"amount\": 50 }\n    ],\n    \"subtotal\": 350,\n    \"discount\": 20,\n    \"totalAmount\": 330,\n    \"dueDate\": \"2026-08-15T00:00:00.000Z\",\n    \"paymentStatus\": \"UNPAID\",\n    \"status\": \"ACTIVE\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "2. Get Admin Invoices (Search & Filter)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{admin_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/admin/invoices?search=INV-2026&paymentStatus=UNPAID&page=1&limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "invoices"],
+              "query": [
+                { "key": "search", "value": "INV-2026" },
+                { "key": "paymentStatus", "value": "UNPAID" },
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "10" }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "3. Get Invoice Details (Admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{admin_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/admin/invoices/{{invoice_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "invoices", "{{invoice_id}}"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Parent Invoices & Payment Workflow",
+      "item": [
+        {
+          "name": "1. Get My Invoices (Parent)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{parent_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/parent/invoices",
+              "host": ["{{base_url}}"],
+              "path": ["api", "parent", "invoices"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "2. Select COD Payment Method (Parent)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{parent_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"remarks\": \"Will pay cash at training ground reception.\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/parent/invoices/{{invoice_id}}/pay-cod",
+              "host": ["{{base_url}}"],
+              "path": ["api", "parent", "invoices", "{{invoice_id}}", "pay-cod"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "3. Submit Online Payment Screenshot (Parent)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{parent_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "transactionId", "value": "TXN9988776655", "type": "text" },
+                { "key": "remarks", "value": "Transferred via bank mobile app.", "type": "text" },
+                { "key": "paymentScreenshot", "type": "file", "src": "receipt_screenshot.png" }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/parent/invoices/{{invoice_id}}/pay-online",
+              "host": ["{{base_url}}"],
+              "path": ["api", "parent", "invoices", "{{invoice_id}}", "pay-online"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "4. Resubmit Rejected Payment (Parent)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{parent_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "transactionId", "value": "TXN9988776655_UPDATED", "type": "text" },
+                { "key": "remarks", "value": "Re-uploaded high quality screenshot.", "type": "text" },
+                { "key": "paymentScreenshot", "type": "file", "src": "new_receipt.png" }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/parent/payments/{{payment_id}}/resubmit",
+              "host": ["{{base_url}}"],
+              "path": ["api", "parent", "payments", "{{payment_id}}", "resubmit"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Admin Payment Approval & Dashboard",
+      "item": [
+        {
+          "name": "1. List Payments (Admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{admin_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/admin/payments?status=PENDING",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "payments"],
+              "query": [{ "key": "status", "value": "PENDING" }]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "2. Approve Payment (Admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{admin_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/admin/payments/{{payment_id}}/approve",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "payments", "{{payment_id}}", "approve"]
+            }
+          },
+          "response": [
+            {
+              "name": "Success Response",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"success\": true,\n  \"message\": \"Payment approved successfully. Invoice and player status updated.\",\n  \"data\": {\n    \"_id\": \"{{payment_id}}\",\n    \"status\": \"APPROVED\",\n    \"approvedAt\": \"2026-07-21T12:00:00.000Z\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "3. Reject Payment (Admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{admin_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Transaction reference mismatch or unreadable receipt.\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/admin/payments/{{payment_id}}/reject",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "payments", "{{payment_id}}", "reject"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "4. Get Dashboard Stats (Admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{admin_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/admin/dashboard/payments",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "dashboard", "payments"]
+            }
+          },
+          "response": [
+            {
+              "name": "Success Response",
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"totalInvoices\": 15,\n    \"pendingInvoices\": 4,\n    \"paidInvoices\": 11,\n    \"pendingPayments\": 2,\n    \"rejectedPayments\": 1,\n    \"todaysCollections\": 660,\n    \"monthlyCollections\": 4500,\n    \"storeSales\": 1200,\n    \"outstandingAmount\": 1320\n  }\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

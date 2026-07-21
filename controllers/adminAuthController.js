@@ -2,7 +2,6 @@ const Admin = require("../models/Admin");
 const bcrypt = require("bcryptjs");
 const generateToken = require("../utils/generateToken");
 const User = require("../models/User");
-const { getStatusEmailTemplate } = require("../utils/emailTemplates");
 const sendEmail = require("../utils/sendEmail");
 const Banner = require("../models/Banner");
 const fs = require("fs");
@@ -88,17 +87,20 @@ exports.logout = async (req, res) => {
 exports.getUsers = async (req, res) => {
   try {
     let {
-      status,
+      paymentStatus,
+      category,
+      program,
+      unallocated,
       page = 1,
       limit = 10,
       search = "",
     } = req.query;
 
-    const validStatus = ["PENDING", "APPROVED", "REJECTED"];
+    const validPaymentStatus = ["TRIAL", "UNPAID", "PAID", "OVER_DUE"];
 
-    if (status && !validStatus.includes(status)) {
+    if (paymentStatus && !validPaymentStatus.includes(paymentStatus)) {
       return res.status(400).json({
-        message: "Invalid status",
+        message: "Invalid paymentStatus",
       });
     }
 
@@ -109,28 +111,41 @@ exports.getUsers = async (req, res) => {
       parentId: { $exists: true },
     };
 
-    if (status) query.status = status;
+    if (paymentStatus) query.paymentStatus = paymentStatus;
+    if (category) query.category = category;
+    if (program) query.programs = program;
+
+    if (unallocated === "true") {
+      query.$or = [
+        { assignedClasses: { $exists: false } },
+        { assignedClasses: { $size: 0 } },
+      ];
+    }
 
     if (search) {
-      query.$or = [
+      const searchCriteria = [
         { fullName: { $regex: search, $options: "i" } },
         { firstName: { $regex: search, $options: "i" } },
         { lastName: { $regex: search, $options: "i" } },
       ];
+
+      if (query.$or) {
+        query.$and = [
+          { $or: query.$or },
+          { $or: searchCriteria },
+        ];
+        delete query.$or;
+      } else {
+        query.$or = searchCriteria;
+      }
     }
 
     const total = await User.countDocuments(query);
 
     const users = await User.find(query)
-      .populate("approvedBy", "name email")
-      .populate("rejectedBy", "name email")
       .populate("parentId", "fullName email phone address city state postcode country emergencyContact relationship")
-
-      // ✅ NEW: populate category & program
       .populate("category", "name")
-      .populate("program", "name")
-
-      // ✅ assigned classes
+      .populate("programs", "name")
       .populate({
         path: "assignedClasses",
         populate: [
@@ -157,24 +172,61 @@ exports.getUsers = async (req, res) => {
   }
 };
 
-exports.updateUserStatus = async (req, res) => {
+exports.updatePaymentStatus = async (req, res) => {
   try {
-    const { userId } = req.params;
-    const { status, reason } = req.body;
+    const userId = req.params.userId || req.params.playerId || req.params.id || req.body.userId || req.body.playerId;
+    const { paymentStatus } = req.body;
 
-    // ✅ Validate status
-    const validStatus = ["APPROVED", "REJECTED"];
-
-    if (!validStatus.includes(status)) {
+    if (!userId) {
       return res.status(400).json({
-        message: "Invalid status",
+        success: false,
+        message: "userId or playerId is required",
       });
     }
 
-    // ❌ Reject must have reason
-    if (status === "REJECTED" && !reason) {
+    const validStatus = ["TRIAL", "UNPAID", "PAID", "OVER_DUE"];
+
+    if (!paymentStatus || !validStatus.includes(paymentStatus)) {
       return res.status(400).json({
-        message: "Rejection reason is required",
+        success: false,
+        message: `Invalid or missing paymentStatus. Must be one of: ${validStatus.join(", ")}`,
+      });
+    }
+
+    const user = await User.findById(userId);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "Player not found",
+      });
+    }
+
+    user.paymentStatus = paymentStatus;
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: `Payment status updated to ${paymentStatus} successfully`,
+      data: user,
+    });
+
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+exports.updatePlayerRating = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { rating } = req.body;
+
+    if (rating === undefined || rating < 1 || rating > 5) {
+      return res.status(400).json({
+        message: "Rating must be between 1 and 5",
       });
     }
 
@@ -184,152 +236,16 @@ exports.updateUserStatus = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    user.status = status;
-
-    if (status === "APPROVED") {
-      user.rejectReason = null;
-      user.approvedBy = req.admin._id;
-      user.rejectedBy = null;
-      user.approvedAt = new Date();
-      user.rejectedAt = null;
-    } else {
-      user.rejectReason = reason;
-      user.rejectedBy = req.admin._id;
-      user.approvedBy = null;
-      user.rejectedAt = new Date();
-      user.approvedAt = null;
-    }
-
+    user.rating = rating;
     await user.save();
 
-    // 📧 Send Email
-    if (user.email) {
-      const subject =
-        status === "APPROVED"
-          ? "🎉 Your CoachMax Account is Approved"
-          : "❌ Your CoachMax Application Status";
-
-      const html = getStatusEmailTemplate(user, status, reason);
-
-      sendEmail(user.email, subject, html);
-    }
-
     res.json({
-      message: `User ${status.toLowerCase()} successfully`,
+      message: "Player rating updated successfully",
+      data: { rating: user.rating },
     });
 
   } catch (err) {
     res.status(500).json({ message: err.message });
-  }
-};
-
-
-
-exports.updateParentStatus = async (req, res) => {
-  try {
-    const { parentId } = req.params;
-    const { status, reason } = req.body;
-
-    const validStatus = ["APPROVED", "REJECTED"];
-
-    if (!validStatus.includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid status",
-      });
-    }
-
-    if (status === "REJECTED" && !reason) {
-      return res.status(400).json({
-        success: false,
-        message: "Rejection reason is required",
-      });
-    }
-
-    const parent = await Parent.findById(parentId);
-
-    if (!parent) {
-      return res.status(404).json({
-        success: false,
-        message: "Parent not found",
-      });
-    }
-
-    parent.status = status;
-
-    if (status === "APPROVED") {
-      parent.rejectReason = null;
-      parent.approvedBy = req.admin._id;
-      parent.rejectedBy = null;
-      parent.approvedAt = new Date();
-      parent.rejectedAt = null;
-
-      // ✅ Approve all existing players of this parent
-      await User.updateMany(
-        {
-          parentId: parent._id,
-        },
-        {
-          $set: {
-            status: "APPROVED",
-            rejectReason: null,
-            approvedBy: req.admin._id,
-            rejectedBy: null,
-            approvedAt: new Date(),
-            rejectedAt: null,
-          },
-        }
-      );
-    } else {
-      parent.rejectReason = reason;
-      parent.rejectedBy = req.admin._id;
-      parent.approvedBy = null;
-      parent.rejectedAt = new Date();
-      parent.approvedAt = null;
-
-      // ✅ Reject all pending players of this parent
-      await User.updateMany(
-        {
-          parentId: parent._id,
-          status: "PENDING",
-        },
-        {
-          $set: {
-            status: "REJECTED",
-            rejectReason: reason,
-            rejectedBy: req.admin._id,
-            approvedBy: null,
-            rejectedAt: new Date(),
-            approvedAt: null,
-          },
-        }
-      );
-    }
-
-    await parent.save();
-
-    // Send Email
-    if (parent.email) {
-      const subject =
-        status === "APPROVED"
-          ? "🎉 Your CoachMax Parent Account is Approved"
-          : "❌ Your CoachMax Parent Application Status";
-
-      const html = getStatusEmailTemplate(parent, status, reason);
-
-      await sendEmail(parent.email, subject, html);
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: `Parent ${status.toLowerCase()} successfully`,
-    });
-
-  } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: err.message,
-    });
   }
 };
 
@@ -340,21 +256,18 @@ exports.assignClassToUser = async (req, res) => {
   try {
     const { userId } = req.params;
     const { classId } = req.body;
-console.log("Assigning class to user:", userId);
-console.log("Class ID:", classId);
+    console.log("Assigning class to user:", userId);
+    console.log("Class ID:", classId);
     const user = await User.findById(userId).session(session);
     const classData = await Class.findById(classId).session(session);
 
     if (!user) throw new Error("User not found");
     if (!classData) throw new Error("Class not found");
 
-    if (user.status !== "APPROVED") {
-      throw new Error("User must be approved");
-    }
-
     // ✅ Validate program & category
+    const userProgramIds = (user.programs || []).map(p => p.toString());
     if (
-      user.program.toString() !== classData.program.toString() ||
+      !userProgramIds.includes(classData.program.toString()) ||
       user.category.toString() !== classData.category.toString()
     ) {
       throw new Error("User not eligible for this class");
@@ -392,6 +305,10 @@ console.log("Class ID:", classId);
       user.assignedClasses.push(classId);
     }
 
+    if (user.removedClasses) {
+      user.removedClasses = user.removedClasses.filter(id => id.toString() !== classId.toString());
+    }
+
     if (!user.term) {
       user.term = classData.term;
     }
@@ -408,6 +325,67 @@ console.log("Class ID:", classId);
     session.endSession();
 
     res.status(400).json({ message: err.message });
+  }
+};
+
+exports.removeClassFromUser = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const userId = req.params.userId || req.params.playerId || req.body.userId || req.body.playerId;
+    const classId = req.params.classId || req.body.classId;
+
+    if (!userId || !classId) {
+      throw new Error("Both userId/playerId and classId are required");
+    }
+
+    const user = await User.findById(userId).session(session);
+    const classData = await Class.findById(classId).session(session);
+
+    if (!user) throw new Error("Player not found");
+    if (!classData) throw new Error("Class not found");
+
+    // Remove classId from user.assignedClasses
+    user.assignedClasses = (user.assignedClasses || []).filter(
+      (c) => c.toString() !== classId.toString()
+    );
+
+    // Add classId to user.removedClasses for attendance history tracking
+    user.removedClasses = user.removedClasses || [];
+    if (!user.removedClasses.some((c) => c.toString() === classId.toString())) {
+      user.removedClasses.push(classId);
+    }
+
+    // Remove userId from classData.players
+    classData.players = (classData.players || []).filter(
+      (p) => p.toString() !== userId.toString()
+    );
+
+    await user.save({ session });
+    await classData.save({ session });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    res.status(200).json({
+      success: true,
+      message: "Player removed from class successfully",
+      data: {
+        userId,
+        classId,
+        assignedClasses: user.assignedClasses,
+        removedClasses: user.removedClasses,
+      },
+    });
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+
+    res.status(400).json({
+      success: false,
+      message: err.message,
+    });
   }
 };
 
@@ -620,53 +598,28 @@ exports.toggleBannerStatus = async (req, res) => {
 exports.exportUsers = async (req, res) => {
   try {
     let {
-      status,
+      paymentStatus,
       search = "",
       format = "csv",
-      userIds = [], // ✅ only this (array)
-      programType,
+      userIds = [],
     } = req.body;
 
-    // -----------------------
-    // ✅ Validate status
-    // -----------------------
-    const validStatus = ["PENDING", "APPROVED", "REJECTED"];
-    if (status && !validStatus.includes(status)) {
-      return res.status(400).json({ message: "Invalid status" });
-    }
-
-    // -----------------------
-    // ✅ Validate programType
-    // -----------------------
-    const validProgramType = [
-      "ONE_ON_ONE",
-      "DEVELOPMENT",
-      "ELITE",
-      "GROUP",
-    ];
-
-    if (programType && !validProgramType.includes(programType)) {
-      return res.status(400).json({ message: "Invalid programType" });
+    // Validate paymentStatus
+    const validPaymentStatus = ["TRIAL", "UNPAID", "PAID", "OVER_DUE"];
+    if (paymentStatus && !validPaymentStatus.includes(paymentStatus)) {
+      return res.status(400).json({ message: "Invalid paymentStatus" });
     }
 
     const query = {};
 
-    // -----------------------
-    // ✅ Selected users (single or multiple)
-    // -----------------------
+    // Selected users (single or multiple)
     if (userIds && userIds.length > 0) {
       query._id = { $in: userIds };
     }
 
-    // -----------------------
-    // ✅ Filters
-    // -----------------------
-    if (status) {
-      query.status = status;
-    }
-
-    if (programType) {
-      query.programType = programType;
+    // Filters
+    if (paymentStatus) {
+      query.paymentStatus = paymentStatus;
     }
 
     if (search) {
@@ -677,12 +630,8 @@ exports.exportUsers = async (req, res) => {
       ];
     }
 
-    // -----------------------
-    // ✅ Fetch Users
-    // -----------------------
+    // Fetch Users
     const users = await User.find(query)
-      .populate("approvedBy", "name email")
-      .populate("rejectedBy", "name email")
       .select("-password -tokens")
       .sort({ createdAt: -1 });
 
@@ -690,24 +639,18 @@ exports.exportUsers = async (req, res) => {
       return res.status(404).json({ message: "No users found" });
     }
 
-    // -----------------------
-    // 🧾 Format Data
-    // -----------------------
+    // Format Data
     const data = users.map((u) => ({
       Name: u.fullName || "",
       Email: u.email || "",
       Phone: u.phone || "",
-      Status: u.status || "",
-      ProgramType: u.programType || "",
+      PaymentStatus: u.paymentStatus || "",
       SkillLevel: u.skillLevel || "",
-      PreferredFoot: u.preferredFoot || "",
+      Rating: u.rating || 1,
       Club: u.club || "",
       DOB: u.dob ? new Date(u.dob).toLocaleDateString() : "",
       ContactName: u.contactName || "",
-      MedicalCondition: u.medicalCondition || "",
       Comments: u.comments || "",
-      ApprovedBy: u.approvedBy?.name || "",
-      RejectedBy: u.rejectedBy?.name || "",
       CreatedAt: new Date(u.createdAt).toLocaleString(),
     }));
 
@@ -754,9 +697,7 @@ exports.exportUsers = async (req, res) => {
       return res.end();
     }
 
-    // -----------------------
     // ❌ Invalid format
-    // -----------------------
     return res.status(400).json({
       message: "Invalid format (csv/excel)",
     });
@@ -1546,7 +1487,7 @@ exports.getAttendanceByClass = async (req, res) => {
       .select("sessionDate records")
       .populate({
         path: "records.player",
-        select: "fullName profile email phone jerseyNumber", // ✅ only needed fields
+        select: "fullName profile email phone",
       })
       .sort({ sessionDate: 1 });
 
@@ -1566,7 +1507,6 @@ exports.getAttendanceByClass = async (req, res) => {
           profile: player.profile,
           email: player.email,
           phone: player.phone,
-          jerseyNumber: player.jerseyNumber,
         };
       });
     });
@@ -1601,7 +1541,7 @@ exports.getAttendanceByDate = async (req, res) => {
       sessionDate,
     }).populate({
       path: "records.player",
-      select: "fullName profile email phone jerseyNumber",
+      select: "fullName profile email phone",
     });
 
     // ✅ If no attendance → return empty structure
@@ -1625,7 +1565,6 @@ exports.getAttendanceByDate = async (req, res) => {
         profile: player.profile,
         email: player.email,
         phone: player.phone,
-        jerseyNumber: player.jerseyNumber,
       };
     });
 
@@ -1747,7 +1686,7 @@ exports.getClassPlayers = async (req, res) => {
         select: "-password -tokens",
         populate: [
           { path: "category", select: "name" },
-          { path: "program", select: "name" },
+          { path: "programs", select: "name" },
         ],
       })
       .populate("coach", "fullName email")
@@ -1788,7 +1727,7 @@ exports.getCoachClassesWithSessions = async (req, res) => {
       .populate("term", "name startDate endDate")
       .populate("program", "name")
       .populate("category", "name")
-      .populate("players", "fullName jerseyNumber profile")
+      .populate("players", "fullName profile")
       .sort({ createdAt: -1 });
 
     const result = [];
@@ -1900,7 +1839,7 @@ exports.getClassFullTable = async (req, res) => {
 
     const cls = await Class.findById(classId)
       .populate("term")
-      .populate("players", "fullName jerseyNumber email dob phone contactName adminNote");
+      .populate("players", "fullName email dob phone contactName paymentStatus");
 
     if (!cls) {
       return res.status(404).json({ message: "Class not found" });
@@ -1945,12 +1884,11 @@ exports.getClassFullTable = async (req, res) => {
       return {
         playerId: player._id,
         name: player.fullName,
-        jerseyNumber: player.jerseyNumber,
         email: player.email,
         dob: player.dob,
         phone: player.phone,
-        gurdian: player.contactName,
-        adminNote: player.adminNote,
+        guardian: player.contactName,
+        paymentStatus: player.paymentStatus,
         attendance,
       };
     });
@@ -1975,7 +1913,7 @@ exports.exportClassCSV = async (req, res) => {
     .populate("term")
     .populate(
       "players",
-      "fullName jerseyNumber email dob phone contactName adminNote"
+      "fullName email dob phone contactName paymentStatus"
     );
 
   if (!cls) {
@@ -2013,12 +1951,11 @@ exports.exportClassCSV = async (req, res) => {
   const rows = cls.players.map((player) => {
     const row = {
       Name: player.fullName,
-      Jersey: player.jerseyNumber,
       Email: player.email,
       DOB: player.dob ? new Date(player.dob).toISOString().split("T")[0] : "",
       Phone: player.phone,
       Guardian: player.contactName,
-      AdminNote: player.adminNote || "",
+      paymentStatus:player.paymentStatus
     };
 
     // Add session columns
@@ -2026,7 +1963,6 @@ exports.exportClassCSV = async (req, res) => {
       const status =
         attendanceMap[date]?.[player._id] || "NOT_MARKED";
 
-      // Convert to symbols like your UI
       let symbol = "";
       if (status === "PRESENT") symbol = "✔";
       else if (status === "ABSENT") symbol = "✘";
@@ -2041,13 +1977,12 @@ exports.exportClassCSV = async (req, res) => {
   // ✅ 5. CSV fields (order matters)
   const fields = [
     "Name",
-    "Jersey",
     "Email",
     "DOB",
     "Phone",
     "Guardian",
-    "AdminNote",
-    ...sessionDates, // dynamic columns
+    "Payment Status",
+    ...sessionDates,
   ];
 
   const parser = new Parser({ fields });
@@ -2059,37 +1994,7 @@ exports.exportClassCSV = async (req, res) => {
   res.send(csv);
 };
 
-exports.updateAdminNote = async (req, res) => {
-  const { id } = req.params;
-  const { adminNote } = req.body;
 
-  // ✅ Validation
-  if (adminNote === undefined) {
-    return res.status(400).json({
-      success: false,
-      message: "adminNote is required",
-    });
-  }
-
-  const user = await User.findById(id);
-
-  if (!user) {
-    return res.status(404).json({
-      success: false,
-      message: "User not found",
-    });
-  }
-
-  // ✅ Update note
-  user.adminNote = adminNote;
-  await user.save();
-
-  res.status(200).json({
-    success: true,
-    message: "Admin note updated successfully",
-    data: user,
-  });
-};
 
 exports.getMyRole = async (req, res) => {
   try {

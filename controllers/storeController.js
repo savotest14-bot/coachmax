@@ -3,6 +3,7 @@ const ProductCategory = require("../models/ProductCategory");
 const Cart = require("../models/Cart");
 const Order = require("../models/Order");
 const Invoice = require("../models/Invoice");
+const Parent = require("../models/Parent");
 const mongoose = require("mongoose");
 
 // ✅ ProductCategory Create (Admin only)
@@ -145,7 +146,7 @@ exports.createProduct = async (req, res) => {
 
     if (req.files && req.files.length > 0) {
       images = req.files.map(
-        (file) => `uploads/products/${file.filename}`
+        (file) => `uploads/images/${file.filename}`
       );
     }
 
@@ -542,17 +543,31 @@ exports.checkout = async (req, res) => {
     }
 
     // Create Invoice
+    const year = new Date().getFullYear();
+    const invoiceNumber = `INV-${year}-${Date.now().toString().slice(-6)}`;
     const dueDate = new Date();
     dueDate.setDate(dueDate.getDate() + 7); // Due in 7 days
+
+    const invoiceItems = cart.items.map((i) => ({
+      title: i.product?.name || "Store Item",
+      description: `Size: ${i.selectedSize || "N/A"}, Color: ${i.selectedColor || "N/A"}, Qty: ${i.quantity}`,
+      amount: (i.product?.price || 0) * i.quantity,
+    }));
+
     const invoice = await Invoice.create(
       [
         {
+          invoiceNumber,
           parent: parentId,
+          items: invoiceItems,
+          subtotal: totalAmount,
+          totalAmount,
           amount: totalAmount,
           dueDate,
           type: "STORE_ORDER",
-          description: `Order checkout for items: ${cart.items.map((i) => i.product.name).join(", ")}`,
-          status: "PENDING",
+          description: `Order checkout for ${cart.items.length} item(s)`,
+          paymentStatus: "UNPAID",
+          status: "ACTIVE",
         },
       ],
       { session }
@@ -595,3 +610,213 @@ exports.checkout = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+// ✅ Get All Orders (Admin only with invoice number & other details)
+exports.getAllOrders = async (req, res) => {
+  try {
+    const {
+      search = "",
+      status,
+      paymentStatus,
+      startDate,
+      endDate,
+      page = 1,
+      limit = 10,
+    } = req.query;
+
+    const query = {};
+
+    if (status) {
+      query.status = status;
+    }
+
+    if (paymentStatus) {
+      query.paymentStatus = paymentStatus;
+    }
+
+    if (startDate || endDate) {
+      query.createdAt = {};
+      if (startDate) query.createdAt.$gte = new Date(startDate);
+      if (endDate) query.createdAt.$lte = new Date(endDate);
+    }
+
+    if (search) {
+      const searchRegex = new RegExp(search, "i");
+
+      const [matchingParents, matchingInvoices] = await Promise.all([
+        Parent.find({
+          $or: [
+            { fullName: searchRegex },
+            { email: searchRegex },
+            { phone: searchRegex },
+          ],
+        }).select("_id"),
+        Invoice.find({
+          invoiceNumber: searchRegex,
+        }).select("_id"),
+      ]);
+
+      const parentIds = matchingParents.map((p) => p._id);
+      const invoiceIds = matchingInvoices.map((inv) => inv._id);
+
+      query.$or = [
+        { shippingAddress: searchRegex },
+        { parent: { $in: parentIds } },
+        { invoice: { $in: invoiceIds } },
+      ];
+    }
+
+    const currentPage = Math.max(1, parseInt(page, 10) || 1);
+    const pageLimit = Math.max(1, parseInt(limit, 10) || 10);
+    const skip = (currentPage - 1) * pageLimit;
+
+    const [orders, total] = await Promise.all([
+      Order.find(query)
+        .populate("parent", "fullName email phone address city")
+        .populate({
+          path: "items.product",
+          select: "name price images stock category",
+          populate: { path: "category", select: "name" },
+        })
+        .populate("invoice", "invoiceNumber paymentStatus status subtotal totalAmount amount dueDate description notes createdAt")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(pageLimit),
+      Order.countDocuments(query),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      count: orders.length,
+      pagination: {
+        page: currentPage,
+        limit: pageLimit,
+        total,
+        totalPages: Math.ceil(total / pageLimit),
+        hasNextPage: skip + orders.length < total,
+        hasPrevPage: currentPage > 1,
+      },
+      data: orders,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+// ✅ Get Order By ID (Admin)
+exports.getOrderById = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const order = await Order.findById(id)
+      .populate("parent", "fullName email phone address city emergencyContact relationship")
+      .populate({
+        path: "items.product",
+        select: "name price images stock category",
+        populate: { path: "category", select: "name" },
+      })
+      .populate("invoice");
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: order,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+// ✅ Update Order Status (Admin)
+exports.updateOrderStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, paymentStatus } = req.body;
+
+    const order = await Order.findById(id);
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
+    }
+
+    if (status) order.status = status;
+    if (paymentStatus) order.paymentStatus = paymentStatus;
+
+    await order.save();
+
+    const updatedOrder = await Order.findById(id)
+      .populate("parent", "fullName email phone")
+      .populate("invoice");
+
+    return res.status(200).json({
+      success: true,
+      message: "Order status updated successfully",
+      data: updatedOrder,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+// ✅ Get Parent's Orders (Parent only)
+exports.getMyOrders = async (req, res) => {
+  try {
+    const parentId = req.parent._id;
+    const { page = 1, limit = 10 } = req.query;
+
+    const currentPage = Math.max(1, parseInt(page, 10) || 1);
+    const pageLimit = Math.max(1, parseInt(limit, 10) || 10);
+    const skip = (currentPage - 1) * pageLimit;
+
+    const query = { parent: parentId };
+
+    const [orders, total] = await Promise.all([
+      Order.find(query)
+        .populate({
+          path: "items.product",
+          select: "name price images stock category",
+          populate: { path: "category", select: "name" },
+        })
+        .populate("invoice", "invoiceNumber paymentStatus status subtotal totalAmount amount dueDate description notes createdAt")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(pageLimit),
+      Order.countDocuments(query),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      count: orders.length,
+      pagination: {
+        page: currentPage,
+        limit: pageLimit,
+        total,
+        totalPages: Math.ceil(total / pageLimit),
+      },
+      data: orders,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+

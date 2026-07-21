@@ -257,14 +257,13 @@ exports.getAvailablePlayers = async (req, res) => {
     // Get players not assigned to any team
     const availablePlayers = await User.find({
       isBlocked: false,
-      status: "APPROVED", // Optional: only approved players
       _id: { $nin: assignedPlayerIds },
     })
       .populate("category", "name")
-      .populate("program", "name")
+      .populate("programs", "name")
       .populate("term", "name")
       .select(
-        "firstName lastName fullName profileImage jerseyNumber dominantPosition secondaryPosition group category program term phone email"
+        "firstName lastName fullName profileImage category programs term phone email"
       );
 
     return res.status(200).json({

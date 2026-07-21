@@ -12,9 +12,54 @@ const Class = require("../models/Class");
 const News = require("../models/News");
 const Invoice = require("../models/Invoice");
 const Fixture = require("../models/Fixture");
+const RegistrationRequest = require("../models/RegistrationRequest");
+const Notification = require("../models/Notification");
 const bcrypt = require("bcryptjs");
 const generateToken = require("../utils/generateToken");
 const mongoose = require("mongoose");
+
+// Helper function to create admin notifications for enrollment requests
+const createAdminNotificationForRequest = async ({
+  parent,
+  player,
+  category,
+  programs,
+  preferredTerm,
+  preferredClasses,
+  requestType,
+}) => {
+  try {
+    const parentDoc = await Parent.findById(parent).select("fullName");
+    const playerDoc = await User.findById(player).select("fullName");
+    const categoryDoc = await Category.findById(category).select("name");
+    const programDocs = await Program.find({ _id: { $in: programs } }).select("name");
+    const termDoc = preferredTerm ? await Term.findById(preferredTerm).select("name") : null;
+    const classDocs =
+      preferredClasses && preferredClasses.length > 0
+        ? await Class.find({ _id: { $in: preferredClasses } }).select("name")
+        : [];
+
+    const programNames = programDocs.map((p) => p.name).join(", ");
+    const classNames = classDocs.map((c) => c.name).join(", ");
+
+    const message = `New Enrollment Request (${requestType === "ADD_PROGRAM" ? "Add Program" : "New Player"})
+Parent: ${parentDoc ? parentDoc.fullName : "N/A"}
+Player: ${playerDoc ? playerDoc.fullName : "N/A"}
+Category: ${categoryDoc ? categoryDoc.name : "N/A"}
+Programs: ${programNames || "N/A"}
+Preferred Term: ${termDoc ? termDoc.name : "N/A"}
+Preferred Classes: ${classNames || "None"}`;
+
+    await Notification.create({
+      parent: parent,
+      title: "New Enrollment Request",
+      message: message,
+      type: "ENROLLMENT_REQUEST",
+    });
+  } catch (err) {
+    console.error("Failed to create admin notification:", err.message);
+  }
+};
 
 // ✅ Parent registration with child
 exports.register = async (req, res) => {
@@ -103,6 +148,7 @@ exports.register = async (req, res) => {
 
     const uploadedFiles = req.files || [];
     const createdPlayers = [];
+    const pendingNotifications = [];
 
     for (let i = 0; i < players.length; i++) {
       const player = players[i];
@@ -114,24 +160,15 @@ exports.register = async (req, res) => {
         phone,
         dob,
         gender,
-        preferredFoot,
-        weakFootRating,
         school,
         category,
-        program,
+        programs,
         term,
-        jerseyNumber,
+        preferredTerm,
+        preferredClasses,
         club,
         contactName,
-        skillLevel,
-        group,
         additionalComments,
-        medicalConditions,
-        dominantPosition,
-        secondaryPosition,
-        height,
-        weight,
-        bloodGroup,
         nationality,
         academy,
         comments,
@@ -143,58 +180,41 @@ exports.register = async (req, res) => {
         !firstName ||
         !lastName ||
         !dob ||
-        !preferredFoot ||
-        !group ||
         !category ||
-        !program ||
-        !term
+        !programs
       ) {
         throw new Error(
           `Required fields missing for player ${firstName || i + 1}`
         );
       }
 
-      // Validate references
-      const [categoryData, programData, termData] =
-        await Promise.all([
-          Category.findById(category),
-          Program.findById(program),
-          Term.findById(term),
-        ]);
+      // Normalize programs to array
+      const programIds = Array.isArray(programs) ? programs : [programs];
 
+      // Validate references
+      const categoryData = await Category.findById(category);
       if (!categoryData) {
         throw new Error(
           `Category not found for ${firstName}`
         );
       }
 
-      if (!programData) {
-        throw new Error(
-          `Program not found for ${firstName}`
-        );
-      }
-
-      if (!termData) {
-        throw new Error(
-          `Term not found for ${firstName}`
-        );
-      }
-
-      // Check jersey uniqueness
-      if (
-        jerseyNumber !== undefined &&
-        jerseyNumber !== null &&
-        jerseyNumber !== ""
-      ) {
-        const existingJersey =
-          await User.findOne({
-            program,
-            jerseyNumber,
-          });
-
-        if (existingJersey) {
+      // Validate all programs
+      for (const progId of programIds) {
+        const programData = await Program.findById(progId);
+        if (!programData) {
           throw new Error(
-            `Jersey number ${jerseyNumber} already exists in selected program`
+            `Program ${progId} not found for ${firstName}`
+          );
+        }
+      }
+
+      const prefTerm = preferredTerm || term || null;
+      if (prefTerm) {
+        const termData = await Term.findById(prefTerm);
+        if (!termData) {
+          throw new Error(
+            `Term not found for ${firstName}`
           );
         }
       }
@@ -221,7 +241,7 @@ exports.register = async (req, res) => {
         profileImage = `uploads/profiles/${uploadedFiles[i].filename}`;
       }
 
-      // Create Player
+      // Create Player (term = null until admin class assignment)
       const playerDoc = await User.create(
         [
           {
@@ -240,42 +260,22 @@ exports.register = async (req, res) => {
             club,
             contactName,
             relationship,
-
-            skillLevel,
-            group,
-
             additionalComments:
               additionalComments || "",
 
-            medicalConditions:
-              medicalConditions || "",
-
-            preferredFoot,
-
-            weakFootRating:
-              weakFootRating || 3,
-
-            dominantPosition,
-            secondaryPosition,
-
-            height,
-            weight,
-
-            bloodGroup,
             nationality,
 
             school,
             academy,
             comments,
 
-            status: "PENDING",
+            paymentStatus: "TRIAL",
 
             category,
-            program,
-            term,
+            programs: programIds,
+            term: null,
 
-            jerseyNumber:
-              jerseyNumber || null,
+            rating: 1,
 
             profileImage,
 
@@ -289,28 +289,62 @@ exports.register = async (req, res) => {
 
       const playerId = playerDoc[0]._id;
 
+      // Create RegistrationRequest
+      const prefClasses = Array.isArray(preferredClasses) ? preferredClasses : [];
+
+      await RegistrationRequest.create(
+        [
+          {
+            parent: parentId,
+            player: playerId,
+            category,
+            programs: programIds,
+            preferredTerm: prefTerm,
+            preferredClasses: prefClasses,
+            requestType: "NEW_PLAYER",
+            status: "PENDING",
+            createdBy: parentId,
+          },
+        ],
+        { session }
+      );
+
       // Create Medical Profile
       await MedicalProfile.create(
         [
           {
             player: playerId,
-            medicalConditions:
-              medicalConditions || "",
+            medicalConditions: "",
             allergies: Array.isArray(allergies)
               ? allergies
               : allergies
-              ? [allergies]
-              : [],
+                ? [allergies]
+                : [],
           },
         ],
         { session }
       );
 
       createdPlayers.push(playerDoc[0]);
+
+      pendingNotifications.push({
+        parent: parentId,
+        player: playerId,
+        category,
+        programs: programIds,
+        preferredTerm: prefTerm,
+        preferredClasses: prefClasses,
+        requestType: "NEW_PLAYER",
+      });
     }
 
     await session.commitTransaction();
     session.endSession();
+
+    // Trigger admin notifications for enrollment requests (non-blocking)
+    pendingNotifications.forEach((notifData) => {
+      createAdminNotificationForRequest(notifData);
+    });
 
     // Send Emails (non-blocking)
     sendEmail(
@@ -328,7 +362,7 @@ exports.register = async (req, res) => {
     return res.status(201).json({
       success: true,
       message:
-        "Parent and players registered successfully. Waiting for admin approval.",
+        "Parent and players registered successfully.",
       data: {
         parent: {
           _id: parentId,
@@ -389,7 +423,7 @@ exports.login = async (req, res) => {
     // Fetch parent's children
     const children = await User.find({ parentId: parent._id })
       .populate("category", "name")
-      .populate("program", "name")
+      .populate("programs", "name")
       .populate("term", "name");
 
     const parentObj = parent.toObject();
@@ -480,7 +514,7 @@ exports.getChildren = async (req, res) => {
   try {
     const children = await User.find({ parentId: req.parent._id })
       .populate("category", "name")
-      .populate("program", "name")
+      .populate("programs", "name")
       .populate("term", "name");
 
     res.json({ success: true, data: children });
@@ -499,25 +533,16 @@ exports.addChild = async (req, res) => {
       phone,
       dob,
       gender,
-      preferredFoot,
-      weakFootRating,
       school,
       category,
-      program,
+      programs,
       term,
-      jerseyNumber,
+      preferredTerm,
+      preferredClasses,
       club,
       contactName,
       relationship,
-      skillLevel,
-      group,
       additionalComments,
-      medicalConditions,
-      dominantPosition,
-      secondaryPosition,
-      height,
-      weight,
-      bloodGroup,
       nationality,
       academy,
       comments,
@@ -529,11 +554,8 @@ exports.addChild = async (req, res) => {
       !firstName ||
       !lastName ||
       !dob ||
-      !preferredFoot ||
-      !group ||
       !category ||
-      !program ||
-      !term
+      !programs
     ) {
       return res.status(400).json({
         success: false,
@@ -541,13 +563,11 @@ exports.addChild = async (req, res) => {
       });
     }
 
-    // Validate references
-    const [categoryData, programData, termData] = await Promise.all([
-      Category.findById(category),
-      Program.findById(program),
-      Term.findById(term),
-    ]);
+    // Normalize programs to array
+    const programIds = Array.isArray(programs) ? programs : [programs];
 
+    // Validate references
+    const categoryData = await Category.findById(category);
     if (!categoryData) {
       return res.status(404).json({
         success: false,
@@ -555,35 +575,24 @@ exports.addChild = async (req, res) => {
       });
     }
 
-    if (!programData) {
-      return res.status(404).json({
-        success: false,
-        message: "Program not found",
-      });
-    }
-
-    if (!termData) {
-      return res.status(404).json({
-        success: false,
-        message: "Term not found",
-      });
-    }
-
-    // Check jersey number uniqueness
-    if (
-      jerseyNumber !== undefined &&
-      jerseyNumber !== null &&
-      jerseyNumber !== ""
-    ) {
-      const existingJersey = await User.findOne({
-        program,
-        jerseyNumber,
-      });
-
-      if (existingJersey) {
-        return res.status(400).json({
+    // Validate all programs
+    for (const progId of programIds) {
+      const programData = await Program.findById(progId);
+      if (!programData) {
+        return res.status(404).json({
           success: false,
-          message: `Jersey number ${jerseyNumber} already exists in selected program`,
+          message: `Program ${progId} not found`,
+        });
+      }
+    }
+
+    const prefTerm = preferredTerm || term || null;
+    if (prefTerm) {
+      const termData = await Term.findById(prefTerm);
+      if (!termData) {
+        return res.status(404).json({
+          success: false,
+          message: "Term not found",
         });
       }
     }
@@ -610,7 +619,7 @@ exports.addChild = async (req, res) => {
       profileImage = `uploads/profiles/${req.file.filename}`;
     }
 
-    // Create Player
+    // Create Player (term = null until admin class assignment)
     const player = await User.create({
       firstName,
       lastName,
@@ -628,24 +637,8 @@ exports.addChild = async (req, res) => {
       contactName,
       relationship,
 
-      skillLevel,
-      group,
-
       additionalComments: additionalComments || "",
 
-      medicalConditions: medicalConditions || "",
-
-      preferredFoot,
-
-      weakFootRating: weakFootRating || 3,
-
-      dominantPosition,
-      secondaryPosition,
-
-      height,
-      weight,
-
-      bloodGroup,
       nationality,
 
       school,
@@ -653,37 +646,162 @@ exports.addChild = async (req, res) => {
       comments,
 
       category,
-      program,
-      term,
+      programs: programIds,
+      term: null,
 
-      jerseyNumber: jerseyNumber || null,
+      paymentStatus: "TRIAL",
+      rating: 1,
 
       profileImage,
-      profile: profileImage,
 
       assignedClasses: [],
 
       attendancePercentage: 0,
+    });
 
+    const prefClasses = Array.isArray(preferredClasses) ? preferredClasses : [];
+
+    // Create RegistrationRequest
+    const registrationRequest = await RegistrationRequest.create({
+      parent: req.parent._id,
+      player: player._id,
+      category,
+      programs: programIds,
+      preferredTerm: prefTerm,
+      preferredClasses: prefClasses,
+      requestType: "NEW_PLAYER",
       status: "PENDING",
+      createdBy: req.parent._id,
     });
 
     // Medical Profile
     await MedicalProfile.create({
       player: player._id,
-      medicalConditions: medicalConditions || "",
+      medicalConditions: "",
       allergies: Array.isArray(allergies)
         ? allergies
         : allergies
-        ? [allergies]
-        : [],
+          ? [allergies]
+          : [],
+    });
+
+    // Trigger Admin Notification (non-blocking)
+    createAdminNotificationForRequest({
+      parent: req.parent._id,
+      player: player._id,
+      category,
+      programs: programIds,
+      preferredTerm: prefTerm,
+      preferredClasses: prefClasses,
+      requestType: "NEW_PLAYER",
     });
 
     return res.status(201).json({
       success: true,
-      message:
-        "Child profile added successfully. Waiting for admin approval.",
-      data: player,
+      message: "Child profile added and enrollment request submitted successfully.",
+      data: {
+        player,
+        registrationRequest,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+// ✅ Request Additional Program for Existing Player (Parent)
+exports.requestAddProgram = async (req, res) => {
+  try {
+    const { playerId, category, programs, preferredTerm, preferredClasses } = req.body;
+
+    if (!playerId || !category || !programs) {
+      return res.status(400).json({
+        success: false,
+        message: "playerId, category, and programs are required",
+      });
+    }
+
+    const player = await User.findById(playerId);
+    if (!player) {
+      return res.status(404).json({
+        success: false,
+        message: "Player not found",
+      });
+    }
+
+    // Verify parent ownership
+    if (player.parentId.toString() !== req.parent._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not authorized to request programs for this player",
+      });
+    }
+
+    const programIds = Array.isArray(programs) ? programs : [programs];
+
+    // Validate Category & Programs
+    const categoryDoc = await Category.findById(category);
+    if (!categoryDoc) {
+      return res.status(404).json({
+        success: false,
+        message: "Category not found",
+      });
+    }
+
+    for (const progId of programIds) {
+      const progDoc = await Program.findById(progId);
+      if (!progDoc) {
+        return res.status(404).json({
+          success: false,
+          message: `Program ${progId} not found`,
+        });
+      }
+    }
+
+    const prefTerm = preferredTerm || null;
+    if (prefTerm) {
+      const termData = await Term.findById(prefTerm);
+      if (!termData) {
+        return res.status(404).json({
+          success: false,
+          message: "Term not found",
+        });
+      }
+    }
+
+    const prefClasses = Array.isArray(preferredClasses) ? preferredClasses : [];
+
+    // Create RegistrationRequest (ADD_PROGRAM) - DO NOT modify assignedClasses/term/paymentStatus on Player
+    const registrationRequest = await RegistrationRequest.create({
+      parent: req.parent._id,
+      player: player._id,
+      category,
+      programs: programIds,
+      preferredTerm: prefTerm,
+      preferredClasses: prefClasses,
+      requestType: "ADD_PROGRAM",
+      status: "PENDING",
+      createdBy: req.parent._id,
+    });
+
+    // Create Admin Notification (non-blocking)
+    createAdminNotificationForRequest({
+      parent: req.parent._id,
+      player: player._id,
+      category,
+      programs: programIds,
+      preferredTerm: prefTerm,
+      preferredClasses: prefClasses,
+      requestType: "ADD_PROGRAM",
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Program addition request submitted successfully",
+      data: registrationRequest,
     });
   } catch (error) {
     return res.status(500).json({
@@ -961,7 +1079,6 @@ exports.getDashboard = async (req, res) => {
     }
 
     // 3. Next match (Fixtures involving teams where our children belong)
-    // Find fixtures where children teams might play.
     const teams = await mongoose.model("Team").find({ players: { $in: childIds } }).select("_id");
     const teamIds = teams.map((t) => t._id);
     const nextMatchDoc = await Fixture.findOne({
@@ -1044,7 +1161,7 @@ exports.getPlayerProfile = async (req, res) => {
         "fullName email phone address city state postcode country emergencyContact relationship"
       )
       .populate("category", "name")
-      .populate("program", "name")
+      .populate("programs", "name")
       .populate("term", "name")
       .populate("assignedClasses", "title classDate startTime endTime");
 
@@ -1100,26 +1217,16 @@ exports.getPlayerProfile = async (req, res) => {
         academy: player.academy,
         school: player.school,
 
-        group: player.group,
         skillLevel: player.skillLevel,
 
         category: player.category,
-        program: player.program,
+        programs: player.programs,
         term: player.term,
 
-        jerseyNumber: player.jerseyNumber,
-
-        preferredFoot: player.preferredFoot,
-        weakFootRating: player.weakFootRating,
-
-        dominantPosition: player.dominantPosition,
-        secondaryPosition: player.secondaryPosition,
-
-        height: player.height,
-        weight: player.weight,
-
-        bloodGroup: player.bloodGroup,
         nationality: player.nationality,
+
+        paymentStatus: player.paymentStatus,
+        rating: player.rating,
 
         attendancePercentage: player.attendancePercentage,
 
@@ -1133,9 +1240,40 @@ exports.getPlayerProfile = async (req, res) => {
         parent: player.parentId,
 
         assignedClasses: player.assignedClasses,
-
-        status: player.status,
       },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+exports.getClasses = async (req, res) => {
+  try {
+    const { category, program, term } = req.query;
+
+    const query = {};
+
+    if (category) query.category = category;
+    if (program) query.program = program;
+    if (term) query.term = term;
+
+    const classes = await Class.find(query)
+      .populate("category", "name")
+      .populate("program", "name")
+      .populate("term", "name")
+      .populate("coach", "fullName email phone")
+      .sort({
+        dayOfWeek: 1,
+        startTime: 1,
+      });
+
+    return res.status(200).json({
+      success: true,
+      count: classes.length,
+      data: classes,
     });
   } catch (error) {
     return res.status(500).json({

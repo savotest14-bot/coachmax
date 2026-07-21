@@ -25,6 +25,14 @@ app.get("/", (req, res) => {
     res.send("server is running");
 });
 
+app.get("/swagger.json", (req, res) => {
+    res.sendFile(path.join(__dirname, "swagger.json"));
+});
+
+app.get("/api-docs", (req, res) => {
+    res.sendFile(path.join(__dirname, "swagger.json"));
+});
+
 app.use("/api/admin", adminRoutes);
 app.use("/api/user", userRoutes);
 app.use("/api/auth", authRoutes)

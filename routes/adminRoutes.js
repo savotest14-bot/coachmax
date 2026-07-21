@@ -2,8 +2,7 @@ const express = require("express");
 const {
   adminLogin,
   logout,
-  getPendingUsers,
-  updateUserStatus,
+  updatePaymentStatus,
   getUsers,
   createBanner,
   updateBanner,
@@ -38,10 +37,10 @@ const {
   getCoachClassesWithSessions,
   getClassFullTable,
   getClassFiltersWithTimeSlots,
-  updateAdminNote,
   exportClassCSV,
   getAllClassesForAssign,
-  getParents,
+  updatePlayerRating,
+  removeClassFromUser,
 } = require("../controllers/adminAuthController");
 
 const {
@@ -72,6 +71,9 @@ const {
   getAllCategories,
   updateCategory,
   deleteCategory,
+  getAllOrders,
+  getOrderById,
+  updateOrderStatus,
 } = require("../controllers/storeController");
 
 const {
@@ -80,7 +82,26 @@ const {
 
 const {
   createInvoice,
+  getAdminInvoices,
+  getAdminInvoiceById,
+  updateInvoice,
+  deleteInvoice,
+} = require("../controllers/invoiceController");
+
+const {
+  getAdminPayments,
+  getAdminPaymentById,
+  approvePayment,
+  rejectPayment,
+  getPaymentDashboardStats,
 } = require("../controllers/paymentController");
+
+const {
+  createBankDetails,
+  updateBankDetails,
+  getAllBankDetails,
+  upsertBankDetails,
+} = require("../controllers/bankDetailsController");
 
 const auth = require("../middleware/authMiddleware");
 const isAdmin = require("../middleware/isAdmin");
@@ -95,14 +116,34 @@ const {
   exportEventParticipants,
 } = require("../controllers/eventController");
 
+const {
+  getRegistrationRequests,
+  getUnallocatedPlayers,
+  assignClassesToPlayer,
+  getPlayersByCategoryAndProgram,
+} = require("../controllers/registrationRequestController");
+
 const router = express.Router();
+
+// Registration Requests & Enrollment Workflow (Admin)
+router.get("/registration-requests", auth, isAdmin, getRegistrationRequests);
+router.get("/unallocated-players", auth, isAdmin, getUnallocatedPlayers);
+router.get("/players/search", auth, isAdmin, getPlayersByCategoryAndProgram);
+router.patch("/player/:playerId/assign-classes", auth, isAdmin, assignClassesToPlayer);
+
 
 // Administrative Auth & Players Mod
 router.post("/login", adminLogin);
 router.post("/logout", auth, logout);
 router.get("/getUsers", auth, getUsers);
-router.put("/updateStatus/:userId", auth, isAdmin, updateUserStatus);
+router.put("/updatePaymentStatus/:userId", auth, isAdmin, updatePaymentStatus);
+router.patch("/updatePaymentStatus/:userId", auth, isAdmin, updatePaymentStatus);
+router.patch("/player/:userId/payment-status", auth, isAdmin, updatePaymentStatus);
+router.put("/player/:userId/payment-status", auth, isAdmin, updatePaymentStatus);
+router.patch("/update-payment-status", auth, isAdmin, updatePaymentStatus);
+router.put("/updateRating/:userId", auth, isAdmin, updatePlayerRating);
 router.post("/assignClass/:userId", auth, isAdmin, assignClassToUser);
+router.post("/removeClass/:userId", auth, isAdmin, removeClassFromUser);
 router.post("/assignCoachToClass/:classId", auth, isAdmin, assignCoachToClass);
 
 // Banners management
@@ -141,6 +182,7 @@ router.get("/getAllClasses", auth, isAdmin, getAllClasses);
 router.get("/getAllClassesForAssign", getAllClassesForAssign);
 router.get("/getClassById/:id", auth, isAdmin, getClassById);
 router.put("/updateClass/:id", auth, isAdmin, updateClass);
+
 router.get("/getCurrentYearTerms", auth, isAdmin, getCurrentYearTerms);
 router.get("/getClassesByTerm/:termId", auth, isAdmin, getClassesByTerm);
 
@@ -153,7 +195,6 @@ router.get("/getClassSessions/:classId", auth, getClassSessions);
 router.get("/getClassPlayers/:classId", auth, isAdmin, getClassPlayers);
 router.get("/getClassFullTable", auth, getClassFullTable);
 router.get("/getClassFiltersWithTimeSlots", getClassFiltersWithTimeSlots);
-router.put("/updateAdminNote/:id", auth, updateAdminNote);
 
 // Coaches CRUD
 router.post("/createCoach", auth, isAdmin, createCoach);
@@ -197,11 +238,36 @@ router.get("/store/categories", auth, isAdmin, getAllCategories);
 router.put("/store/categories/:id", auth, isAdmin, updateCategory);
 router.delete("/store/categories/:id", auth, isAdmin, deleteCategory);
 router.post("/store/products", auth, isAdmin, uploads.array("images", 5), createProduct);
+router.get("/store/orders", auth, isAdmin, getAllOrders);
+router.get("/store/orders/:id", auth, isAdmin, getOrderById);
+router.patch("/store/orders/:id", auth, isAdmin, updateOrderStatus);
+
 
 // ✅ NEW: News setups (Admin only)
 router.post("/news", auth, isAdmin, uploads.array("images", 5), createNews);
 
-// ✅ NEW: Invoicing (Admin only)
+// ✅ Bank Details Management (Admin only)
+router.post("/bank-details", auth, isAdmin, uploads.single("qrCodeImage"), upsertBankDetails);
+router.get("/bank-details", auth, isAdmin, getAllBankDetails);
+
+// ✅ Invoicing (Admin only)
 router.post("/invoices", auth, isAdmin, createInvoice);
+router.get("/invoices", auth, isAdmin, getAdminInvoices);
+router.get("/invoices/:id", auth, isAdmin, getAdminInvoiceById);
+router.patch("/invoices/:id", auth, isAdmin, updateInvoice);
+router.put("/invoices/:id", auth, isAdmin, updateInvoice);
+router.delete("/invoices/:id", auth, isAdmin, deleteInvoice);
+
+
+// ✅ Payment Management (Admin only)
+router.get("/payments", auth, isAdmin, getAdminPayments);
+router.get("/payments/:id", auth, isAdmin, getAdminPaymentById);
+router.patch("/payments/:id/approve", auth, isAdmin, approvePayment);
+router.post("/payments/:id/approve", auth, isAdmin, approvePayment);
+router.patch("/payments/:id/reject", auth, isAdmin, rejectPayment);
+router.post("/payments/:id/reject", auth, isAdmin, rejectPayment);
+
+// ✅ Admin Dashboard / Statistics
+router.get("/dashboard/payments", auth, isAdmin, getPaymentDashboardStats);
 
 module.exports = router;
