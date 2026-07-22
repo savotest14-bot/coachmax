@@ -160,17 +160,17 @@ exports.register = async (req, res) => {
         phone,
         dob,
         gender,
-        school,
         category,
         programs,
         term,
         preferredTerm,
         preferredClasses,
         club,
+        prefferedFoot,
+        isMedicalCondition,
+        medicalConditionDetails,
         contactName,
         additionalComments,
-        nationality,
-        academy,
         comments,
         allergies,
       } = player;
@@ -256,17 +256,15 @@ exports.register = async (req, res) => {
             gender,
 
             parentId,
-
+            prefferedFoot,
+            isMedicalCondition,
+            medicalConditionDetails,
             club,
             contactName,
             relationship,
             additionalComments:
               additionalComments || "",
 
-            nationality,
-
-            school,
-            academy,
             comments,
 
             paymentStatus: "TRIAL",
@@ -304,22 +302,6 @@ exports.register = async (req, res) => {
             requestType: "NEW_PLAYER",
             status: "PENDING",
             createdBy: parentId,
-          },
-        ],
-        { session }
-      );
-
-      // Create Medical Profile
-      await MedicalProfile.create(
-        [
-          {
-            player: playerId,
-            medicalConditions: "",
-            allergies: Array.isArray(allergies)
-              ? allergies
-              : allergies
-                ? [allergies]
-                : [],
           },
         ],
         { session }
@@ -533,17 +515,13 @@ exports.addChild = async (req, res) => {
       phone,
       dob,
       gender,
-      school,
       category,
       programs,
-      term,
+      prefferedFoot,
+      isMedicalCondition,
+      medicalConditionDetails,
       preferredTerm,
       preferredClasses,
-      club,
-      contactName,
-      relationship,
-      additionalComments,
-      nationality,
       academy,
       comments,
       allergies,
@@ -564,9 +542,11 @@ exports.addChild = async (req, res) => {
     }
 
     // Normalize programs to array
-    const programIds = Array.isArray(programs) ? programs : [programs];
+    const programIds = Array.isArray(programs)
+      ? programs
+      : [programs];
 
-    // Validate references
+    // Validate category
     const categoryData = await Category.findById(category);
     if (!categoryData) {
       return res.status(404).json({
@@ -575,20 +555,24 @@ exports.addChild = async (req, res) => {
       });
     }
 
-    // Validate all programs
-    for (const progId of programIds) {
-      const programData = await Program.findById(progId);
+    // Validate programs
+    for (const programId of programIds) {
+      const programData = await Program.findById(programId);
+
       if (!programData) {
         return res.status(404).json({
           success: false,
-          message: `Program ${progId} not found`,
+          message: `Program ${programId} not found`,
         });
       }
     }
 
+    // Validate preferred term
     const prefTerm = preferredTerm || term || null;
+
     if (prefTerm) {
       const termData = await Term.findById(prefTerm);
+
       if (!termData) {
         return res.status(404).json({
           success: false,
@@ -619,7 +603,7 @@ exports.addChild = async (req, res) => {
       profileImage = `uploads/profiles/${req.file.filename}`;
     }
 
-    // Create Player (term = null until admin class assignment)
+    // Create Player
     const player = await User.create({
       firstName,
       lastName,
@@ -630,23 +614,18 @@ exports.addChild = async (req, res) => {
 
       dob: parsedDob,
       gender,
-
+      prefferedFoot,
+      isMedicalCondition,
+      medicalConditionDetails,
       parentId: req.parent._id,
 
-      club,
-      contactName,
-      relationship,
-
-      additionalComments: additionalComments || "",
-
-      nationality,
-
-      school,
       academy,
       comments,
 
       category,
       programs: programIds,
+
+      // Player is assigned term by admin after approval
       term: null,
 
       paymentStatus: "TRIAL",
@@ -655,26 +634,29 @@ exports.addChild = async (req, res) => {
       profileImage,
 
       assignedClasses: [],
-
       attendancePercentage: 0,
     });
 
-    const prefClasses = Array.isArray(preferredClasses) ? preferredClasses : [];
+    // Normalize preferred classes
+    const prefClasses = Array.isArray(preferredClasses)
+      ? preferredClasses
+      : [];
 
-    // Create RegistrationRequest
-    const registrationRequest = await RegistrationRequest.create({
-      parent: req.parent._id,
-      player: player._id,
-      category,
-      programs: programIds,
-      preferredTerm: prefTerm,
-      preferredClasses: prefClasses,
-      requestType: "NEW_PLAYER",
-      status: "PENDING",
-      createdBy: req.parent._id,
-    });
+    // Create Registration Request
+    const registrationRequest =
+      await RegistrationRequest.create({
+        parent: req.parent._id,
+        player: player._id,
+        category,
+        programs: programIds,
+        preferredTerm: prefTerm,
+        preferredClasses: prefClasses,
+        requestType: "NEW_PLAYER",
+        status: "PENDING",
+        createdBy: req.parent._id,
+      });
 
-    // Medical Profile
+    // Create Medical Profile
     await MedicalProfile.create({
       player: player._id,
       medicalConditions: "",
@@ -685,7 +667,7 @@ exports.addChild = async (req, res) => {
           : [],
     });
 
-    // Trigger Admin Notification (non-blocking)
+    // Notify Admin (Non-blocking)
     createAdminNotificationForRequest({
       parent: req.parent._id,
       player: player._id,
@@ -698,7 +680,8 @@ exports.addChild = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: "Child profile added and enrollment request submitted successfully.",
+      message:
+        "Child added and enrollment request submitted successfully.",
       data: {
         player,
         registrationRequest,
@@ -848,7 +831,7 @@ const generateClassSessions = (term, classObj) => {
 exports.getMyClasses = async (req, res) => {
   try {
     // Determine player ID (query param or default to parent's first child)
-    let playerId = req.query.playerId;
+    let playerId = req.params.playerId;
     if (!playerId) {
       const firstChild = await User.findOne({ parentId: req.parent._id });
       if (!firstChild) {

@@ -34,11 +34,11 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
-    nationality: String,
-    school: String,
-    academy: String,
     comments: String,
-
+    jerseyNumber: {
+      type: Number,
+      default: null,
+    },
     paymentStatus: {
       type: String,
       enum: ["TRIAL", "UNPAID", "PAID", "OVER_DUE"],
@@ -56,7 +56,18 @@ const userSchema = new mongoose.Schema(
         ref: "Program",
       },
     ],
-
+    prefferedFoot: {
+      type: String,
+      enum: ["LEFT", "RIGHT", "BOTH"],
+    },
+   isMedicalCondition:{
+      type: Boolean,
+      default: false,
+    },
+    medicalConditionDetails: {
+      type: String,
+      default: '',
+   },
     term: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Term",

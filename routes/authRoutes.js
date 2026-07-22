@@ -1,6 +1,6 @@
 const express = require("express");
 const auth = require("../middleware/authMiddleware");
-const { forgotPassword, resendOTP, verifyOtp, resetPassword, getMyProfile, updateMyProfile } = require("../controllers/authController");
+const { forgotPassword, resendOTP, verifyOtp, resetPassword, getMyProfile, updateMyProfile, updateChild } = require("../controllers/authController");
 const { uploads } = require("../utils/upload");
 const { getMyRole } = require("../controllers/adminAuthController");
 
@@ -16,7 +16,14 @@ router.post("/resetPassword", resetPassword);
 
 router.get("/getMyProfile", auth, getMyProfile);
 
-router.put("/updateMyProfile",auth, uploads.single("profile"), updateMyProfile);
+router.put("/updateMyProfile",auth, uploads.single("profiles"), updateMyProfile);
+
+router.put(
+  "/updateChild/:childId",
+  auth,
+  uploads.single("profiles"),
+  updateChild
+);
 
 router.get("/my-role", auth, getMyRole);
 

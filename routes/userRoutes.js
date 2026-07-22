@@ -118,7 +118,7 @@ router.post("/requestAddProgram", auth, requestAddProgram);
 router.get("/getDashboard", auth, getDashboard);
 
 // Classes & Attendance
-router.get("/getMyClasses", auth, getMyClasses);
+router.get("/getMyClasses/:playerId", auth, getMyClasses);
 router.get("/getMyAttendanceByClass/:classId", auth, getMyAttendanceByClass);
 
 // Medical profile

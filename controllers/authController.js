@@ -8,6 +8,8 @@ const generateOTP = require("../utils/generateOTP");
 const fs = require("fs");
 const path = require("path");
 const User = require("../models/User");
+const Invoice = require("../models/Invoice");
+
 
 exports.forgotPassword = async (req, res) => {
   try {
@@ -174,9 +176,50 @@ exports.resetPassword = async (req, res) => {
   }
 };
 
+// exports.getMyProfile = async (req, res) => {
+//   try {
+//     let data = req.role === "ADMIN" ? req.admin : req.user;
+
+//     data = data.toObject();
+
+//     // Remove sensitive fields
+//     delete data.password;
+//     delete data.tokens;
+//     delete data.otp;
+//     delete data.otpExpire;
+
+//     let players = [];
+
+//     // If logged in user is a Parent, fetch players
+//     if (req.role !== "ADMIN") {
+//       players = await User.find({ parentId: data._id })
+//         .populate("category", "name")
+//         .populate("programs", "name")
+//         .populate("term", "name")
+//         .select("-__v");
+//     }
+
+//     res.json({
+//       success: true,
+//       role: req.role,
+//       data: {
+//         ...data,
+//         players,
+//       },
+//     });
+//   } catch (err) {
+//     res.status(500).json({
+//       success: false,
+//       message: err.message,
+//     });
+//   }
+// };
+
+
+
 exports.getMyProfile = async (req, res) => {
   try {
-    let data = req.role === "ADMIN" ? req.admin : req.user;
+    let data = req.role === "ADMIN" ? req.admin : req.parent;
 
     data = data.toObject();
 
@@ -187,26 +230,37 @@ exports.getMyProfile = async (req, res) => {
     delete data.otpExpire;
 
     let players = [];
+    let unpaidInvoiceCount = 0;
 
-    // If logged in user is a Parent, fetch players
     if (req.role !== "ADMIN") {
+      // Get parent's players
       players = await User.find({ parentId: data._id })
         .populate("category", "name")
         .populate("programs", "name")
         .populate("term", "name")
         .select("-__v");
+
+      // Count unpaid invoices
+      unpaidInvoiceCount = await Invoice.countDocuments({
+        parent: data._id,
+        status: "ACTIVE",
+        paymentStatus: {
+          $in: ["UNPAID", "PAYMENT_PENDING", "REJECTED"],
+        },
+      });
     }
 
-    res.json({
+    return res.json({
       success: true,
       role: req.role,
       data: {
         ...data,
         players,
+        unpaidInvoiceCount,
       },
     });
   } catch (err) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: err.message,
     });
@@ -217,30 +271,31 @@ exports.updateMyProfile = async (req, res) => {
   try {
     let Model;
     let currentUser;
+    let updateFields = {};
 
     if (req.role === "ADMIN") {
       Model = Admin;
       currentUser = req.admin;
     } else {
       Model = Parent;
-      currentUser = req.user;
+      currentUser = req.parent;
     }
 
-    let updateFields = {};
-
+    // Upload new profile image
     if (req.file) {
-      const imgPath = `uploads/profile/${req.file.filename}`;
-      updateFields.profile = imgPath;
-      updateFields.profileImage = imgPath;
+      const imagePath = `uploads/profiles/${req.file.filename}`;
+      updateFields.profileImage = imagePath;
 
-      const oldProfilePath = currentUser.profile || currentUser.profileImage;
-      if (oldProfilePath) {
-        const oldPath = path.resolve(oldProfilePath);
+      // Delete old profile image
+      if (currentUser.profileImage) {
+        const oldPath = path.resolve(currentUser.profileImage);
+
         fs.access(oldPath, fs.constants.F_OK, (err) => {
           if (!err) {
             fs.unlink(oldPath, (err) => {
-              if (err) console.log("❌ Failed to delete old image:", err.message);
-              else console.log("✅ Old image deleted");
+              if (err) {
+                console.log("Failed to delete old image:", err.message);
+              }
             });
           }
         });
@@ -248,57 +303,166 @@ exports.updateMyProfile = async (req, res) => {
     }
 
     if (req.role === "ADMIN") {
-      updateFields = {
-        ...updateFields,
-        name: req.body.name,
-        mobile: req.body.mobile,
-      };
+      updateFields.name = req.body.name;
+      updateFields.mobile = req.body.mobile;
     } else {
-      updateFields = {
-        ...updateFields,
-        fullName: req.body.fullName,
-        phone: req.body.phone,
-        address: req.body.address,
-        city: req.body.city,
-        state: req.body.state,
-        postcode: req.body.postcode,
-        country: req.body.country,
-        emergencyContact: req.body.emergencyContact,
-        relationship: req.body.relationship,
-      };
+      updateFields.fullName = req.body.fullName;
+      updateFields.phone = req.body.phone;
+      updateFields.address = req.body.address;
+      updateFields.city = req.body.city;
+      updateFields.state = req.body.state;
+      updateFields.postcode = req.body.postcode;
+      updateFields.country = req.body.country;
+      updateFields.emergencyContact = req.body.emergencyContact;
+      updateFields.relationship = req.body.relationship;
 
       if (req.body.notificationSettings) {
-        try {
-          updateFields.notificationSettings = typeof req.body.notificationSettings === "string"
+        updateFields.notificationSettings =
+          typeof req.body.notificationSettings === "string"
             ? JSON.parse(req.body.notificationSettings)
             : req.body.notificationSettings;
-        } catch (e) {
-          // ignore parsing error
-        }
       }
     }
 
-    Object.keys(updateFields).forEach(
-      (key) => updateFields[key] === undefined && delete updateFields[key]
-    );
+    // Remove undefined values
+    Object.keys(updateFields).forEach((key) => {
+      if (updateFields[key] === undefined) {
+        delete updateFields[key];
+      }
+    });
 
-    const updated = await Model.findByIdAndUpdate(
+    const updatedUser = await Model.findByIdAndUpdate(
       currentUser._id,
       updateFields,
-      { new: true }
+      {
+        new: true,
+        runValidators: true,
+      }
     ).lean();
 
-    delete updated.password;
-    delete updated.tokens;
-    delete updated.otp;
-    delete updated.otpExpire;
+    delete updatedUser.password;
+    delete updatedUser.tokens;
+    delete updatedUser.otp;
+    delete updatedUser.otpExpire;
 
-    res.json({
+    return res.status(200).json({
       success: true,
-      message: "Profile updated successfully",
-      data: updated,
+      message: "Profile updated successfully.",
+      data: updatedUser,
     });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+
+exports.updateChild = async (req, res) => {
+  try {
+    const { childId } = req.params;
+
+    // Ensure child belongs to logged-in parent
+    const child = await User.findOne({
+      _id: childId,
+      parentId: req.parent._id,
+    });
+
+    if (!child) {
+      return res.status(404).json({
+        success: false,
+        message: "Child not found.",
+      });
+    }
+
+    const updateFields = {};
+
+    if (req.body.firstName !== undefined)
+      updateFields.firstName = req.body.firstName;
+
+    if (req.body.lastName !== undefined)
+      updateFields.lastName = req.body.lastName;
+
+    if (
+      req.body.firstName !== undefined ||
+      req.body.lastName !== undefined
+    ) {
+      updateFields.fullName = `${req.body.firstName || child.firstName} ${
+        req.body.lastName || child.lastName
+      }`;
+    }
+
+    if (req.body.email !== undefined)
+      updateFields.email = req.body.email || null;
+
+    if (req.body.phone !== undefined)
+      updateFields.phone = req.body.phone || null;
+
+    if (req.body.gender !== undefined)
+      updateFields.gender = req.body.gender;
+
+    if (req.body.comments !== undefined)
+      updateFields.comments = req.body.comments;
+
+    if (req.body.jerseyNumber !== undefined)
+      updateFields.jerseyNumber = req.body.jerseyNumber;
+
+    if (req.body.prefferedFoot !== undefined)
+      updateFields.prefferedFoot = req.body.prefferedFoot;
+
+    if (req.body.isMedicalCondition !== undefined)
+      updateFields.isMedicalCondition = req.body.isMedicalCondition;
+
+    if (req.body.medicalConditionDetails !== undefined)
+      updateFields.medicalConditionDetails = req.body.medicalConditionDetails;
+
+    // Parse DOB
+    if (req.body.dob) {
+      const parts = req.body.dob.split("/");
+
+      if (parts.length === 3) {
+        updateFields.dob = new Date(
+          `${parts[2]}-${parts[1]}-${parts[0]}`
+        );
+      } else {
+        updateFields.dob = new Date(req.body.dob);
+      }
+    }
+
+    // Profile Image
+    if (req.file) {
+      updateFields.profileImage = `uploads/profiles/${req.file.filename}`;
+
+      if (child.profileImage) {
+        const oldPath = path.resolve(child.profileImage);
+
+        fs.access(oldPath, fs.constants.F_OK, (err) => {
+          if (!err) {
+            fs.unlink(oldPath, () => {});
+          }
+        });
+      }
+    }
+
+    const updatedChild = await User.findByIdAndUpdate(
+      childId,
+      updateFields,
+      {
+        new: true,
+        runValidators: true,
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Child updated successfully.",
+      data: updatedChild,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };

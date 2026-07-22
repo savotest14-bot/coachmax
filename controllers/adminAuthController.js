@@ -1955,7 +1955,7 @@ exports.exportClassCSV = async (req, res) => {
       DOB: player.dob ? new Date(player.dob).toISOString().split("T")[0] : "",
       Phone: player.phone,
       Guardian: player.contactName,
-      paymentStatus:player.paymentStatus
+      paymentStatus: player.paymentStatus
     };
 
     // Add session columns
@@ -2021,6 +2021,52 @@ exports.getMyRole = async (req, res) => {
     return res.status(401).json({
       success: false,
       message: "Unauthorized",
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+exports.getPlayerDetails = async (req, res) => {
+  try {
+    const { playerId } = req.params;
+
+    const player = await User.findById(playerId)
+      .populate({
+        path: "parentId",
+        select: "-password -tokens -otp -otpExpire -__v",
+      })
+      .populate("category", "name")
+      .populate("programs", "name")
+      .populate("term", "name")
+      .populate("assignedClasses", "name")
+      .lean();
+
+    if (!player) {
+      return res.status(404).json({
+        success: false,
+        message: "Player not found",
+      });
+    }
+
+    const otherPlayers = await User.find({
+      parentId: player.parentId._id,
+      _id: { $ne: player._id },
+    })
+      .select("_id fullName")
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      message: "Player details fetched successfully.",
+      data: {
+        player,
+        parent: player.parentId,
+        otherPlayers,
+      },
     });
   } catch (error) {
     return res.status(500).json({

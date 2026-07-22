@@ -41,6 +41,7 @@ const {
   getAllClassesForAssign,
   updatePlayerRating,
   removeClassFromUser,
+  getPlayerDetails,
 } = require("../controllers/adminAuthController");
 
 const {
@@ -269,5 +270,12 @@ router.post("/payments/:id/reject", auth, isAdmin, rejectPayment);
 
 // ✅ Admin Dashboard / Statistics
 router.get("/dashboard/payments", auth, isAdmin, getPaymentDashboardStats);
+
+router.get(
+  "/player/:playerId",
+  auth,
+  isAdmin,
+  getPlayerDetails
+);
 
 module.exports = router;
