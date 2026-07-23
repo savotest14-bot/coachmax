@@ -34,6 +34,14 @@ const attendanceSchema = new mongoose.Schema(
           type: String,
           default: "",
         },
+        reason: {
+          type: String,
+          default: "",
+        },
+        markedByParent: {
+          type: Boolean,
+          default: false,
+        },
         lateArrival: {
           type: Boolean,
           default: false,

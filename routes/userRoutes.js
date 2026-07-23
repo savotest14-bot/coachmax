@@ -16,6 +16,7 @@ const {
   getPlayerProfile,
   getAllPrograms,
   getClasses,
+  markPlayerAbsent,
 } = require("../controllers/userController");
 
 const {
@@ -24,9 +25,11 @@ const {
 } = require("../controllers/medicalController");
 
 const {
-  getPlayerAssessments,
-  getSkillProgress,
-} = require("../controllers/assessmentController");
+  getParentNotifications,
+  markParentNotificationRead,
+  markAllParentNotificationsRead,
+  saveParentFcmToken,
+} = require("../controllers/notificationController");
 
 const {
   getClassTrainingSessions,
@@ -90,6 +93,7 @@ const {
   getMyEvents,
   getEventDetails,
 } = require("../controllers/eventController");
+const { getPlayerAssessments, getSkillProgress } = require("../controllers/assessmentController");
 
 const router = express.Router();
 
@@ -120,6 +124,8 @@ router.get("/getDashboard", auth, getDashboard);
 // Classes & Attendance
 router.get("/getMyClasses/:playerId", auth, getMyClasses);
 router.get("/getMyAttendanceByClass/:classId", auth, getMyAttendanceByClass);
+router.post("/attendance/mark-absent", auth, markPlayerAbsent);
+
 
 // Medical profile
 router.get("/medical/:playerId", auth, getMedicalProfile);
@@ -192,5 +198,10 @@ router.get("/documents/:playerId", auth, getPlayerDocuments);
 router.get("/player/profile/:playerId", auth, getPlayerProfile);
 
 router.get("/classes", getClasses);
+
+// Notifications & FCM Push Tokens (Parent)
+router.get("/notifications", auth, getParentNotifications);
+router.patch("/notifications/read-all", auth, markAllParentNotificationsRead);
+router.patch("/notifications/:notificationId/read", auth, markParentNotificationRead);
 
 module.exports = router;

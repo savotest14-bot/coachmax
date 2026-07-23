@@ -5,6 +5,7 @@ const Order = require("../models/Order");
 const Invoice = require("../models/Invoice");
 const Parent = require("../models/Parent");
 const mongoose = require("mongoose");
+const { sendNotification } = require("../services/notificationService");
 
 // ✅ ProductCategory Create (Admin only)
 exports.createCategory = async (req, res) => {
@@ -595,6 +596,27 @@ exports.checkout = async (req, res) => {
 
     await session.commitTransaction();
     session.endSession();
+
+    // Send Admin Notification & Push Notification for new store order
+    try {
+      const parentDoc = await Parent.findById(parentId).select("fullName");
+      const parentName = parentDoc ? parentDoc.fullName : "Parent";
+
+      await sendNotification({
+        recipientType: "ADMIN",
+        adminId: null,
+        title: "New Store Order Placed 🛒",
+        message: `${parentName} placed a store order of $${totalAmount} (${orderItems.length} item(s)). Invoice #${invoiceNumber}.`,
+        type: "ANNOUNCEMENT",
+        data: {
+          orderId: String(order[0]._id),
+          invoiceId: String(invoice[0]._id),
+          parentId: String(parentId),
+        },
+      });
+    } catch (notifErr) {
+      console.error("Admin checkout notification error:", notifErr.message);
+    }
 
     res.status(201).json({
       success: true,

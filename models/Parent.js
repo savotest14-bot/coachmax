@@ -59,6 +59,7 @@ const parentSchema = new mongoose.Schema(
       default: false,
     },
     tokens: [{ type: String }],
+    fcmTokens: [{ type: String }],
     otp: String,
     otpExpire: Date,
     isOtpVerified: {

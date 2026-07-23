@@ -5,6 +5,8 @@ const Parent = require("../models/Parent");
 const User = require("../models/User");
 const Order = require("../models/Order");
 const Notification = require("../models/Notification");
+const BankDetails = require("../models/BankDetails");
+const { sendNotification } = require("../services/notificationService");
 
 // ✅ Parent Pay COD (Cash on Delivery / Offline)
 exports.payCOD = async (req, res) => {
@@ -13,32 +15,25 @@ exports.payCOD = async (req, res) => {
     const { invoiceId } = req.params;
     const { remarks = "" } = req.body;
 
-    const invoice = await Invoice.findOne({ _id: invoiceId, parent: parentId });
+    const invoice = await Invoice.findById(invoiceId);
     if (!invoice) {
       return res.status(404).json({
         success: false,
-        message: "Invoice not found or unauthorized",
+        message: "Invoice not found",
       });
     }
 
-    if (invoice.status === "CANCELLED") {
-      return res.status(400).json({
+    if (invoice.parent.toString() !== parentId.toString()) {
+      return res.status(403).json({
         success: false,
-        message: "Cannot pay a cancelled invoice",
+        message: "Unauthorized invoice access",
       });
     }
 
     if (invoice.paymentStatus === "PAID") {
       return res.status(400).json({
         success: false,
-        message: "Invoice is already paid",
-      });
-    }
-
-    if (invoice.paymentStatus === "PAYMENT_PENDING") {
-      return res.status(400).json({
-        success: false,
-        message: "A payment verification is already pending for this invoice",
+        message: "Invoice has already been paid",
       });
     }
 
@@ -55,13 +50,19 @@ exports.payCOD = async (req, res) => {
     invoice.paymentStatus = "PAYMENT_PENDING";
     await invoice.save();
 
-    // Create Notification for Admin (optional)
+    // Create Notification for Admin
     try {
-      await Notification.create({
-        parent: parentId,
+      await sendNotification({
+        recipientType: "ADMIN",
+        adminId: null,
         title: "COD Payment Submitted 💵",
         message: `Parent submitted Cash on Delivery payment request for Invoice #${invoice.invoiceNumber}. Pending approval.`,
         type: "PAYMENT_SUBMITTED",
+        data: {
+          invoiceId: String(invoice._id),
+          paymentId: String(payment._id),
+          parentId: String(parentId),
+        },
       });
     } catch (notifErr) {
       console.error("Notification error:", notifErr.message);
@@ -147,13 +148,19 @@ exports.payOnline = async (req, res) => {
     invoice.paymentStatus = "PAYMENT_PENDING";
     await invoice.save();
 
-    // Create Notification
+    // Create Notification for Admin
     try {
-      await Notification.create({
-        parent: parentId,
-        title: "Payment Submitted 📤",
+      await sendNotification({
+        recipientType: "ADMIN",
+        adminId: null,
+        title: "Payment Proof Submitted 📤",
         message: `Online payment proof for Invoice #${invoice.invoiceNumber} has been uploaded. Pending admin verification.`,
         type: "PAYMENT_SUBMITTED",
+        data: {
+          invoiceId: String(invoice._id),
+          paymentId: String(payment._id),
+          parentId: String(parentId),
+        },
       });
     } catch (notifErr) {
       console.error("Notification error:", notifErr.message);
@@ -231,6 +238,43 @@ exports.resubmitPayment = async (req, res) => {
 };
 
 // ✅ Get Parent Payment History
+// exports.getParentPayments = async (req, res) => {
+//   try {
+//     const parentId = req.parent._id;
+//     const { page = 1, limit = 10 } = req.query;
+
+//     const currentPage = Math.max(1, parseInt(page, 10) || 1);
+//     const pageLimit = Math.max(1, parseInt(limit, 10) || 10);
+//     const skip = (currentPage - 1) * pageLimit;
+
+//     const [payments, total] = await Promise.all([
+//       Payment.find({ parent: parentId })
+//         .populate("invoice", "invoiceNumber totalAmount items paymentStatus dueDate")
+//         .sort({ createdAt: -1 })
+//         .skip(skip)
+//         .limit(pageLimit),
+//       Payment.countDocuments({ parent: parentId }),
+//     ]);
+
+//     return res.status(200).json({
+//       success: true,
+//       count: payments.length,
+//       pagination: {
+//         page: currentPage,
+//         limit: pageLimit,
+//         total,
+//         pages: Math.ceil(total / pageLimit),
+//       },
+//       data: payments,
+//     });
+//   } catch (err) {
+//     return res.status(500).json({
+//       success: false,
+//       message: err.message,
+//     });
+//   }
+// };
+
 exports.getParentPayments = async (req, res) => {
   try {
     const parentId = req.parent._id;
@@ -240,25 +284,41 @@ exports.getParentPayments = async (req, res) => {
     const pageLimit = Math.max(1, parseInt(limit, 10) || 10);
     const skip = (currentPage - 1) * pageLimit;
 
-    const [payments, total] = await Promise.all([
+    const [payments, total, bankDetails] = await Promise.all([
       Payment.find({ parent: parentId })
-        .populate("invoice", "invoiceNumber totalAmount items paymentStatus dueDate")
+        .populate(
+          "invoice",
+          "invoiceNumber totalAmount items paymentStatus dueDate"
+        )
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(pageLimit),
+
       Payment.countDocuments({ parent: parentId }),
+
+      BankDetails.findOne({ isActive: true }), // Change this query if needed
     ]);
+
+    const data = payments.map((payment) => {
+      const paymentObj = payment.toObject();
+
+      if (paymentObj.status === "REJECTED") {
+        paymentObj.bankDetails = bankDetails;
+      }
+
+      return paymentObj;
+    });
 
     return res.status(200).json({
       success: true,
-      count: payments.length,
+      count: data.length,
       pagination: {
         page: currentPage,
         limit: pageLimit,
         total,
         pages: Math.ceil(total / pageLimit),
       },
-      data: payments,
+      data,
     });
   } catch (err) {
     return res.status(500).json({
@@ -267,6 +327,7 @@ exports.getParentPayments = async (req, res) => {
     });
   }
 };
+
 
 // ✅ Get Admin Payments List (Search & Filter)
 exports.getAdminPayments = async (req, res) => {
@@ -463,11 +524,16 @@ exports.approvePayment = async (req, res) => {
 
     // 5. Send Notification to Parent
     try {
-      await Notification.create({
-        parent: payment.parent,
+      await sendNotification({
+        recipientType: "PARENT",
+        parentId: payment.parent,
         title: "Payment Approved 🎉",
         message: `Your payment of ${payment.amount} for Invoice #${invoice.invoiceNumber} has been verified & approved.`,
         type: "PAYMENT_APPROVED",
+        data: {
+          paymentId: String(payment._id),
+          invoiceId: String(invoice._id),
+        },
       });
     } catch (notifErr) {
       console.error("Notification error:", notifErr.message);
@@ -521,11 +587,17 @@ exports.rejectPayment = async (req, res) => {
 
     // Send Notification to Parent
     try {
-      await Notification.create({
-        parent: payment.parent,
+      await sendNotification({
+        recipientType: "PARENT",
+        parentId: payment.parent,
         title: "Payment Rejected ❌",
         message: `Your payment proof for Invoice #${invoice ? invoice.invoiceNumber : ""} was rejected. Reason: ${reason}. Please resubmit payment.`,
         type: "PAYMENT_REJECTED",
+        data: {
+          paymentId: String(payment._id),
+          invoiceId: invoice ? String(invoice._id) : "",
+          reason,
+        },
       });
     } catch (notifErr) {
       console.error("Notification error:", notifErr.message);

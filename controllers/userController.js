@@ -17,6 +17,7 @@ const Notification = require("../models/Notification");
 const bcrypt = require("bcryptjs");
 const generateToken = require("../utils/generateToken");
 const mongoose = require("mongoose");
+const { sendNotification } = require("../services/notificationService");
 
 // Helper function to create admin notifications for enrollment requests
 const createAdminNotificationForRequest = async ({
@@ -50,11 +51,17 @@ Programs: ${programNames || "N/A"}
 Preferred Term: ${termDoc ? termDoc.name : "N/A"}
 Preferred Classes: ${classNames || "None"}`;
 
-    await Notification.create({
-      parent: parent,
-      title: "New Enrollment Request",
+    await sendNotification({
+      recipientType: "ADMIN",
+      adminId: null,
+      title: "New Enrollment Request 📝",
       message: message,
       type: "ENROLLMENT_REQUEST",
+      data: {
+        parentId: parent ? String(parent) : "",
+        playerId: player ? String(player) : "",
+        requestType,
+      },
     });
   } catch (err) {
     console.error("Failed to create admin notification:", err.message);
@@ -79,6 +86,7 @@ exports.register = async (req, res) => {
       emergencyContact,
       relationship,
       players,
+      fcmToken,
     } = req.body;
 
     // Parse players if sent as string in multipart/form-data
@@ -139,6 +147,7 @@ exports.register = async (req, res) => {
           relationship,
           emailVerified: false,
           phoneVerified: false,
+          fcmTokens: fcmToken ? [fcmToken] : [],
         },
       ],
       { session }
@@ -369,7 +378,7 @@ exports.register = async (req, res) => {
 // ✅ Parent Login
 exports.login = async (req, res) => {
   try {
-    const { email, phone, password } = req.body;
+    const { email, phone, password, fcmToken } = req.body;
 
     if ((!email && !phone) || !password) {
       return res.status(400).json({
@@ -400,6 +409,15 @@ exports.login = async (req, res) => {
     const token = generateToken(parent._id);
     parent.tokens = parent.tokens || [];
     parent.tokens.push(token);
+
+    // Push fcmToken uniquely if provided
+    if (fcmToken) {
+      parent.fcmTokens = parent.fcmTokens || [];
+      if (!parent.fcmTokens.includes(fcmToken)) {
+        parent.fcmTokens.push(fcmToken);
+      }
+    }
+
     await parent.save();
 
     // Fetch parent's children
@@ -428,7 +446,13 @@ exports.login = async (req, res) => {
 exports.logout = async (req, res) => {
   try {
     const token = req.token;
+    const { fcmToken } = req.body || {};
+
     req.parent.tokens = req.parent.tokens.filter((t) => t !== token);
+    if (fcmToken && req.parent.fcmTokens) {
+      req.parent.fcmTokens = req.parent.fcmTokens.filter((ft) => ft !== fcmToken);
+    }
+
     await req.parent.save();
     res.json({ success: true, message: "Logged out successfully" });
   } catch (err) {
@@ -770,6 +794,17 @@ exports.requestAddProgram = async (req, res) => {
       createdBy: req.parent._id,
     });
 
+    // Set hasPendingRequest flag on player if already assigned any class/program/term
+    const isAlreadyAssigned =
+      (player.assignedClasses && player.assignedClasses.length > 0) ||
+      (player.programs && player.programs.length > 0) ||
+      Boolean(player.term);
+
+    if (isAlreadyAssigned) {
+      player.hasPendingRequest = true;
+      await player.save();
+    }
+
     // Create Admin Notification (non-blocking)
     createAdminNotificationForRequest({
       parent: req.parent._id,
@@ -830,12 +865,18 @@ const generateClassSessions = (term, classObj) => {
 // ✅ Fetch Classes with Attendance for Child
 exports.getMyClasses = async (req, res) => {
   try {
-    // Determine player ID (query param or default to parent's first child)
-    let playerId = req.params.playerId;
+    // Determine player ID (path param, query param, or default to parent's first child)
+    let playerId = req.params.playerId || req.query.playerId;
     if (!playerId) {
       const firstChild = await User.findOne({ parentId: req.parent._id });
       if (!firstChild) {
-        return res.status(200).json({ success: true, data: [] });
+        return res.status(200).json({
+          success: true,
+          message: "Classes with attendance fetched successfully",
+          overallAttendancePercentage: 0,
+          currentMonthCalendar: null,
+          data: [],
+        });
       }
       playerId = firstChild._id;
     } else {
@@ -877,15 +918,17 @@ exports.getMyClasses = async (req, res) => {
     });
 
     const result = [];
+    const dayNames = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
+
     for (const cls of player.assignedClasses) {
+      if (!cls.term) continue;
+
       const classAttendance = attendanceByClass[cls._id.toString()] || [];
       const allSessions = generateClassSessions(cls.term, cls);
       const sessions = [];
 
       let presentCount = 0;
       let missedSessions = 0;
-
-      const dayNames = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
 
       allSessions.forEach((sessionDate) => {
         const normalizedDate = new Date(sessionDate);
@@ -898,12 +941,19 @@ exports.getMyClasses = async (req, res) => {
         });
 
         let status = "NOT_MARKED";
+        let reason = "";
+        let remarks = "";
+        let markedByParent = false;
+
         if (attendanceRecord) {
           const record = attendanceRecord.records.find(
             (r) => r.player.toString() === playerId.toString()
           );
           if (record) {
             status = record.status;
+            reason = record.reason || record.remarks || "";
+            remarks = record.remarks || "";
+            markedByParent = record.markedByParent || false;
           } else {
             status = "ABSENT";
           }
@@ -918,6 +968,9 @@ exports.getMyClasses = async (req, res) => {
           startTime: cls.startTime,
           endTime: cls.endTime,
           status,
+          reason,
+          remarks,
+          markedByParent,
         });
       });
 
@@ -942,9 +995,120 @@ exports.getMyClasses = async (req, res) => {
       });
     }
 
+    // ---------------------------------------------------
+    // 1. Overall Attendance Percentage
+    // ---------------------------------------------------
+    let grandTotalSessions = 0;
+    let grandTotalPresent = 0;
+
+    for (const item of result) {
+      grandTotalSessions += item.totalSessions;
+      grandTotalPresent += item.presentCount;
+    }
+
+    const overallAttendancePercentage =
+      grandTotalSessions > 0
+        ? Number(((grandTotalPresent / grandTotalSessions) * 100).toFixed(1))
+        : 0;
+
+    // ---------------------------------------------------
+    // 2. Current Month Calendar (All classes data in target/current month)
+    // ---------------------------------------------------
+    const now = new Date();
+    const targetYear = req.query.year ? Number(req.query.year) : now.getUTCFullYear();
+    const targetMonth = req.query.month ? Number(req.query.month) : now.getUTCMonth() + 1;
+
+    const monthNames = [
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December"
+    ];
+
+    const currentMonthName = monthNames[targetMonth - 1] || "July";
+    const currentMonthYearStr = `${currentMonthName} ${targetYear}`;
+
+    const currentMonthEvents = [];
+    let currentMonthPresentCount = 0;
+    let currentMonthMissedCount = 0;
+
+    for (const item of result) {
+      for (const sess of item.sessions) {
+        const d = new Date(sess.date);
+        const sessYear = d.getUTCFullYear();
+        const sessMonth = d.getUTCMonth() + 1;
+
+        if (sessYear === targetYear && sessMonth === targetMonth) {
+          if (sess.status === "PRESENT") {
+            currentMonthPresentCount++;
+          } else if (sess.status === "ABSENT") {
+            currentMonthMissedCount++;
+          }
+
+          currentMonthEvents.push({
+            date: sess.date,
+            day: sess.day,
+            startTime: sess.startTime,
+            endTime: sess.endTime,
+            status: sess.status,
+            classId: item.classId,
+            className: item.className,
+            program: item.program,
+            category: item.category,
+            coach: item.coach,
+            term: item.term,
+          });
+        }
+      }
+    }
+
+    currentMonthEvents.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    const totalCurrentMonthSessions = currentMonthEvents.length;
+    const currentMonthAttendancePercentage =
+      totalCurrentMonthSessions > 0
+        ? Number(((currentMonthPresentCount / totalCurrentMonthSessions) * 100).toFixed(1))
+        : 0;
+
+    // Group current month events by date
+    const daysMap = {};
+    currentMonthEvents.forEach((evt) => {
+      if (!daysMap[evt.date]) {
+        daysMap[evt.date] = {
+          date: evt.date,
+          day: evt.day,
+          classes: [],
+        };
+      }
+      daysMap[evt.date].classes.push({
+        classId: evt.classId,
+        className: evt.className,
+        startTime: evt.startTime,
+        endTime: evt.endTime,
+        status: evt.status,
+        program: evt.program,
+        category: evt.category,
+        coach: evt.coach,
+        term: evt.term,
+      });
+    });
+
+    const currentMonthCalendar = {
+      month: currentMonthName,
+      year: targetYear,
+      monthNumber: targetMonth,
+      monthYear: currentMonthYearStr,
+      attendancePercentage: currentMonthAttendancePercentage,
+      totalSessions: totalCurrentMonthSessions,
+      presentCount: currentMonthPresentCount,
+      missedSessions: currentMonthMissedCount,
+      days: Object.values(daysMap).sort((a, b) => new Date(a.date) - new Date(b.date)),
+      events: currentMonthEvents,
+    };
+
     return res.status(200).json({
       success: true,
       message: "Classes with attendance fetched successfully",
+      overallAttendancePercentage,
+      currentMonthCalendar,
       data: result,
     });
   } catch (error) {
@@ -1257,6 +1421,185 @@ exports.getClasses = async (req, res) => {
       success: true,
       count: classes.length,
       data: classes,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+// ✅ Parent Mark Player Absent for Class Session
+exports.markPlayerAbsent = async (req, res) => {
+  try {
+    const parentId = req.parent._id;
+    const { playerId, classId, sessionDate, reason } = req.body;
+
+    if (!playerId || !classId || !sessionDate) {
+      return res.status(400).json({
+        success: false,
+        message: "playerId, classId, and sessionDate are required",
+      });
+    }
+
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Reason for absence is required",
+      });
+    }
+
+    // 1. Validate Parent ownership of Child Profile
+    const childDoc = await User.findOne({ _id: playerId, parentId });
+    if (!childDoc) {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized child profile",
+      });
+    }
+
+    // 2. Validate Class & Enrollment
+    const classDoc = await Class.findById(classId).populate("term");
+    if (!classDoc) {
+      return res.status(404).json({
+        success: false,
+        message: "Class not found",
+      });
+    }
+
+    const isAssigned =
+      childDoc.assignedClasses &&
+      childDoc.assignedClasses.some((c) => c.toString() === classId.toString());
+    if (!isAssigned) {
+      return res.status(400).json({
+        success: false,
+        message: "Player is not enrolled in this class",
+      });
+    }
+
+    // 3. Date & Session Timing Validation (Today or Future sessions only)
+    const targetDate = new Date(sessionDate);
+    if (isNaN(targetDate.getTime())) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid sessionDate format",
+      });
+    }
+
+    targetDate.setUTCHours(0, 0, 0, 0);
+
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+
+    if (targetDate.getTime() < today.getTime()) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Cannot mark absent for past class sessions. You can only mark absent for today's session or future upcoming sessions.",
+      });
+    }
+
+    // Check if session date falls within Term range and matches day of week
+    if (classDoc.term) {
+      const termStart = new Date(classDoc.term.startDate);
+      termStart.setUTCHours(0, 0, 0, 0);
+      const termEnd = new Date(classDoc.term.endDate);
+      termEnd.setUTCHours(23, 59, 59, 999);
+
+      if (targetDate < termStart || targetDate > termEnd) {
+        return res.status(400).json({
+          success: false,
+          message: `Session date is outside of Term dates (${classDoc.term.name})`,
+        });
+      }
+
+      if (classDoc.dayOfWeek) {
+        const dayNames = [
+          "SUNDAY",
+          "MONDAY",
+          "TUESDAY",
+          "WEDNESDAY",
+          "THURSDAY",
+          "FRIDAY",
+          "SATURDAY",
+        ];
+        const sessionDay = dayNames[targetDate.getUTCDay()];
+        if (sessionDay !== classDoc.dayOfWeek.toUpperCase()) {
+          return res.status(400).json({
+            success: false,
+            message: `Selected date is a ${sessionDay}, but this class runs on ${classDoc.dayOfWeek}`,
+          });
+        }
+      }
+    }
+
+    // 4. Find or Create Attendance Document
+    let attendanceDoc = await Attendance.findOne({
+      class: classId,
+      sessionDate: targetDate,
+    });
+
+    if (!attendanceDoc) {
+      attendanceDoc = new Attendance({
+        class: classId,
+        sessionDate: targetDate,
+        records: [],
+      });
+    }
+
+    // Check if record for this player already exists
+    const recordIndex = attendanceDoc.records.findIndex(
+      (r) => r.player.toString() === playerId.toString()
+    );
+
+    if (recordIndex >= 0) {
+      attendanceDoc.records[recordIndex].status = "ABSENT";
+      attendanceDoc.records[recordIndex].remarks = reason.trim();
+      attendanceDoc.records[recordIndex].reason = reason.trim();
+      attendanceDoc.records[recordIndex].markedByParent = true;
+    } else {
+      attendanceDoc.records.push({
+        player: playerId,
+        status: "ABSENT",
+        remarks: reason.trim(),
+        reason: reason.trim(),
+        markedByParent: true,
+      });
+    }
+
+    await attendanceDoc.save();
+
+    // 5. Send Notification to Admin
+    try {
+      const formattedDateStr = targetDate.toISOString().split("T")[0];
+      await sendNotification({
+        recipientType: "ADMIN",
+        adminId: null,
+        title: "Player Absence Notice 😷",
+        message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for class "${classDoc.name}" on ${formattedDateStr}. Reason: ${reason.trim()}`,
+        type: "ATTENDANCE_ALERT",
+        data: {
+          playerId: String(playerId),
+          classId: String(classId),
+          sessionDate: formattedDateStr,
+          reason: reason.trim(),
+        },
+      });
+    } catch (notifErr) {
+      console.error("Absence notice notification error:", notifErr.message);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Player marked as absent for the class session successfully",
+      data: {
+        playerId,
+        classId,
+        sessionDate: targetDate.toISOString().split("T")[0],
+        status: "ABSENT",
+        reason: reason.trim(),
+      },
     });
   } catch (error) {
     return res.status(500).json({

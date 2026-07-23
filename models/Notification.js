@@ -2,13 +2,21 @@ const mongoose = require("mongoose");
 
 const notificationSchema = new mongoose.Schema(
   {
+    recipientType: {
+      type: String,
+      enum: ["ADMIN", "PARENT", "ALL"],
+      required: true,
+      default: "PARENT",
+    },
     parent: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Parent",
+      default: null,
     },
     admin: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Admin",
+      default: null,
     },
     title: {
       type: String,
@@ -34,12 +42,21 @@ const notificationSchema = new mongoose.Schema(
         "PAYMENT_APPROVED",
         "PAYMENT_REJECTED",
         "ORDER_PAID",
+        "GENERAL",
       ],
       default: "ANNOUNCEMENT",
     },
     isRead: {
       type: Boolean,
       default: false,
+    },
+    readAt: {
+      type: Date,
+      default: null,
+    },
+    data: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
     },
   },
   { timestamps: true }

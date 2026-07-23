@@ -3,6 +3,7 @@ const Parent = require("../models/Parent");
 const User = require("../models/User");
 const BankDetails = require("../models/BankDetails");
 const Notification = require("../models/Notification");
+const { sendNotification } = require("../services/notificationService");
 
 // Helper to generate sequential invoice number e.g. INV-2026-000001
 const generateInvoiceNumber = async () => {
@@ -116,11 +117,16 @@ exports.createInvoice = async (req, res) => {
 
     // Create Notification for Parent
     try {
-      await Notification.create({
-        parent: parentId,
+      await sendNotification({
+        recipientType: "PARENT",
+        parentId: parentId,
         title: "New Invoice Issued 📄",
         message: `An invoice #${invoiceNumber} for amount ${finalTotal} has been issued. Due date: ${new Date(dueDate).toLocaleDateString()}.`,
         type: "INVOICE_CREATED",
+        data: {
+          invoiceId: String(invoice._id),
+          totalAmount: String(finalTotal),
+        },
       });
     } catch (notifErr) {
       console.error("Notification creation failed:", notifErr.message);

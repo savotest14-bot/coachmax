@@ -85,6 +85,11 @@ const userSchema = new mongoose.Schema(
       default: false,
     },
 
+    hasPendingRequest: {
+      type: Boolean,
+      default: false,
+    },
+
     assignedClasses: [
       {
         type: mongoose.Schema.Types.ObjectId,

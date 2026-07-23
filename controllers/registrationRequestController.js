@@ -6,6 +6,7 @@ const Term = require("../models/Term");
 const Category = require("../models/Category");
 const Program = require("../models/Program");
 const Notification = require("../models/Notification");
+const { sendNotification } = require("../services/notificationService");
 
 // ✅ List / Search / Filter Registration Requests (Admin)
 exports.getRegistrationRequests = async (req, res) => {
@@ -17,6 +18,7 @@ exports.getRegistrationRequests = async (req, res) => {
       program,
       searchParent,
       searchPlayer,
+      isMedicalCondition,
       search,
       page = 1,
       limit = 10,
@@ -25,11 +27,9 @@ exports.getRegistrationRequests = async (req, res) => {
     page = Number(page);
     limit = Number(limit);
 
-    const query = {};
-
-    if (status) {
-      query.status = status;
-    }
+    const query = {
+      status: status ? status.toUpperCase() : "PENDING",
+    };
 
     if (requestType) {
       query.requestType = requestType;
@@ -53,15 +53,24 @@ exports.getRegistrationRequests = async (req, res) => {
       query.parent = { $in: parentIds };
     }
 
-    // Search by player name
-    if (searchPlayer) {
-      const players = await User.find({
-        $or: [
+    // Search/filter by player (name, isMedicalCondition)
+    if (searchPlayer || (isMedicalCondition !== undefined && isMedicalCondition !== "")) {
+      const playerFilter = {};
+
+      if (searchPlayer) {
+        playerFilter.$or = [
           { fullName: { $regex: searchPlayer, $options: "i" } },
           { firstName: { $regex: searchPlayer, $options: "i" } },
           { lastName: { $regex: searchPlayer, $options: "i" } },
-        ],
-      }).select("_id");
+        ];
+      }
+
+      if (isMedicalCondition !== undefined && isMedicalCondition !== "") {
+        playerFilter.isMedicalCondition =
+          isMedicalCondition === "true" || isMedicalCondition === true;
+      }
+
+      const players = await User.find(playerFilter).select("_id");
       const playerIds = players.map((p) => p._id);
       query.player = { $in: playerIds };
     }
@@ -72,7 +81,7 @@ exports.getRegistrationRequests = async (req, res) => {
       .populate("parent", "fullName email phone address city")
       .populate(
         "player",
-        "firstName lastName fullName email phone dob gender profileImage rating paymentStatus term assignedClasses"
+        "firstName lastName fullName email phone dob gender profileImage rating paymentStatus term assignedClasses prefferedFoot isMedicalCondition medicalConditionDetails hasPendingRequest"
       )
       .populate("category", "name")
       .populate("programs", "name")
@@ -186,14 +195,23 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
       isBlocked: false,
     };
 
+    if (category) {
+      query.category = category;
+    }
+
+    if (program) {
+      query.programs = program;
+    }
+
+    const andConditions = [];
+
     // ---------------------------------------------------
-    // UNALLOCATED -> Players having a PENDING Registration Request
+    // ALLOCATION STATUS FILTERING:
+    // UNALLOCATED -> Players who have NO assigned classes OR have a PENDING request
+    // ALLOCATED   -> Players who HAVE assigned classes AND have NO pending request
     // ---------------------------------------------------
     if (allocationStatus === "UNALLOCATED") {
-      const requestFilter = {
-        status: "PENDING",
-      };
-
+      const requestFilter = { status: "PENDING" };
       if (category) requestFilter.category = category;
       if (program) requestFilter.programs = program;
 
@@ -201,25 +219,25 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
         "player"
       );
 
-      query._id = { $in: pendingPlayerIds };
-    } else {
-      // ---------------------------------------------------
-      // Normal Category / Program Filter
-      // ---------------------------------------------------
-      if (category) {
-        query.category = category;
-      }
+      andConditions.push({
+        $or: [
+          { "assignedClasses.0": { $exists: false } },
+          { assignedClasses: { $size: 0 } },
+          { _id: { $in: pendingPlayerIds } },
+          { hasPendingRequest: true },
+        ],
+      });
+    } else if (allocationStatus === "ALLOCATED") {
+      const requestFilter = { status: "PENDING" };
+      const pendingPlayerIds = await RegistrationRequest.find(requestFilter).distinct(
+        "player"
+      );
 
-      if (program) {
-        query.programs = program;
-      }
-    }
-
-    // ---------------------------------------------------
-    // ALLOCATED -> Players having assigned classes
-    // ---------------------------------------------------
-    if (allocationStatus === "ALLOCATED") {
-      query["assignedClasses.0"] = { $exists: true };
+      andConditions.push({
+        "assignedClasses.0": { $exists: true },
+        _id: { $nin: pendingPlayerIds },
+        hasPendingRequest: { $ne: true },
+      });
     }
 
     // ---------------------------------------------------
@@ -228,13 +246,19 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
     if (search) {
       const regex = new RegExp(search, "i");
 
-      query.$or = [
-        { fullName: regex },
-        { firstName: regex },
-        { lastName: regex },
-        { email: regex },
-        { phone: regex },
-      ];
+      andConditions.push({
+        $or: [
+          { fullName: regex },
+          { firstName: regex },
+          { lastName: regex },
+          { email: regex },
+          { phone: regex },
+        ],
+      });
+    }
+
+    if (andConditions.length > 0) {
+      query.$and = andConditions;
     }
 
     // ---------------------------------------------------
@@ -255,36 +279,31 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
       .sort({ createdAt: -1 });
 
     // ---------------------------------------------------
-    // Attach Registration Request (Only for UNALLOCATED)
+    // Attach Registration Request (if PENDING request exists)
     // ---------------------------------------------------
     let registrationRequestsMap = {};
 
-    if (allocationStatus === "UNALLOCATED") {
-      const registrationRequests = await RegistrationRequest.find({
-        player: { $in: players.map((p) => p._id) },
-        status: "PENDING",
-      })
-        .populate("category", "name")
-        .populate("programs", "name")
-        .populate("preferredTerm", "name");
+    const pendingRequests = await RegistrationRequest.find({
+      player: { $in: players.map((p) => p._id) },
+      status: "PENDING",
+    })
+      .populate("category", "name")
+      .populate("programs", "name")
+      .populate("preferredClasses", "name dayOfWeek startTime endTime venue location")
+      .populate("preferredTerm", "name startDate endDate");
 
-      registrationRequestsMap = registrationRequests.reduce((acc, request) => {
-        acc[request.player.toString()] = request;
-        return acc;
-      }, {});
-    }
+    registrationRequestsMap = pendingRequests.reduce((acc, request) => {
+      acc[request.player.toString()] = request;
+      return acc;
+    }, {});
 
     // ---------------------------------------------------
     // Build Response
     // ---------------------------------------------------
     const data = players.map((player) => {
       const obj = player.toObject();
-
-      if (allocationStatus === "UNALLOCATED") {
-        obj.registrationRequest =
-          registrationRequestsMap[player._id.toString()] || null;
-      }
-
+      obj.registrationRequest =
+        registrationRequestsMap[player._id.toString()] || null;
       return obj;
     });
 
@@ -412,19 +431,6 @@ exports.assignClassesToPlayer = async (req, res) => {
 
     const updatedProgramIds = [...new Set(newProgramIds.filter(Boolean))];
 
-    // Update Player Document (Save actual allocation)
-    playerDoc.assignedClasses = classIds;
-    if (playerDoc.removedClasses) {
-      playerDoc.removedClasses = playerDoc.removedClasses.filter(
-        (c) => !classIds.map((id) => id.toString()).includes(c.toString())
-      );
-    }
-    playerDoc.term = derivedTermId;
-    playerDoc.paymentStatus = paymentStatus;
-    playerDoc.category = assignedCategory;
-    playerDoc.programs = updatedProgramIds;
-    await playerDoc.save();
-
     // Ensure player is added to selected classes' players array
     await Class.updateMany(
       { _id: { $in: classIds } },
@@ -439,6 +445,39 @@ exports.assignClassesToPlayer = async (req, res) => {
       await requestDoc.save();
     }
 
+    // Clear hasPendingRequest flag if no pending requests remain for this player
+    const remainingPendingRequests = await RegistrationRequest.countDocuments({
+      player: playerId,
+      status: "PENDING",
+    });
+
+    if (remainingPendingRequests === 0) {
+      playerDoc.hasPendingRequest = false;
+    }
+
+    // Update Player Document (Add new classes to existing assignedClasses without duplicates)
+    const existingAssignedClassIds = (playerDoc.assignedClasses || []).map((id) =>
+      id.toString()
+    );
+    const updatedAssignedClassIds = [
+      ...new Set([
+        ...existingAssignedClassIds,
+        ...classIds.map((id) => id.toString()),
+      ]),
+    ];
+
+    playerDoc.assignedClasses = updatedAssignedClassIds;
+    if (playerDoc.removedClasses) {
+      playerDoc.removedClasses = playerDoc.removedClasses.filter(
+        (c) => !classIds.map((id) => id.toString()).includes(c.toString())
+      );
+    }
+    playerDoc.term = derivedTermId;
+    playerDoc.paymentStatus = paymentStatus;
+    playerDoc.category = assignedCategory;
+    playerDoc.programs = updatedProgramIds;
+    await playerDoc.save();
+
     // Send Parent Notification
     try {
       const termObj = await Term.findById(derivedTermId).select("name");
@@ -448,11 +487,16 @@ Assigned Classes: ${classNames}
 Term: ${termObj ? termObj.name : "N/A"}
 Payment Status: ${paymentStatus}`;
 
-      await Notification.create({
-        parent: playerDoc.parentId,
+      await sendNotification({
+        recipientType: "PARENT",
+        parentId: playerDoc.parentId,
         title: "Player Enrollment Completed 🎉",
         message: notificationMsg,
         type: "PLAYER_ALLOCATED",
+        data: {
+          playerId: playerDoc._id ? String(playerDoc._id) : "",
+          paymentStatus,
+        },
       });
     } catch (notifErr) {
       console.error("Failed to create parent allocation notification:", notifErr.message);

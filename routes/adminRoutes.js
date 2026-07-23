@@ -45,6 +45,14 @@ const {
 } = require("../controllers/adminAuthController");
 
 const {
+  getAdminNotifications,
+  markAdminNotificationRead,
+  markAllAdminNotificationsRead,
+  saveAdminFcmToken,
+  sendAdminCustomNotification,
+} = require("../controllers/notificationController");
+
+const {
   createAssessment,
 } = require("../controllers/assessmentController");
 
@@ -138,10 +146,6 @@ router.post("/login", adminLogin);
 router.post("/logout", auth, logout);
 router.get("/getUsers", auth, getUsers);
 router.put("/updatePaymentStatus/:userId", auth, isAdmin, updatePaymentStatus);
-router.patch("/updatePaymentStatus/:userId", auth, isAdmin, updatePaymentStatus);
-router.patch("/player/:userId/payment-status", auth, isAdmin, updatePaymentStatus);
-router.put("/player/:userId/payment-status", auth, isAdmin, updatePaymentStatus);
-router.patch("/update-payment-status", auth, isAdmin, updatePaymentStatus);
 router.put("/updateRating/:userId", auth, isAdmin, updatePlayerRating);
 router.post("/assignClass/:userId", auth, isAdmin, assignClassToUser);
 router.post("/removeClass/:userId", auth, isAdmin, removeClassFromUser);
@@ -277,5 +281,11 @@ router.get(
   isAdmin,
   getPlayerDetails
 );
+
+// ✅ Notifications & FCM Push Tokens (Admin)
+router.get("/notifications", auth, isAdmin, getAdminNotifications);
+router.patch("/notifications/read-all", auth, isAdmin, markAllAdminNotificationsRead);
+router.patch("/notifications/:notificationId/read", auth, isAdmin, markAdminNotificationRead);
+router.post("/send-notification", auth, isAdmin, sendAdminCustomNotification);
 
 module.exports = router;

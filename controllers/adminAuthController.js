@@ -18,7 +18,7 @@ const Parent = require("../models/Parent");
 
 exports.adminLogin = async (req, res) => {
   try {
-    const { email, mobile, password } = req.body;
+    const { email, mobile, password, fcmToken } = req.body;
 
     if (!password) {
       return res.status(400).json({ message: "Password is required" });
@@ -44,6 +44,14 @@ exports.adminLogin = async (req, res) => {
     admin.tokens.push(token);
     admin.tokens = admin.tokens.slice(-5);
 
+    // Push fcmToken uniquely if provided
+    if (fcmToken) {
+      admin.fcmTokens = admin.fcmTokens || [];
+      if (!admin.fcmTokens.includes(fcmToken)) {
+        admin.fcmTokens.push(fcmToken);
+      }
+    }
+
     await admin.save();
 
     // remove sensitive fields
@@ -64,19 +72,17 @@ exports.adminLogin = async (req, res) => {
 
 exports.logout = async (req, res) => {
   try {
-    // await Admin.findByIdAndUpdate(
-    //     req.admin._id,
-    //     {
-    //         $pull: {
-    //             tokens: req.token
-    //         }
-    //     },
-    //     { new: true }
-    // );
+    const { fcmToken } = req.body || {};
 
-    await Admin.findByIdAndUpdate(req.admin._id, {
+    const updateQuery = {
       $set: { tokens: [] }
-    });
+    };
+
+    if (fcmToken) {
+      updateQuery.$pull = { fcmTokens: fcmToken };
+    }
+
+    await Admin.findByIdAndUpdate(req.admin._id, updateQuery);
     res.json({ message: "Logged out successfully" });
 
   } catch (err) {
@@ -174,13 +180,13 @@ exports.getUsers = async (req, res) => {
 
 exports.updatePaymentStatus = async (req, res) => {
   try {
-    const userId = req.params.userId || req.params.playerId || req.params.id || req.body.userId || req.body.playerId;
+    const userId = req.params.userId;
     const { paymentStatus } = req.body;
 
     if (!userId) {
       return res.status(400).json({
         success: false,
-        message: "userId or playerId is required",
+        message: "userId is required",
       });
     }
 
@@ -1839,7 +1845,8 @@ exports.getClassFullTable = async (req, res) => {
 
     const cls = await Class.findById(classId)
       .populate("term")
-      .populate("players", "fullName email dob phone contactName paymentStatus");
+      .populate("coach", "name")
+      .populate("players", "fullName email dob phone contactName paymentStatus isMedicalCondition medicalConditionDetails rating prefferedFoot");
 
     if (!cls) {
       return res.status(404).json({ message: "Class not found" });
@@ -1888,6 +1895,10 @@ exports.getClassFullTable = async (req, res) => {
         dob: player.dob,
         phone: player.phone,
         guardian: player.contactName,
+        isMedicalCondition: player.isMedicalCondition,
+        medicalConditionDetails: player.medicalConditionDetails,
+        rating: player.rating,
+        prefferedFoot: player.prefferedFoot,
         paymentStatus: player.paymentStatus,
         attendance,
       };
@@ -1896,6 +1907,7 @@ exports.getClassFullTable = async (req, res) => {
     res.json({
       classId: cls._id,
       className: cls.name,
+      coach: { _id: cls.coach._id, name: cls.coach.name },
       totalSessions: sessionDates.length,
       sessions: sessionDates,
       players,

@@ -118,6 +118,7 @@
           { "name": "program", "in": "query", "schema": { "type": "string" } },
           { "name": "searchParent", "in": "query", "schema": { "type": "string" } },
           { "name": "searchPlayer", "in": "query", "schema": { "type": "string" } },
+          { "name": "isMedicalCondition", "in": "query", "schema": { "type": "boolean" } },
           { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
           { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 10 } }
         ],
@@ -173,6 +174,140 @@
           "200": { "description": "Player allocated to classes and enrolled successfully." },
           "400": { "description": "Validation failed (e.g. classes belong to different terms or categories)." },
           "404": { "description": "Player or classes or registration request not found." }
+        }
+      }
+    },
+    "/user/notifications": {
+      "get": {
+        "summary": "Get Parent Notifications",
+        "description": "Fetches paginated list of notifications for the logged-in parent with unread count.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 10 } },
+          { "name": "isRead", "in": "query", "schema": { "type": "boolean" } }
+        ],
+        "responses": {
+          "200": { "description": "Parent notifications list with unreadCount returned successfully." }
+        }
+      }
+    },
+    "/user/attendance/mark-absent": {
+      "post": {
+        "summary": "Parent Mark Player Absent with Reason",
+        "description": "Allows parent to mark their enrolled player as ABSENT for a current or future class session date, with a required absence reason.",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["playerId", "classId", "sessionDate", "reason"],
+                "properties": {
+                  "playerId": { "type": "string", "example": "607d1f77bcf86cd799439011" },
+                  "classId": { "type": "string", "example": "607d1f77bcf86cd799439044" },
+                  "sessionDate": { "type": "string", "example": "2026-07-26" },
+                  "reason": { "type": "string", "example": "Family emergency / High fever" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Player marked as absent for class session successfully." },
+          "400": { "description": "Validation error (e.g. past session date, wrong day of week, missing reason)." },
+          "403": { "description": "Unauthorized child profile." }
+        }
+      }
+    },
+    "/user/fcm-token": {
+      "post": {
+        "summary": "Register Parent Device FCM Token",
+        "description": "Registers an FCM device token for sending Push Notifications to the parent's phone/browser.",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["fcmToken"],
+                "properties": {
+                  "fcmToken": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Parent FCM token saved successfully." }
+        }
+      }
+    },
+    "/admin/notifications": {
+      "get": {
+        "summary": "Get Admin Notifications",
+        "description": "Fetches paginated list of notifications for Admin (enrollment requests, payment submissions, etc.).",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 10 } },
+          { "name": "isRead", "in": "query", "schema": { "type": "boolean" } }
+        ],
+        "responses": {
+          "200": { "description": "Admin notifications list with unreadCount returned successfully." }
+        }
+      }
+    },
+    "/admin/fcm-token": {
+      "post": {
+        "summary": "Register Admin Device FCM Token",
+        "description": "Registers an FCM device token for sending Push Notifications to admin devices.",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["fcmToken"],
+                "properties": {
+                  "fcmToken": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Admin FCM token saved successfully." }
+        }
+      }
+    },
+    "/admin/send-notification": {
+      "post": {
+        "summary": "Send Admin Broadcast / Custom Push Notification",
+        "description": "Allows Admin to broadcast a custom push notification and DB notification to a specific parent or all parents.",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["title", "message"],
+                "properties": {
+                  "parentId": { "type": "string", "description": "Optional parentId. Omit to broadcast to all parents." },
+                  "title": { "type": "string" },
+                  "message": { "type": "string" },
+                  "type": { "type": "string", "default": "ANNOUNCEMENT" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Notification sent successfully." }
         }
       }
     }

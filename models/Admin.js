@@ -28,6 +28,11 @@ const adminSchema = new mongoose.Schema(
                 type: String,
             }
         ],
+        fcmTokens: [
+            {
+                type: String,
+            }
+        ],
         role: {
             type: String,
             enum: ["SUPER_ADMIN", "COACH"],
