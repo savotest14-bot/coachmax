@@ -11,9 +11,9 @@ exports.createNews = async (req, res) => {
 
     let images = [];
     if (req.files) {
-      images = req.files.map((file) => `uploads/news/${file.filename}`);
+      images = req.files.map((file) => `uploads/images/${file.filename}`);
     } else if (req.file) {
-      images = [`uploads/news/${req.file.filename}`];
+      images = [`uploads/images/${req.file.filename}`];
     }
 
     const news = await News.create({
