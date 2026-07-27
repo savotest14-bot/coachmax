@@ -117,7 +117,6 @@ router.get("/getAllTerms", getAllTerms);
 // Parent Child Management
 router.get("/getChildren", auth, getChildren);
 router.post("/addChild", auth, uploads.single("profile"), addChild);
-router.post("/request-program", auth, requestAddProgram);
 router.post("/requestAddProgram", auth, requestAddProgram);
 router.get("/getDashboard", auth, getDashboard);
 
