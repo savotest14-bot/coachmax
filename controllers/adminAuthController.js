@@ -1846,7 +1846,15 @@ exports.getClassFullTable = async (req, res) => {
     const cls = await Class.findById(classId)
       .populate("term")
       .populate("coach", "name")
-      .populate("players", "fullName email dob phone contactName paymentStatus isMedicalCondition medicalConditionDetails rating prefferedFoot");
+      .populate({
+        path: "players",
+        select:
+          "fullName email dob phone contactName paymentStatus isMedicalCondition medicalConditionDetails rating prefferedFoot parentId",
+        populate: {
+          path: "parentId",
+          select: "fullName email phone", // choose the fields you need
+        },
+      });
 
     if (!cls) {
       return res.status(404).json({ message: "Class not found" });
@@ -1900,6 +1908,15 @@ exports.getClassFullTable = async (req, res) => {
         rating: player.rating,
         prefferedFoot: player.prefferedFoot,
         paymentStatus: player.paymentStatus,
+        // Parent details
+        parent: player.parentId
+          ? {
+            id: player.parentId._id,
+            name: player.parentId.fullName,
+            email: player.parentId.email,
+            phone: player.parentId.phone,
+          }
+          : null,
         attendance,
       };
     });
