@@ -144,6 +144,35 @@ const userSchema = new mongoose.Schema(
       max: 100,
       default: 0,
     },
+    playerStatus: {
+      type: String,
+      enum: ["PENDING_APPROVAL", "ACTIVE", "REJECTED"],
+      default: "ACTIVE",
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Admin",
+      default: null,
+    },
+    createdByRole: {
+      type: String,
+      enum: ["SUPER_ADMIN", "COACH"],
+      default: "SUPER_ADMIN",
+    },
+    temporarySession: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "TrainingSession",
+      default: null,
+    },
+    temporaryClass: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Class",
+      default: null,
+    },
+    temporarySessionDate: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true }
 );

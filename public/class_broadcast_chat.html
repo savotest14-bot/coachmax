@@ -1,0 +1,1604 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CoachMax — Chat & Class Broadcast Console</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary: #0b1329;
+      --bg-card: #1c2942;
+      --bg-card-hover: #263859;
+      --bg-input: #0f172a;
+      --accent-broadcast: #f59e0b;
+      --accent-blue: #3b82f6;
+      --accent-blue-hover: #2563eb;
+      --accent-green: #10b981;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --border-color: #2b3a58;
+      --msg-self: linear-gradient(135deg, #2563eb, #1d4ed8);
+      --msg-partner: #263859;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: 'Inter', sans-serif;
+    }
+
+    body {
+      background: var(--bg-primary);
+      color: var(--text-main);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ─── Header Bar ─── */
+    header {
+      background: rgba(28, 41, 66, 0.95);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border-color);
+      padding: 12px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+      z-index: 10;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 800;
+      font-size: 1.2rem;
+      letter-spacing: -0.5px;
+    }
+
+    .brand-icon {
+      background: linear-gradient(135deg, #3b82f6, #f59e0b);
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.25rem;
+      color: #fff;
+      box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+    }
+
+    .brand span {
+      background: linear-gradient(135deg, #f8fafc, #94a3b8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .config-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--accent-green);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .status-pill.offline {
+      background: rgba(239, 68, 68, 0.15);
+      color: #ef4444;
+      border-color: rgba(239, 68, 68, 0.3);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    input, select, button, textarea {
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 9px 14px;
+      border-radius: 8px;
+      font-size: 0.88rem;
+      outline: none;
+      transition: all 0.2s;
+    }
+
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--accent-blue);
+      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+    }
+
+    button {
+      background: var(--accent-blue);
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      justify-content: center;
+    }
+
+    button:hover {
+      background: var(--accent-blue-hover);
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary {
+      background: var(--bg-card-hover);
+      color: var(--text-main);
+      border: 1px solid var(--border-color);
+    }
+
+    .btn-secondary:hover {
+      background: var(--border-color);
+    }
+
+    .btn-warning {
+      background: var(--accent-broadcast);
+      color: #0f172a;
+    }
+
+    .btn-warning:hover {
+      background: #eab308;
+    }
+
+    /* ─── Navigation Tabs ─── */
+    .tab-bar {
+      background: #0f172a;
+      border-bottom: 1px solid var(--border-color);
+      padding: 0 24px;
+      display: flex;
+      gap: 16px;
+    }
+
+    .tab-btn {
+      background: none;
+      border: none;
+      border-bottom: 3px solid transparent;
+      border-radius: 0;
+      color: var(--text-muted);
+      padding: 12px 16px;
+      font-weight: 600;
+      font-size: 0.92rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .tab-btn:hover {
+      color: var(--text-main);
+      background: none;
+      transform: none;
+    }
+
+    .tab-btn.active {
+      color: var(--accent-blue);
+      border-bottom-color: var(--accent-blue);
+    }
+
+    .tab-btn.active.broadcast-tab {
+      color: var(--accent-broadcast);
+      border-bottom-color: var(--accent-broadcast);
+    }
+
+    /* ─── Main Content Container ─── */
+    .app-container {
+      flex: 1;
+      display: flex;
+      height: calc(100vh - 110px);
+      position: relative;
+    }
+
+    .tab-content {
+      display: none;
+      width: 100%;
+      height: 100%;
+    }
+
+    .tab-content.active {
+      display: flex;
+    }
+
+    /* ═══════════════════════════════════════════════
+       SECTION 1: Direct & Group Chat Layout
+       ═══════════════════════════════════════════════ */
+    .chat-sidebar {
+      width: 340px;
+      min-width: 300px;
+      background: var(--bg-card);
+      border-right: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .sidebar-header {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .sidebar-title-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .sidebar-title-row h3 {
+      font-size: 0.98rem;
+      font-weight: 700;
+    }
+
+    /* Available Quick Contacts Horizontal Bar */
+    .contacts-section {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-color);
+      background: rgba(15, 23, 42, 0.4);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .contacts-title {
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .contacts-chips {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .contact-chip {
+      background: var(--bg-card-hover);
+      border: 1px solid var(--border-color);
+      border-radius: 20px;
+      padding: 5px 12px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      white-space: nowrap;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+
+    .contact-chip:hover {
+      background: var(--accent-blue);
+      color: #fff;
+      border-color: var(--accent-blue);
+      transform: translateY(-1px);
+    }
+
+    .contact-chip .chip-avatar {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.65rem;
+    }
+
+    .room-list {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .room-item {
+      padding: 12px 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .room-item:hover {
+      background: var(--bg-card-hover);
+    }
+
+    .room-item.active {
+      background: rgba(59, 130, 246, 0.15);
+      border-left: 4px solid var(--accent-blue);
+    }
+
+    .avatar-wrapper {
+      position: relative;
+    }
+
+    .user-avatar {
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      color: #fff;
+      font-size: 1rem;
+    }
+
+    .user-avatar.broadcast {
+      background: linear-gradient(135deg, #f59e0b, #ef4444);
+    }
+
+    .online-indicator {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      background: var(--accent-green);
+      border: 2px solid var(--bg-card);
+      position: absolute;
+      bottom: 0;
+      right: 0;
+    }
+
+    .room-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .room-name-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 4px;
+    }
+
+    .room-name {
+      font-weight: 600;
+      font-size: 0.9rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .room-time {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+    }
+
+    .room-preview-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .room-preview {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex: 1;
+    }
+
+    .unread-badge {
+      background: var(--accent-blue);
+      color: #fff;
+      border-radius: 12px;
+      padding: 2px 8px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      min-width: 18px;
+      text-align: center;
+    }
+
+    /* ─── Chat Window Area ─── */
+    .chat-main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: #0f172a;
+    }
+
+    .chat-header {
+      padding: 14px 20px;
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .chat-header-user {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .chat-header-meta h4 {
+      font-size: 1rem;
+      font-weight: 700;
+    }
+
+    .chat-header-meta p {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+    }
+
+    .role-badge {
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      background: rgba(59, 130, 246, 0.2);
+      color: var(--accent-blue);
+    }
+
+    .messages-viewport {
+      flex: 1;
+      padding: 20px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .empty-chat {
+      margin: auto;
+      text-align: center;
+      color: var(--text-muted);
+      max-width: 380px;
+    }
+
+    .empty-chat-icon {
+      font-size: 3rem;
+      margin-bottom: 12px;
+    }
+
+    .msg-bubble {
+      max-width: 68%;
+      padding: 10px 14px;
+      border-radius: 14px;
+      font-size: 0.9rem;
+      line-height: 1.45;
+      word-wrap: break-word;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      animation: fadeIn 0.2s ease-out;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .msg-bubble.self {
+      align-self: flex-end;
+      background: var(--msg-self);
+      color: #fff;
+      border-bottom-right-radius: 2px;
+    }
+
+    .msg-bubble.partner {
+      align-self: flex-start;
+      background: var(--msg-partner);
+      color: var(--text-main);
+      border-bottom-left-radius: 2px;
+      border: 1px solid var(--border-color);
+    }
+
+    .msg-sender-name {
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: var(--accent-broadcast);
+      margin-bottom: 2px;
+    }
+
+    .msg-meta {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 4px;
+      font-size: 0.68rem;
+      opacity: 0.8;
+      margin-top: 2px;
+    }
+
+    .tick-status {
+      font-size: 0.8rem;
+      font-weight: 700;
+      margin-left: 4px;
+    }
+
+    .tick-status.SENT {
+      color: rgba(255, 255, 255, 0.6);
+    }
+
+    .tick-status.DELIVERED {
+      color: #94a3b8; /* Double Gray Tick */
+    }
+
+    .tick-status.READ {
+      color: #3b82f6; /* Double Blue Tick */
+    }
+
+    .typing-bar {
+      padding: 4px 20px;
+      font-size: 0.78rem;
+      color: var(--accent-broadcast);
+      font-style: italic;
+      height: 20px;
+    }
+
+    .composer-input-bar {
+      padding: 14px 20px;
+      background: var(--bg-card);
+      border-top: 1px solid var(--border-color);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .composer-input-bar input[type="text"] {
+      flex: 1;
+      padding: 12px 16px;
+      font-size: 0.92rem;
+    }
+
+    /* ═══════════════════════════════════════════════
+       SECTION 2: Class Broadcast Announcements Layout
+       ═══════════════════════════════════════════════ */
+    .broadcast-layout {
+      max-width: 900px;
+      width: 100%;
+      margin: 20px auto;
+      padding: 0 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      overflow-y: auto;
+    }
+
+    .broadcast-banner {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 18px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .broadcast-banner h2 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: var(--accent-broadcast);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .broadcast-banner p {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    .broadcast-composer {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .broadcast-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-left: 4px solid var(--accent-broadcast);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .broadcast-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .broadcast-card-author {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .broadcast-card-body {
+      font-size: 0.95rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
+
+    /* Modal for New Direct Chat */
+    .modal-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+
+    .modal-overlay.active {
+      display: flex;
+    }
+
+    .modal-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      width: 440px;
+      max-width: 90%;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+    }
+
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .modal-header h3 {
+      font-size: 1.1rem;
+      font-weight: 700;
+    }
+
+    .close-btn {
+      background: none;
+      border: none;
+      font-size: 1.2rem;
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+
+    .close-btn:hover {
+      color: var(--text-main);
+      background: none;
+    }
+  </style>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+
+<body>
+
+  <!-- Header Bar -->
+  <header>
+    <div class="brand">
+      <div class="brand-icon">💬</div>
+      <span>CoachMax Chat Console</span>
+    </div>
+
+    <div class="config-bar">
+      <!-- Role Switcher -->
+      <select id="userRole" onchange="onRoleChanged()">
+        <option value="PARENT">Role: Parent 👤</option>
+        <option value="COACH">Role: Coach 🧢</option>
+        <option value="SUPER_ADMIN">Role: Super Admin ⚡</option>
+      </select>
+
+      <input type="text" id="authToken" placeholder="Paste JWT Bearer Token..." style="width: 250px;">
+      <button onclick="saveToken()">Set Token</button>
+      <button class="btn-secondary" onclick="autoLoadData()">🔄 Refresh</button>
+
+      <div class="status-pill offline" id="socketStatusPill">
+        <div class="dot"></div>
+        <span id="socketStatusText">Disconnected</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Navigation Tabs Bar -->
+  <div class="tab-bar">
+    <button class="tab-btn active" id="directTabBtn" onclick="switchTab('direct')">
+      💬 Direct & Group Chat
+    </button>
+    <button class="tab-btn broadcast-tab" id="broadcastTabBtn" onclick="switchTab('broadcast')">
+      📢 Class Broadcast Announcements
+    </button>
+  </div>
+
+  <!-- App Main Content Container -->
+  <div class="app-container">
+
+    <!-- ═══════════════════════════════════════════════
+         TAB 1: Direct & Group Chat (Parent <-> Coach/Admin)
+         ═══════════════════════════════════════════════ -->
+    <div class="tab-content active" id="directTabContent">
+      
+      <!-- Sidebar (Rooms & Contacts List) -->
+      <div class="chat-sidebar">
+        <!-- Title & Filter Search -->
+        <div class="sidebar-header">
+          <div class="sidebar-title-row">
+            <h3>Conversations</h3>
+            <button onclick="openNewChatModal()" style="font-size: 0.8rem; padding: 5px 10px;">+ Start Chat</button>
+          </div>
+          <input type="text" style="width: 100%;" id="roomSearchInput" placeholder="Filter conversations..." onkeyup="filterRooms()">
+        </div>
+
+        <!-- Quick Contacts Chips (Auto-populated for Parent or Coach) -->
+        <div class="contacts-section" id="contactsSection">
+          <div class="contacts-title">
+            <span id="contactsTitleText">Quick Contacts</span>
+            <span style="font-size: 0.7rem; font-weight: normal; cursor: pointer; color: var(--accent-blue);" onclick="loadQuickContacts()">Refresh</span>
+          </div>
+          <div class="contacts-chips" id="contactsChipsContainer">
+            <div style="font-size: 0.75rem; color: var(--text-muted);">Loading contacts...</div>
+          </div>
+        </div>
+
+        <!-- Rooms List -->
+        <div class="room-list" id="roomListContainer">
+          <div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 0.85rem;">
+            Click <b>Set Token</b> above to load conversations.
+          </div>
+        </div>
+      </div>
+
+      <!-- Main Chat Conversation Viewport -->
+      <div class="chat-main">
+        <!-- Room Header -->
+        <div class="chat-header" id="chatHeader">
+          <div class="chat-header-user">
+            <div class="user-avatar" id="activeAvatar">?</div>
+            <div class="chat-header-meta">
+              <h4 id="activeRoomTitle">Select or Start a Conversation</h4>
+              <p id="activeRoomSubtitle">Click any contact above or select a conversation to chat</p>
+            </div>
+          </div>
+          <div id="activeRoleBadge"></div>
+        </div>
+
+        <!-- Messages Viewport -->
+        <div class="messages-viewport" id="messagesViewport">
+          <div class="empty-chat">
+            <div class="empty-chat-icon">💬</div>
+            <h3>No Chat Selected</h3>
+            <p>Conversations load automatically! Select a parent or coach contact to start chatting in real-time.</p>
+          </div>
+        </div>
+
+        <!-- Live Typing Indicator -->
+        <div class="typing-bar" id="typingIndicator"></div>
+
+        <!-- Input Composer -->
+        <div class="composer-input-bar">
+          <input type="file" id="fileInput" style="display: none;" onchange="onFileSelected()">
+          <button class="btn-secondary" onclick="document.getElementById('fileInput').click()" title="Attach File">📎</button>
+          <input type="text" id="messageInput" placeholder="Type a message..." onkeydown="handleTyping(event)">
+          <button onclick="sendMessage()">Send 🚀</button>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ═══════════════════════════════════════════════
+         TAB 2: Class Broadcast Announcements
+         ═══════════════════════════════════════════════ -->
+    <div class="tab-content" id="broadcastTabContent">
+      <div class="broadcast-layout">
+        
+        <!-- Banner Selector -->
+        <div class="broadcast-banner">
+          <div>
+            <h2 id="broadcastHeaderTitle">📢 Class Broadcast Announcements</h2>
+            <p id="broadcastHeaderSub">Official updates and notices for class parents</p>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <select id="broadcastClassSelect" onchange="onBroadcastClassChanged()">
+              <option value="">-- Select Broadcast Room --</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Coach Broadcast Composer (Visible to Coach / Admin) -->
+        <div class="broadcast-composer" id="broadcastComposerSection">
+          <h3 style="font-size: 1rem; font-weight: 700;">✍️ Create Class Broadcast</h3>
+          <textarea id="broadcastText" placeholder="Write announcement for parents... (Schedule changes, gear details, etc.)" style="width: 100%; min-height: 90px;"></textarea>
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 0.78rem; color: var(--accent-broadcast);">📢 Reaches all class parents via Push Notification</span>
+            <button class="btn-warning" onclick="sendBroadcastAnnouncement()">Publish Broadcast 🚀</button>
+          </div>
+        </div>
+
+        <!-- Broadcast Feed -->
+        <div style="font-weight: 700; font-size: 0.95rem; color: var(--text-muted); text-transform: uppercase;">
+          Announcements Feed
+        </div>
+        <div id="broadcastFeedContainer" style="display: flex; flex-direction: column; gap: 16px;">
+          <div style="background: var(--bg-card); border: 1px dashed var(--border-color); padding: 40px; text-align: center; border-radius: 12px; color: var(--text-muted);">
+            Select a broadcast room above to view announcements.
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Modal: Start New Direct Chat -->
+  <div class="modal-overlay" id="newChatModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modalTitle">Start Direct Chat</h3>
+        <button class="close-btn" onclick="closeNewChatModal()">✕</button>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 12px;">
+        <label style="font-size: 0.85rem; font-weight: 600;" id="modalTargetLabel">Select Contact:</label>
+        <select id="modalContactSelect">
+          <option value="">-- Loading contacts --</option>
+        </select>
+
+        <div style="text-align: center; font-size: 0.8rem; color: var(--text-muted); margin: 4px 0;">— OR —</div>
+
+        <label style="font-size: 0.85rem; font-weight: 600;">Manual User / Parent / Coach ID:</label>
+        <input type="text" id="manualUserIdInput" placeholder="Enter MongoDB ObjectId...">
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
+        <button class="btn-secondary" onclick="closeNewChatModal()">Cancel</button>
+        <button onclick="submitNewChat()">Start Conversation</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- JavaScript Logic -->
+  <script>
+    let activeRole = 'PARENT';
+    let currentTab = 'direct';
+    let socket = null;
+    let roomsList = [];
+    let quickContactsList = [];
+    let selectedRoomId = null;
+    let activePartnerId = null;
+    let selectedFile = null;
+    let typingTimer = null;
+
+    const baseUrl = window.location.origin;
+
+    // ─── Auto Initialization ───
+    window.onload = () => {
+      activeRole = document.getElementById('userRole').value;
+      const savedToken = localStorage.getItem('coachmax_token_' + activeRole);
+      if (savedToken) {
+        document.getElementById('authToken').value = savedToken;
+        initSocket();
+        autoLoadData();
+      }
+      updateRoleUI();
+    };
+
+    function onRoleChanged() {
+      activeRole = document.getElementById('userRole').value;
+      const savedToken = localStorage.getItem('coachmax_token_' + activeRole) || '';
+      document.getElementById('authToken').value = savedToken;
+
+      updateRoleUI();
+      if (savedToken) {
+        initSocket();
+        autoLoadData();
+      } else {
+        document.getElementById('roomListContainer').innerHTML = `
+          <div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 0.85rem;">
+            Paste JWT token for role <b>${activeRole}</b> and click Set Token.
+          </div>`;
+        document.getElementById('contactsChipsContainer').innerHTML = `<div style="font-size: 0.75rem; color: var(--text-muted);">No token set</div>`;
+      }
+    }
+
+    function updateRoleUI() {
+      const composer = document.getElementById('broadcastComposerSection');
+      if (activeRole === 'PARENT') {
+        if (composer) composer.style.display = 'none';
+        document.getElementById('contactsTitleText').innerText = 'Available Coaches';
+      } else {
+        if (composer) composer.style.display = 'flex';
+        document.getElementById('contactsTitleText').innerText = 'Class Parents';
+      }
+    }
+
+    function getToken() {
+      return document.getElementById('authToken').value.trim();
+    }
+
+    function saveToken() {
+      const token = getToken();
+      if (!token) { alert('Please paste a valid JWT token'); return; }
+      localStorage.setItem('coachmax_token_' + activeRole, token);
+      initSocket();
+      autoLoadData();
+    }
+
+    // ─── Socket.io Setup ───
+    function initSocket() {
+      const token = getToken();
+      if (!token) return;
+
+      if (socket) socket.disconnect();
+
+      socket = io(baseUrl, { auth: { token } });
+
+      socket.on('connect', () => {
+        console.log('⚡ Socket connected! ID:', socket.id);
+        const pill = document.getElementById('socketStatusPill');
+        pill.className = 'status-pill';
+        document.getElementById('socketStatusText').innerText = 'Online Live ⚡';
+
+        if (selectedRoomId) {
+          socket.emit('join_room', { roomId: selectedRoomId });
+          socket.emit('mark_read', { roomId: selectedRoomId });
+        }
+      });
+
+      socket.on('disconnect', () => {
+        const pill = document.getElementById('socketStatusPill');
+        pill.className = 'status-pill offline';
+        document.getElementById('socketStatusText').innerText = 'Disconnected';
+      });
+
+      socket.on('new_message', (data) => {
+        if (data.roomId === selectedRoomId) {
+          appendMessage(data.message);
+          scrollMessagesToBottom();
+          socket.emit('mark_read', { roomId: selectedRoomId });
+        }
+        loadRoomsSilently();
+      });
+
+      socket.on('messages_read', (data) => {
+        if (data.roomId === selectedRoomId) {
+          fetchMessages(selectedRoomId);
+        }
+      });
+
+      socket.on('message_delivered', (data) => {
+        if (data.roomId === selectedRoomId) {
+          fetchMessages(selectedRoomId);
+        }
+      });
+
+      socket.on('user_typing', (data) => {
+        if (data.roomId === selectedRoomId) {
+          const bar = document.getElementById('typingIndicator');
+          bar.innerText = data.isTyping ? `✏️ ${data.userName} is typing...` : '';
+          if (!data.isTyping) {
+            bar.innerText = '';
+          }
+        }
+      });
+
+      socket.on('user_status_change', (data) => {
+        if (activePartnerId && activePartnerId.toString() === data.userId?.toString()) {
+          document.getElementById('activeRoomSubtitle').innerText = data.isOnline ? '🟢 Online now' : 'Offline';
+        }
+        loadRoomsSilently();
+      });
+
+      socket.on('new_broadcast_alert', (data) => {
+        if (activeRole === 'PARENT') {
+          alert(`📢 Class Broadcast Announcement from ${data.className}:\n${data.message}`);
+          autoLoadData();
+        }
+      });
+    }
+
+    // ─── Auto Load All Data (Conversations & Contacts) ───
+    async function autoLoadData() {
+      await loadRooms();
+      await loadQuickContacts();
+    }
+
+    // ─── Fetch Rooms / Conversations ───
+    async function loadRooms() {
+      const token = getToken();
+      if (!token) return;
+
+      const endpoint = (activeRole === 'COACH' || activeRole === 'SUPER_ADMIN')
+        ? '/api/coach/chat/rooms'
+        : '/api/user/chat/rooms';
+
+      try {
+        const res = await fetch(baseUrl + endpoint, {
+          headers: { 'Authorization': 'Bearer ' + token }
+        });
+        const data = await res.json();
+
+        if (!data.success) {
+          document.getElementById('roomListContainer').innerHTML = `
+            <div style="padding: 20px; color: #ef4444; font-size: 0.85rem;">
+              Error: ${data.message}
+            </div>`;
+          return;
+        }
+
+        roomsList = data.data || [];
+        renderRoomsList(roomsList);
+
+        // Auto select first room if none selected
+        if (!selectedRoomId && roomsList.length > 0) {
+          selectRoom(roomsList[0]._id);
+        }
+
+        populateBroadcastDropdown(roomsList);
+      } catch (err) {
+        console.error('Load rooms error:', err);
+      }
+    }
+
+    async function loadRoomsSilently() {
+      const token = getToken();
+      if (!token) return;
+      const endpoint = (activeRole === 'COACH' || activeRole === 'SUPER_ADMIN') ? '/api/coach/chat/rooms' : '/api/user/chat/rooms';
+      try {
+        const res = await fetch(baseUrl + endpoint, { headers: { 'Authorization': 'Bearer ' + token } });
+        const data = await res.json();
+        if (data.success) {
+          roomsList = data.data || [];
+          renderRoomsList(roomsList);
+        }
+      } catch (e) {}
+    }
+
+    function renderRoomsList(rooms) {
+      const container = document.getElementById('roomListContainer');
+
+      if (rooms.length === 0) {
+        container.innerHTML = `
+          <div style="padding: 24px 16px; text-align: center; color: var(--text-muted); font-size: 0.85rem;">
+            No conversations yet.<br>Click any contact above to start chatting!
+          </div>`;
+        return;
+      }
+
+      container.innerHTML = rooms.map(room => {
+        const isBroadcast = room.type === 'BROADCAST';
+        const partner = (room.members || []).find(m => m.user);
+        const name = isBroadcast ? (room.name || 'Class Broadcast') : (partner?.user?.fullName || partner?.user?.name || 'Direct Chat');
+        const initials = name.charAt(0).toUpperCase();
+        const activeClass = (room._id === selectedRoomId) ? 'active' : '';
+
+        const lastMsgText = room.lastMessage?.text || (room.lastMessage?.attachments?.length ? '📎 Attachment' : 'No messages yet');
+        const timeStr = room.lastMessage?.createdAt ? new Date(room.lastMessage.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+
+        return `
+          <div class="room-item ${activeClass}" onclick="selectRoom('${room._id}')">
+            <div class="avatar-wrapper">
+              <div class="user-avatar ${isBroadcast ? 'broadcast' : ''}">${initials}</div>
+              ${room.isPartnerOnline ? '<div class="online-indicator"></div>' : ''}
+            </div>
+            <div class="room-info">
+              <div class="room-name-row">
+                <div class="room-name">${name}</div>
+                <div class="room-time">${timeStr}</div>
+              </div>
+              <div class="room-preview-row">
+                <div class="room-preview">${lastMsgText}</div>
+                ${room.unreadCount > 0 ? `<div class="unread-badge">${room.unreadCount}</div>` : ''}
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function filterRooms() {
+      const query = document.getElementById('roomSearchInput').value.toLowerCase();
+      const filtered = roomsList.filter(r => {
+        const name = r.name || (r.members || []).map(m => m.user?.fullName || m.user?.name).join(' ');
+        return name.toLowerCase().includes(query);
+      });
+      renderRoomsList(filtered);
+    }
+
+    // ─── Fetch Quick Contacts (Coaches for Parent; Parents for Coach) ───
+    async function loadQuickContacts() {
+      const token = getToken();
+      if (!token) return;
+      const chipsContainer = document.getElementById('contactsChipsContainer');
+
+      quickContactsList = [];
+
+      try {
+        if (activeRole === 'PARENT') {
+          // Parent: Fetch classes to extract coaches
+          const res = await fetch(baseUrl + '/api/user/classes', { headers: { 'Authorization': 'Bearer ' + token } });
+          const data = await res.json();
+          if (data.success && data.data) {
+            const coachesMap = new Map();
+            data.data.forEach(c => {
+              if (c.coach && c.coach._id) {
+                coachesMap.set(c.coach._id.toString(), {
+                  _id: c.coach._id,
+                  fullName: c.coach.fullName || 'Head Coach',
+                  role: 'COACH',
+                  model: 'Admin'
+                });
+              }
+            });
+            quickContactsList = Array.from(coachesMap.values());
+          }
+        } else {
+          // Coach / Admin: Fetch assigned classes and class parents
+          const cres = await fetch(baseUrl + '/api/coach/classes', { headers: { 'Authorization': 'Bearer ' + token } });
+          const cdata = await cres.json();
+          if (cdata.success && cdata.data && cdata.data.length > 0) {
+            const classId = cdata.data[0].classId;
+            const pres = await fetch(baseUrl + `/api/coach/chat/class/${classId}/parents`, { headers: { 'Authorization': 'Bearer ' + token } });
+            const pdata = await pres.json();
+            if (pdata.success && pdata.data) {
+              quickContactsList = pdata.data.map(p => ({
+                _id: p._id,
+                fullName: p.fullName || 'Parent',
+                role: 'PARENT',
+                model: 'Parent'
+              }));
+            }
+          }
+        }
+
+        renderQuickContacts(quickContactsList);
+      } catch (err) {
+        console.error('Error loading quick contacts:', err);
+        chipsContainer.innerHTML = `<div style="font-size: 0.75rem; color: var(--text-muted);">Use + Start Chat</div>`;
+      }
+    }
+
+    function renderQuickContacts(contacts) {
+      const chipsContainer = document.getElementById('contactsChipsContainer');
+
+      if (contacts.length === 0) {
+        chipsContainer.innerHTML = `<div style="font-size: 0.75rem; color: var(--text-muted);">Use + Start Chat to create room</div>`;
+        return;
+      }
+
+      chipsContainer.innerHTML = contacts.map(c => {
+        const initials = (c.fullName || 'C').charAt(0).toUpperCase();
+        return `
+          <div class="contact-chip" onclick="startDirectChatWith('${c._id}', '${c.model}')">
+            <div class="chip-avatar">${initials}</div>
+            <span>${c.fullName}</span>
+          </div>
+        `;
+      }).join('');
+    }
+
+    // ─── Start / Create Direct Chat Room Automatically ───
+    async function startDirectChatWith(targetId, targetModel) {
+      const token = getToken();
+      if (!token) { alert('Please set JWT token!'); return; }
+
+      const endpoint = (activeRole === 'COACH' || activeRole === 'SUPER_ADMIN')
+        ? '/api/coach/chat/direct'
+        : '/api/user/chat/room';
+
+      const body = (activeRole === 'COACH' || activeRole === 'SUPER_ADMIN')
+        ? { parentId: targetId }
+        : { targetUserId: targetId, targetModel: targetModel || 'Admin' };
+
+      try {
+        const res = await fetch(baseUrl + endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+
+        if (data.success && data.data) {
+          await loadRooms();
+          selectRoom(data.data._id);
+          document.getElementById('messageInput').focus();
+        } else {
+          alert('Error starting room: ' + (data.message || 'Failed'));
+        }
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    }
+
+    function getUserIdFromToken() {
+      const token = getToken();
+      if (!token) return null;
+      try {
+        const base64Url = token.split('.')[1];
+        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+        const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+          return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+        }).join(''));
+        const payload = JSON.parse(jsonPayload);
+        return payload.id || payload._id || payload.userId || null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    // ─── Select & Load Room ───
+    function selectRoom(roomId) {
+      selectedRoomId = roomId;
+      renderRoomsList(roomsList);
+
+      if (socket) {
+        socket.emit('join_room', { roomId });
+        socket.emit('mark_read', { roomId });
+      }
+
+      const myUserId = getUserIdFromToken();
+      const room = roomsList.find(r => r._id === roomId);
+      if (room) {
+        const partner = (room.members || []).find(m => {
+          const mId = m.user?._id ? m.user._id.toString() : m.user?.toString();
+          return myUserId ? (mId !== myUserId.toString()) : (m.user !== myUserId);
+        });
+        activePartnerId = partner?.user?._id || partner?.user;
+
+        const title = room.type === 'BROADCAST' ? (room.name || 'Class Broadcast') : (partner?.user?.fullName || partner?.user?.name || 'Direct Chat');
+        document.getElementById('activeRoomTitle').innerText = title;
+        document.getElementById('activeAvatar').innerText = title.charAt(0).toUpperCase();
+
+        const roleText = partner?.refModel || (room.type === 'BROADCAST' ? 'BROADCAST' : 'USER');
+        document.getElementById('activeRoleBadge').innerHTML = `<span class="role-badge">${roleText}</span>`;
+        document.getElementById('activeRoomSubtitle').innerText = room.isPartnerOnline ? '🟢 Online now' : 'Offline';
+      }
+
+      fetchMessages(roomId);
+    }
+
+    async function fetchMessages(roomId) {
+      const token = getToken();
+      if (!token) return;
+
+      const endpoint = (activeRole === 'COACH' || activeRole === 'SUPER_ADMIN')
+        ? `/api/coach/chat/room/${roomId}/messages`
+        : `/api/user/chat/room/${roomId}/messages`;
+
+      try {
+        const res = await fetch(baseUrl + endpoint, {
+          headers: { 'Authorization': 'Bearer ' + token }
+        });
+        const data = await res.json();
+
+        if (!data.success) return;
+
+        renderMessages(data.data || []);
+        scrollMessagesToBottom();
+      } catch (err) {
+        console.error('Fetch messages error:', err);
+      }
+    }
+
+    function renderMessages(messages) {
+      const viewport = document.getElementById('messagesViewport');
+      const myUserId = getUserIdFromToken();
+
+      if (messages.length === 0) {
+        viewport.innerHTML = `
+          <div class="empty-chat">
+            <div class="empty-chat-icon">💬</div>
+            <h3>No Messages Yet</h3>
+            <p>Send a message below to start the conversation.</p>
+          </div>`;
+        return;
+      }
+
+      viewport.innerHTML = messages.map(msg => {
+        const sender = msg.sender?.user || {};
+        const senderId = sender._id ? sender._id.toString() : sender.toString();
+        const senderName = sender.fullName || sender.name || 'User';
+        const isSelf = myUserId ? (senderId === myUserId.toString()) : (msg.sender?.refModel === (activeRole === 'PARENT' ? 'Parent' : 'Admin'));
+        const timeStr = new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        let tickStr = '';
+        if (isSelf) {
+          if (msg.tickStatus === 'READ') tickStr = '<span class="tick-status READ">✓✓</span>';
+          else if (msg.tickStatus === 'DELIVERED') tickStr = '<span class="tick-status DELIVERED">✓✓</span>';
+          else tickStr = '<span class="tick-status SENT">✓</span>';
+        }
+
+        let attachHtml = '';
+        if (msg.attachments && msg.attachments.length > 0) {
+          attachHtml = msg.attachments.map(a => `<div style="margin-top: 4px;"><a href="${baseUrl}/${a.url}" target="_blank" style="color: #60a5fa; text-decoration: underline;">📎 Attachment (${a.fileType})</a></div>`).join('');
+        }
+
+        return `
+          <div class="msg-bubble ${isSelf ? 'self' : 'partner'}">
+            ${!isSelf ? `<div class="msg-sender-name">${senderName}</div>` : ''}
+            <div>${msg.text || ''}</div>
+            ${attachHtml}
+            <div class="msg-meta">
+              <span>${timeStr}</span>
+              ${tickStr}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function appendMessage(msg) {
+      const viewport = document.getElementById('messagesViewport');
+      if (viewport.querySelector('.empty-chat')) {
+        viewport.innerHTML = '';
+      }
+      const timeStr = new Date(msg.createdAt || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const isSelf = (msg.sender?.refModel === (activeRole === 'PARENT' ? 'Parent' : 'Admin'));
+
+      const div = document.createElement('div');
+      div.className = `msg-bubble ${isSelf ? 'self' : 'partner'}`;
+      div.innerHTML = `
+        <div>${msg.text || ''}</div>
+        <div class="msg-meta">
+          <span>${timeStr}</span>
+          ${isSelf ? '<span class="tick-status">✓</span>' : ''}
+        </div>
+      `;
+      viewport.appendChild(div);
+    }
+
+    function scrollMessagesToBottom() {
+      const viewport = document.getElementById('messagesViewport');
+      viewport.scrollTop = viewport.scrollHeight;
+    }
+
+    // ─── Send Message ───
+    async function sendMessage() {
+      const text = document.getElementById('messageInput').value.trim();
+      if (!selectedRoomId) { alert('Please select a conversation first!'); return; }
+      if (!text && !selectedFile) return;
+
+      if (socket && socket.connected) {
+        socket.emit('send_message', { roomId: selectedRoomId, text }, (res) => {
+          if (res.success) {
+            document.getElementById('messageInput').value = '';
+            fetchMessages(selectedRoomId);
+          } else {
+            alert('Send error: ' + res.message);
+          }
+        });
+      } else {
+        const token = getToken();
+        const endpoint = (activeRole === 'COACH' || activeRole === 'SUPER_ADMIN')
+          ? '/api/coach/chat/message'
+          : '/api/user/chat/message/send';
+
+        try {
+          const res = await fetch(baseUrl + endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+            body: JSON.stringify({ roomId: selectedRoomId, text })
+          });
+          const data = await res.json();
+          if (data.success) {
+            document.getElementById('messageInput').value = '';
+            fetchMessages(selectedRoomId);
+          } else {
+            alert('Send error: ' + data.message);
+          }
+        } catch (e) {
+          alert('Error sending message: ' + e.message);
+        }
+      }
+    }
+
+    function handleTyping(e) {
+      if (e.key === 'Enter') {
+        sendMessage();
+        return;
+      }
+      if (socket && selectedRoomId) {
+        socket.emit('typing', { roomId: selectedRoomId, isTyping: true });
+        clearTimeout(typingTimer);
+        typingTimer = setTimeout(() => {
+          socket.emit('typing', { roomId: selectedRoomId, isTyping: false });
+        }, 1500);
+      }
+    }
+
+    function onFileSelected() {
+      const input = document.getElementById('fileInput');
+      if (input.files && input.files[0]) {
+        selectedFile = input.files[0];
+        alert(`File attached: ${selectedFile.name}`);
+      }
+    }
+
+    // ─── Navigation Tabs ───
+    function switchTab(tabName) {
+      currentTab = tabName;
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+      if (tabName === 'direct') {
+        document.getElementById('directTabBtn').classList.add('active');
+        document.getElementById('directTabContent').classList.add('active');
+      } else {
+        document.getElementById('broadcastTabBtn').classList.add('active');
+        document.getElementById('broadcastTabContent').classList.add('active');
+        loadBroadcastTab();
+      }
+    }
+
+    // ─── Modal Functions ───
+    function openNewChatModal() {
+      document.getElementById('newChatModal').classList.add('active');
+      document.getElementById('modalTargetLabel').innerText = activeRole === 'PARENT' ? 'Select Coach / Admin:' : 'Select Parent from Class:';
+      loadContactsForModal();
+    }
+
+    function closeNewChatModal() {
+      document.getElementById('newChatModal').classList.remove('active');
+    }
+
+    async function loadContactsForModal() {
+      const select = document.getElementById('modalContactSelect');
+      const token = getToken();
+
+      if (quickContactsList.length > 0) {
+        select.innerHTML = quickContactsList.map(c => `<option value="${c._id}">${c.fullName}</option>`).join('');
+      } else {
+        select.innerHTML = '<option value="">Use manual ID entry below</option>';
+      }
+    }
+
+    function submitNewChat() {
+      const selectVal = document.getElementById('modalContactSelect').value;
+      const manualId = document.getElementById('manualUserIdInput').value.trim();
+      const targetId = selectVal || manualId;
+
+      if (!targetId) { alert('Please select a contact or enter a target ID'); return; }
+
+      closeNewChatModal();
+      startDirectChatWith(targetId, activeRole === 'PARENT' ? 'Admin' : 'Parent');
+    }
+
+    // ─── Broadcast Tab Logic ───
+    function populateBroadcastDropdown(rooms) {
+      const select = document.getElementById('broadcastClassSelect');
+      select.innerHTML = '<option value="">-- Select Broadcast Room --</option>';
+
+      rooms.forEach(r => {
+        if (r.type === 'BROADCAST') {
+          const opt = document.createElement('option');
+          opt.value = r._id;
+          opt.innerText = r.name || 'Class Broadcast';
+          select.appendChild(opt);
+        }
+      });
+    }
+
+    function loadBroadcastTab() {
+      loadRooms();
+    }
+
+    function onBroadcastClassChanged() {
+      const roomId = document.getElementById('broadcastClassSelect').value;
+      if (!roomId) return;
+      fetchBroadcastFeed(roomId);
+    }
+
+    async function fetchBroadcastFeed(roomId) {
+      const token = getToken();
+      const endpoint = (activeRole === 'COACH' || activeRole === 'SUPER_ADMIN')
+        ? `/api/coach/chat/room/${roomId}/messages`
+        : `/api/user/chat/room/${roomId}/messages`;
+
+      try {
+        const res = await fetch(baseUrl + endpoint, { headers: { 'Authorization': 'Bearer ' + token } });
+        const data = await res.json();
+        if (!data.success) return;
+
+        const container = document.getElementById('broadcastFeedContainer');
+        const msgs = data.data || [];
+
+        if (msgs.length === 0) {
+          container.innerHTML = `
+            <div style="background: var(--bg-card); padding: 30px; text-align: center; border-radius: 12px; color: var(--text-muted);">
+              No announcements published in this broadcast room yet.
+            </div>`;
+          return;
+        }
+
+        container.innerHTML = msgs.slice().reverse().map(m => {
+          const dateStr = new Date(m.createdAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+          const senderName = m.sender?.user?.fullName || m.sender?.user?.name || 'Head Coach';
+
+          return `
+            <div class="broadcast-card">
+              <div class="broadcast-card-header">
+                <div class="broadcast-card-author">
+                  <div class="user-avatar broadcast">${senderName.charAt(0).toUpperCase()}</div>
+                  <div>
+                    <h4 style="font-size: 0.95rem; font-weight: 700;">${senderName}</h4>
+                    <span style="font-size: 0.75rem; color: var(--text-muted);">Class Announcement</span>
+                  </div>
+                </div>
+                <div style="font-size: 0.75rem; color: var(--text-muted);">📅 ${dateStr}</div>
+              </div>
+              <div class="broadcast-card-body">${m.text || ''}</div>
+            </div>
+          `;
+        }).join('');
+      } catch (err) {
+        console.error('Broadcast feed error:', err);
+      }
+    }
+
+    async function sendBroadcastAnnouncement() {
+      const token = getToken();
+      const text = document.getElementById('broadcastText').value.trim();
+      const roomId = document.getElementById('broadcastClassSelect').value;
+
+      if (!token) { alert('Please paste JWT token!'); return; }
+      if (!text) { alert('Please enter announcement text!'); return; }
+      if (!roomId) { alert('Please select a Broadcast Room from the dropdown above!'); return; }
+
+      if (socket && socket.connected) {
+        socket.emit('send_message', { roomId, text }, (res) => {
+          if (res.success) {
+            document.getElementById('broadcastText').value = '';
+            fetchBroadcastFeed(roomId);
+            alert('Broadcast published successfully!');
+          }
+        });
+      }
+    }
+  </script>
+</body>
+
+</html>

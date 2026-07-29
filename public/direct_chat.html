@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CoachMax — Direct Coach-Parent Chat</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary: #0f172a;
+      --bg-card: #1e293b;
+      --bg-hover: #334155;
+      --accent-blue: #3b82f6;
+      --accent-green: #10b981;
+      --accent-purple: #8b5cf6;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --border-color: #334155;
+      --user-msg: #2563eb;
+      --partner-msg: #334155;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }
+
+    body {
+      background: var(--bg-primary);
+      color: var(--text-main);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Top Control Bar */
+    header {
+      background: rgba(30, 41, 59, 0.8);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border-color);
+      padding: 12px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 1.1rem;
+      color: var(--accent-blue);
+    }
+
+    .brand-icon {
+      background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+    }
+
+    .config-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    input, select, button {
+      background: #0f172a;
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      outline: none;
+      transition: all 0.2s;
+    }
+
+    input:focus, select:focus {
+      border-color: var(--accent-blue);
+      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+    }
+
+    button {
+      background: var(--accent-blue);
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+    }
+
+    button:hover {
+      opacity: 0.9;
+      transform: translateY(-1px);
+    }
+
+    .role-badge {
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .role-coach { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4); }
+    .role-parent { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); }
+
+    /* Main Layout */
+    .container {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* Sidebar Rooms */
+    .sidebar {
+      width: 320px;
+      background: var(--bg-card);
+      border-right: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .sidebar-header {
+      padding: 14px;
+      border-bottom: 1px solid var(--border-color);
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .room-list {
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    .room-item {
+      padding: 14px;
+      border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+      cursor: pointer;
+      transition: background 0.2s;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .room-item:hover, .room-item.active {
+      background: var(--bg-hover);
+    }
+
+    .avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #6366f1, #a855f7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 600;
+      font-size: 1rem;
+      color: #fff;
+      flex-shrink: 0;
+    }
+
+    .room-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .room-name {
+      font-weight: 600;
+      font-size: 0.9rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .room-last-msg {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+    }
+
+    .unread-badge {
+      background: var(--accent-blue);
+      color: #fff;
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 10px;
+    }
+
+    /* Main Chat Window */
+    .chat-window {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: #0b1120;
+    }
+
+    .chat-header {
+      padding: 14px 20px;
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .chat-header-info h3 {
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    .chat-header-info p {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .messages-area {
+      flex: 1;
+      padding: 20px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .message-bubble {
+      max-width: 65%;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: 0.88rem;
+      line-height: 1.4;
+      position: relative;
+      word-wrap: break-word;
+    }
+
+    .message-bubble.sent {
+      align-self: flex-end;
+      background: var(--user-msg);
+      color: #fff;
+      border-bottom-right-radius: 2px;
+    }
+
+    .message-bubble.received {
+      align-self: flex-start;
+      background: var(--partner-msg);
+      color: var(--text-main);
+      border-bottom-left-radius: 2px;
+    }
+
+    .msg-sender {
+      font-size: 0.7rem;
+      font-weight: 600;
+      color: #cbd5e1;
+      margin-bottom: 3px;
+    }
+
+    .msg-meta {
+      font-size: 0.65rem;
+      color: rgba(255, 255, 255, 0.6);
+      text-align: right;
+      margin-top: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 4px;
+    }
+
+    .msg-image {
+      max-width: 100%;
+      border-radius: 8px;
+      margin-top: 6px;
+    }
+
+    /* Input Bar */
+    .input-bar {
+      padding: 14px 20px;
+      background: var(--bg-card);
+      border-top: 1px solid var(--border-color);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .input-bar input[type="text"] {
+      flex: 1;
+      background: #0f172a;
+      padding: 12px 16px;
+      font-size: 0.9rem;
+    }
+
+    .file-btn {
+      background: var(--bg-hover);
+      color: var(--text-muted);
+      border: 1px solid var(--border-color);
+    }
+
+    .empty-state {
+      margin: auto;
+      text-align: center;
+      color: var(--text-muted);
+    }
+
+    .empty-state h3 { font-size: 1.1rem; margin-bottom: 6px; color: var(--text-main); }
+
+    /* Modal / Form overlay for new room */
+    .create-room-box {
+      padding: 12px;
+      background: #0f172a;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      gap: 8px;
+    }
+
+    .create-room-box input { flex: 1; }
+  </style>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="brand-icon">💬</div>
+      <span>CoachMax Direct Chat Tester</span>
+    </div>
+
+    <div class="config-bar">
+      <select id="userRole" onchange="switchRole()">
+        <option value="COACH">Role: Coach</option>
+        <option value="PARENT">Role: Parent</option>
+      </select>
+      <span id="roleBadge" class="role-badge role-coach">Coach Mode</span>
+      <input type="text" id="authToken" placeholder="Paste JWT Token..." style="width: 260px;">
+      <button onclick="saveToken()">Set Token</button>
+      <button style="background: var(--bg-hover);" onclick="fetchRooms()">🔄 Refresh</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- Sidebar -->
+    <div class="sidebar">
+      <div class="sidebar-header">
+        <span>Conversations</span>
+        <span id="roomCount">0 rooms</span>
+      </div>
+
+      <!-- Quick Room Launcher -->
+      <div class="create-room-box">
+        <input type="text" id="targetIdInput" placeholder="Target User ID (Parent or Coach)">
+        <button onclick="startChat()">Start Chat</button>
+      </div>
+
+      <div class="room-list" id="roomList">
+        <div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 0.85rem;">
+          Enter JWT Token above & click Refresh to load chat rooms.
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Chat Window -->
+    <div class="chat-window">
+      <div class="chat-header" id="chatHeader" style="display: none;">
+        <div class="avatar" id="headerAvatar">C</div>
+        <div class="chat-header-info">
+          <h3 id="headerName">Select a Conversation</h3>
+          <p id="headerSub">Direct In-App Chat (Phone numbers private)</p>
+        </div>
+      </div>
+
+      <div class="messages-area" id="messagesArea">
+        <div class="empty-state">
+          <h3>No Conversation Selected</h3>
+          <p>Select a chat room from the sidebar or start a new chat with a Target ID.</p>
+        </div>
+      </div>
+
+      <div class="input-bar" id="inputBar" style="display: none;">
+        <input type="file" id="fileInput" style="display: none;" onchange="handleFileSelected(this)">
+        <button class="file-btn" onclick="document.getElementById('fileInput').click()" title="Attach File">📎</button>
+        <input type="text" id="msgText" placeholder="Type a message..." onkeydown="if(event.key==='Enter') sendMsg()">
+        <button onclick="sendMsg()">Send 🚀</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let activeRole = 'COACH';
+    let activeRoomId = null;
+    let pollInterval = null;
+    let socket = null;
+
+    const baseUrl = window.location.origin;
+
+    function initSocketConnection() {
+      const token = getToken();
+      if (!token) return;
+
+      if (socket) {
+        socket.disconnect();
+      }
+
+      socket = io(baseUrl, {
+        auth: { token }
+      });
+
+      socket.on('connect', () => {
+        console.log('⚡ Socket.IO Connected real-time! Socket ID:', socket.id);
+      });
+
+      socket.on('connect_error', (err) => {
+        console.error('Socket connect error:', err.message);
+      });
+
+      socket.on('new_message', (data) => {
+        console.log('📩 Real-time message received via Socket:', data);
+        if (data.roomId === activeRoomId) {
+          fetchMessages();
+        }
+        fetchRooms();
+      });
+
+      socket.on('messages_read', (data) => {
+        console.log('✓✓ Double Blue Tick received:', data);
+        if (data.roomId === activeRoomId) {
+          fetchMessages();
+        }
+      });
+
+      socket.on('message_delivered', (data) => {
+        console.log('✓✓ Double Gray Tick received:', data);
+        if (data.roomId === activeRoomId) {
+          fetchMessages();
+        }
+      });
+
+      socket.on('user_status_change', (data) => {
+        console.log('🟢 User Status Change:', data);
+        const sub = document.getElementById('headerSub');
+        if (sub && activePartnerId && data.userId === activePartnerId) {
+          sub.innerHTML = data.isOnline
+            ? '<span style="color:#10b981; font-weight:600;">🟢 Online</span>'
+            : `<span style="color:#94a3b8;">Offline (Last seen: ${new Date(data.lastSeen).toLocaleTimeString()})</span>`;
+        }
+      });
+
+      socket.on('user_typing', (data) => {
+        if (data.roomId === activeRoomId) {
+          const sub = document.getElementById('headerSub');
+          if (sub) {
+            sub.innerText = data.isTyping ? `💬 ${data.userName} is typing...` : 'Direct In-App Chat';
+          }
+        }
+      });
+    }
+
+    let activePartnerId = null;
+
+    function renderRoomList(rooms) {
+      const list = document.getElementById('roomList');
+      document.getElementById('roomCount').innerText = `${rooms.length} rooms`;
+
+      if (rooms.length === 0) {
+        list.innerHTML = `<div style="padding:20px; text-align:center; color:var(--text-muted); font-size:0.85rem;">No active conversations found.</div>`;
+        return;
+      }
+
+      list.innerHTML = rooms.map(room => {
+        // Find other member
+        const otherMember = room.members.find(m => {
+          if (activeRole === 'COACH') return m.refModel === 'Parent';
+          return m.refModel === 'Admin';
+        })?.user || {};
+
+        const name = otherMember.fullName || otherMember.name || 'Chat Room';
+        const partnerId = otherMember._id || '';
+        const lastMsgText = room.lastMessage ? room.lastMessage.text : (room.type === 'BROADCAST' ? 'Broadcast Room' : 'No messages yet');
+        const unread = room.unreadCount ? `<span class="unread-badge">${room.unreadCount}</span>` : '';
+        const onlineIndicator = room.isPartnerOnline ? '<span style="color:#10b981; font-size:0.75rem;">🟢</span>' : '';
+
+        return `
+          <div class="room-item ${room._id === activeRoomId ? 'active' : ''}" onclick="selectRoom('${room._id}', '${name.replace(/'/g, "\\'")}', '${partnerId}')">
+            <div class="avatar">${name.charAt(0).toUpperCase()}</div>
+            <div class="room-info">
+              <div class="room-name">${name} ${onlineIndicator}</div>
+              <div class="room-last-msg">${lastMsgText}</div>
+            </div>
+            ${unread}
+          </div>
+        `;
+      }).join('');
+    }
+
+    function selectRoom(roomId, partnerName, partnerId) {
+      activeRoomId = roomId;
+      activePartnerId = partnerId;
+
+      if (socket && socket.connected) {
+        socket.emit('join_room', { roomId });
+        socket.emit('mark_read', { roomId });
+        if (partnerId) {
+          socket.emit('check_user_status', { targetUserId: partnerId }, (res) => {
+            if (res && res.success) {
+              const sub = document.getElementById('headerSub');
+              if (sub) {
+                sub.innerHTML = res.isOnline
+                  ? '<span style="color:#10b981; font-weight:600;">🟢 Online</span>'
+                  : `<span style="color:#94a3b8;">Offline</span>`;
+              }
+            }
+          });
+        }
+      }
+
+      document.getElementById('chatHeader').style.display = 'flex';
+      document.getElementById('inputBar').style.display = 'flex';
+      document.getElementById('headerName').innerText = partnerName;
+      document.getElementById('headerAvatar').innerText = partnerName.charAt(0).toUpperCase();
+
+      fetchMessages();
+
+      if (pollInterval) clearInterval(pollInterval);
+      pollInterval = setInterval(fetchMessages, 4000);
+    }
+
+    function renderMessages(messages) {
+      const area = document.getElementById('messagesArea');
+
+      if (messages.length === 0) {
+        area.innerHTML = `
+          <div class="empty-state">
+            <h3>No messages yet</h3>
+            <p>Send a message to start the conversation.</p>
+          </div>`;
+        return;
+      }
+
+      area.innerHTML = messages.map(msg => {
+        const senderObj = msg.sender?.user || {};
+        const senderName = senderObj.name || senderObj.fullName || msg.sender?.refModel || 'User';
+
+        const isMe = (activeRole === 'COACH' && msg.sender?.refModel === 'Admin') ||
+                     (activeRole === 'PARENT' && msg.sender?.refModel === 'Parent');
+
+        const time = new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        // Calculate tick icon
+        let tickHtml = '';
+        if (isMe) {
+          const status = msg.tickStatus || msg.status || 'SENT';
+          if (status === 'READ') {
+            tickHtml = '<span style="color:#60a5fa; font-weight:bold; font-size:0.8rem;" title="Read (Double Blue Tick)">✓✓</span>';
+          } else if (status === 'DELIVERED') {
+            tickHtml = '<span style="color:#94a3b8; font-weight:bold; font-size:0.8rem;" title="Delivered (Double Gray Tick)">✓✓</span>';
+          } else {
+            tickHtml = '<span style="color:#94a3b8; font-size:0.8rem;" title="Sent (Single Tick)">✓</span>';
+          }
+        }
+
+        let attachmentHtml = '';
+        if (msg.attachments && msg.attachments.length > 0) {
+          msg.attachments.forEach(att => {
+            if (att.fileType === 'IMAGE' || att.url?.match(/\.(jpg|jpeg|png|gif|webp)$/i)) {
+              attachmentHtml += `<img src="${baseUrl}/${att.url}" class="msg-image" alt="attachment">`;
+            } else {
+              attachmentHtml += `<div style="margin-top:6px;"><a href="${baseUrl}/${att.url}" target="_blank" style="color:#60a5fa; font-size:0.8rem;">📎 Download Attachment</a></div>`;
+            }
+          });
+        }
+
+        return `
+          <div class="message-bubble ${isMe ? 'sent' : 'received'}">
+            <div class="msg-sender">${senderName}</div>
+            <div>${msg.text}</div>
+            ${attachmentHtml}
+            <div class="msg-meta">
+              <span>${time}</span>
+              ${tickHtml}
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      area.scrollTop = area.scrollHeight;
+    }
+
+    async function sendMsg() {
+      const token = getToken();
+      const textInput = document.getElementById('msgText');
+      const text = textInput.value.trim();
+
+      if (!token || !activeRoomId || !text) return;
+
+      try {
+        let endpoint, body;
+        if (activeRole === 'COACH') {
+          endpoint = '/api/coach/chat/message';
+          body = JSON.stringify({ roomId: activeRoomId, text });
+        } else {
+          endpoint = '/api/user/chat/message/send';
+          body = JSON.stringify({ roomId: activeRoomId, text });
+        }
+
+        textInput.value = '';
+
+        const res = await fetch(baseUrl + endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + token
+          },
+          body
+        });
+
+        const data = await res.json();
+        if (data.success) {
+          fetchMessages();
+          fetchRooms();
+        } else {
+          alert('Failed to send: ' + data.message);
+        }
+      } catch (err) {
+        alert('Send error: ' + err.message);
+      }
+    }
+
+    async function handleFileSelected(input) {
+      const file = input.files[0];
+      if (!file || !activeRoomId) return;
+
+      const token = getToken();
+      const formData = new FormData();
+      formData.append('roomId', activeRoomId);
+      formData.append('text', `Sent attachment: ${file.name}`);
+      formData.append('file', file);
+      formData.append('fileType', file.type.startsWith('image/') ? 'IMAGE' : 'FILE');
+
+      const endpoint = activeRole === 'COACH' ? '/api/coach/chat/message' : '/api/user/chat/message/send';
+
+      try {
+        const res = await fetch(baseUrl + endpoint, {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + token },
+          body: formData
+        });
+        const data = await res.json();
+        if (data.success) {
+          fetchMessages();
+          input.value = '';
+        } else {
+          alert('File upload failed: ' + data.message);
+        }
+      } catch (err) {
+        alert('File upload error: ' + err.message);
+      }
+    }
+  </script>
+</body>
+</html>

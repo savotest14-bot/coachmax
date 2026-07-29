@@ -4,7 +4,7 @@ const chatRoomSchema = new mongoose.Schema(
   {
     type: {
       type: String,
-      enum: ["DIRECT", "GROUP"],
+      enum: ["DIRECT", "GROUP", "BROADCAST"],
       default: "DIRECT",
     },
     members: [
@@ -24,6 +24,11 @@ const chatRoomSchema = new mongoose.Schema(
     name: {
       type: String,
       default: "", // Name for group chat
+    },
+    classId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Class",
+      default: null,
     },
   },
   { timestamps: true }

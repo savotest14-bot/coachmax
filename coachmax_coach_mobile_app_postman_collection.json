@@ -1,0 +1,950 @@
+{
+  "info": {
+    "name": "CoachMax — Coach Mobile App APIs",
+    "description": "Complete Postman collection for all Coach Mobile App endpoints.\n\n## Setup\n1. Set `baseUrl` variable to your server URL (default: http://localhost:4001)\n2. Login as Coach using `/api/admin/login` and copy the token\n3. Set `coachToken` variable with the token\n4. For Admin endpoints, login as Super Admin and set `adminToken`\n\n## Features Covered\n- Feature 1: Assigned Classes & Teams\n- Feature 2: Attendance with History\n- Feature 3 & 7: Player Profile / Quick Access\n- Feature 4: Temporary Players\n- Feature 5: Coach Notes\n- Feature 6: Parent Communication\n- Admin Oversight (Audit Logs, Attendance History, Conversations)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:4001",
+      "type": "string"
+    },
+    {
+      "key": "coachToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "adminToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "classId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "playerId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "parentId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "roomId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "noteId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "tempPlayerId",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "🔐 Auth",
+      "description": "Login endpoints to get tokens for Coach and Admin",
+      "item": [
+        {
+          "name": "Coach Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.token) {",
+                  "    pm.collectionVariables.set('coachToken', jsonData.token);",
+                  "    console.log('Coach token saved!');",
+                  "}",
+                  "pm.test('Login successful', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(jsonData.success).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"coach@example.com\",\n  \"password\": \"Coach@123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "admin", "login"]
+            },
+            "description": "Login as Coach. The token is auto-saved to `coachToken` variable."
+          }
+        },
+        {
+          "name": "Super Admin Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.token) {",
+                  "    pm.collectionVariables.set('adminToken', jsonData.token);",
+                  "    console.log('Admin token saved!');",
+                  "}",
+                  "pm.test('Login successful', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(jsonData.success).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"stpl0180@outlook.com\",\n  \"password\": \"Admin@123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "admin", "login"]
+            },
+            "description": "Login as Super Admin. The token is auto-saved to `adminToken` variable."
+          }
+        }
+      ]
+    },
+    {
+      "name": "📚 Feature 1 — Assigned Classes & Teams",
+      "description": "Coach can view only their assigned classes, teams, and sessions.",
+      "item": [
+        {
+          "name": "Get My Assigned Classes",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/classes?page=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "classes"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" },
+                { "key": "search", "value": "", "disabled": true },
+                { "key": "day", "value": "MONDAY", "disabled": true },
+                { "key": "programId", "value": "", "disabled": true },
+                { "key": "categoryId", "value": "", "disabled": true }
+              ]
+            },
+            "description": "Returns only classes assigned to the authenticated coach with pagination, search, and filtering.\n\n**Filters:**\n- `search` — search by class name\n- `day` — filter by day (MONDAY, TUESDAY, etc.)\n- `programId` — filter by program\n- `categoryId` — filter by category\n\n**Response includes:** venue, date, time, age group, coach, players, sessions"
+          }
+        },
+        {
+          "name": "Get Assigned Class By ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/classes/{{classId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "classes", "{{classId}}"]
+            },
+            "description": "Returns detailed info for a specific assigned class including players with parent details, sessions, equipment, etc."
+          }
+        },
+        {
+          "name": "Get Class Players",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/classes/{{classId}}/players",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "classes", "{{classId}}", "players"]
+            },
+            "description": "Returns player list for a class with medical alert flags and parent contact info."
+          }
+        },
+        {
+          "name": "Get My Assigned Teams",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/teams?page=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "teams"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" },
+                { "key": "search", "value": "", "disabled": true }
+              ]
+            },
+            "description": "Returns only teams assigned to the authenticated coach."
+          }
+        }
+      ]
+    },
+    {
+      "name": "✅ Feature 2 — Attendance",
+      "description": "Mark and view attendance per session with full history tracking.",
+      "item": [
+        {
+          "name": "Mark Bulk Attendance",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sessionDate\": \"2026-07-29\",\n  \"records\": [\n    {\n      \"player\": \"{{playerId}}\",\n      \"status\": \"PRESENT\",\n      \"comment\": \"On time\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/attendance/{{classId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "attendance", "{{classId}}"]
+            },
+            "description": "Mark attendance for an entire session.\n\n**Status options:** `PRESENT`, `ABSENT`, `LATE`, `TRIAL`\n\nEach modification is stored in `AttendanceHistory` for audit trail.\nNotifies Super Admin on first submission."
+          }
+        },
+        {
+          "name": "Mark Single Player Attendance",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sessionDate\": \"2026-07-29\",\n  \"playerId\": \"{{playerId}}\",\n  \"status\": \"LATE\",\n  \"comment\": \"Arrived 10 minutes late\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/attendance/{{classId}}/single",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "attendance", "{{classId}}", "single"]
+            },
+            "description": "Mark or update attendance for a single player.\n\n**Status options:** `PRESENT`, `ABSENT`, `LATE`, `TRIAL`\n\nCreates `AttendanceHistory` record on every change."
+          }
+        },
+        {
+          "name": "Get Attendance By Class (All Sessions)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/attendance/{{classId}}?page=1&limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "attendance", "{{classId}}"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "50" }
+              ]
+            },
+            "description": "Get all attendance records for a class across all sessions. Paginated."
+          }
+        },
+        {
+          "name": "Get Attendance By Specific Date",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/attendance/{{classId}}/date?date=2026-07-29",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "attendance", "{{classId}}", "date"],
+              "query": [
+                { "key": "date", "value": "2026-07-29" }
+              ]
+            },
+            "description": "Get attendance for a specific date with player details."
+          }
+        },
+        {
+          "name": "[Admin] View Attendance History / Audit",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{adminToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/attendance-history/{{classId}}?page=1&limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "admin", "attendance-history", "{{classId}}"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "50" },
+                { "key": "playerId", "value": "", "disabled": true },
+                { "key": "sessionDate", "value": "2026-07-29", "disabled": true }
+              ]
+            },
+            "description": "**Super Admin only.** View who modified attendance, previous values, new values, and timestamps.\n\nFilters: `playerId`, `sessionDate`"
+          }
+        }
+      ]
+    },
+    {
+      "name": "👤 Feature 3 & 7 — Player Profile / Quick Access",
+      "description": "Aggregated player profile with medical alerts, attendance, notes, parent info, teams, programs.",
+      "item": [
+        {
+          "name": "Get Player Profile (Aggregated)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/player/{{playerId}}/profile",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "player", "{{playerId}}", "profile"]
+            },
+            "description": "Returns aggregated player profile including:\n\n- **Medical Alerts** (highlighted at top) — conditions, allergies, emergency contact\n- **Player Overview** — photo, name, DOB, current age, gender\n- **Parent / Guardian** — name, email, phone, address, emergency contact\n- **Programs & Classes** — enrolled programs, assigned classes\n- **Teams** — teams the player belongs to\n- **Attendance History** — last 50 records with summary stats\n- **Coach Notes** — all notes from assigned coaches\n- **Medical Profile** — detailed medical information\n\nCoach can only access players in their assigned classes."
+          }
+        }
+      ]
+    },
+    {
+      "name": "🆕 Feature 4 — Temporary Players (Unified User/Parent Architecture)",
+      "description": "Add trial/replacement players to a session. Creates Parent (with temp credentials) + User (playerStatus='PENDING_APPROVAL') records. Requires Super Admin approval to activate.",
+      "item": [
+        {
+          "name": "Create Temporary Player",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.data && jsonData.data.player && jsonData.data.player._id) {",
+                  "    pm.collectionVariables.set('tempPlayerId', jsonData.data.player._id);",
+                  "    console.log('Temp player ID saved: ' + jsonData.data.player._id);",
+                  "} else if (jsonData.data && jsonData.data._id) {",
+                  "    pm.collectionVariables.set('tempPlayerId', jsonData.data._id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Trial Player Name\",\n  \"dob\": \"2015-03-15\",\n  \"parentName\": \"Parent Full Name\",\n  \"parentEmail\": \"parent.trial@example.com\",\n  \"parentPhone\": \"+61400000000\",\n  \"emergencyContact\": \"+61400000001\",\n  \"medicalConditions\": \"None\",\n  \"allergies\": \"Asthma\",\n  \"classId\": \"{{classId}}\",\n  \"sessionDate\": \"2026-07-29\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/temporary-players",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "temporary-players"]
+            },
+            "description": "Coach adds a temporary/trial player to a specific session.\n\n- Creates a standard `Parent` record (sends welcome email with temp password)\n- Creates a standard `User` (Player) record with `playerStatus: 'PENDING_APPROVAL'`\n- Player is assigned to the single session (`temporaryClass` and `temporarySessionDate`)\n- Super Admin is automatically notified"
+          }
+        },
+        {
+          "name": "Get My Temporary Players",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/temporary-players?page=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "temporary-players"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" },
+                { "key": "playerStatus", "value": "PENDING_APPROVAL", "disabled": true },
+                { "key": "classId", "value": "", "disabled": true }
+              ]
+            },
+            "description": "Coach views temporary/pending players.\n\nFilters: `playerStatus` (PENDING_APPROVAL, ACTIVE, REJECTED), `classId`"
+          }
+        },
+        {
+          "name": "[Admin] Get All Temporary Players",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{adminToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/temporary-players?page=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "admin", "temporary-players"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" },
+                { "key": "playerStatus", "value": "PENDING_APPROVAL", "disabled": true }
+              ]
+            },
+            "description": "**Super Admin only.** View all temporary/pending players from all coaches."
+          }
+        },
+        {
+          "name": "[Admin] Approve Temporary Player",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{adminToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"assignedClasses\": [\"{{classId}}\"],\n  \"category\": \"categoryObjectId\",\n  \"programs\": [\"programObjectId\"]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/temporary-players/{{tempPlayerId}}/approve",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "admin", "temporary-players", "{{tempPlayerId}}", "approve"]
+            },
+            "description": "**Super Admin only.** Approve a pending temporary player.\n\n- Updates `playerStatus` to `ACTIVE`\n- Optionally assigns class, category, programs, and term\n- Notifies the creating coach"
+          }
+        },
+        {
+          "name": "[Admin] Reject Temporary Player",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{adminToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Player does not meet age requirements\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/temporary-players/{{tempPlayerId}}/reject",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "admin", "temporary-players", "{{tempPlayerId}}", "reject"]
+            },
+            "description": "**Super Admin only.** Reject a pending temporary player.\n\n- Updates `playerStatus` to `REJECTED`\n- Notifies the creating coach with optional reason"
+          }
+        },
+        {
+          "name": "[Admin] Cascade Delete Temporary Player",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{adminToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/temporary-players/{{tempPlayerId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "admin", "temporary-players", "{{tempPlayerId}}"]
+            },
+            "description": "**Super Admin only.** Completely delete a player along with all associated attendance, coach notes, chat messages, and parent account (if parent has no other children)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "📝 Feature 5 — Coach Notes",
+      "description": "Private player notes with typed categories. Cannot be deleted. Edits create audit records.",
+      "item": [
+        {
+          "name": "Create Coach Note",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.data && jsonData.data._id) {",
+                  "    pm.collectionVariables.set('noteId', jsonData.data._id);",
+                  "    console.log('Note ID saved: ' + jsonData.data._id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"playerId\": \"{{playerId}}\",\n  \"classId\": \"{{classId}}\",\n  \"noteType\": \"POSITIVE_PERFORMANCE\",\n  \"description\": \"Excellent effort during drills today. Showed great improvement in passing accuracy.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/notes",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "notes"]
+            },
+            "description": "Create a note for a player.\n\n**Note types:**\n- `ARRIVED_LATE`\n- `BEHAVIOUR_CONCERN`\n- `INJURY`\n- `MEDICAL_INCIDENT`\n- `POSITIVE_PERFORMANCE`\n- `DEVELOPMENT_AREA`\n- `PARENT_DISCUSSION`\n\nEach note includes coach name, date, and time.\nPrivate — visible only to assigned coaches and Admin."
+          }
+        },
+        {
+          "name": "Update Coach Note",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"noteType\": \"DEVELOPMENT_AREA\",\n  \"description\": \"Updated: Needs to work on left foot passing. Good attitude overall.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/notes/{{noteId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "notes", "{{noteId}}"]
+            },
+            "description": "Edit an existing note.\n\n**Creates an audit record** with old vs new values.\nOnly the original coach or Super Admin can edit.\nNote is flagged as `isEdited: true`."
+          }
+        },
+        {
+          "name": "Get My Notes",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/notes?page=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "notes"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" },
+                { "key": "noteType", "value": "INJURY", "disabled": true },
+                { "key": "playerId", "value": "", "disabled": true }
+              ]
+            },
+            "description": "Get all notes created by the authenticated coach.\nSuper Admin sees all notes.\n\nFilters: `noteType`, `playerId`"
+          }
+        },
+        {
+          "name": "Get Notes By Player",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/notes/player/{{playerId}}?page=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "notes", "player", "{{playerId}}"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" },
+                { "key": "noteType", "value": "", "disabled": true }
+              ]
+            },
+            "description": "Get all notes for a specific player.\nCoach can only view notes for players in their assigned classes."
+          }
+        },
+        {
+          "name": "Get Note Audit History",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/notes/{{noteId}}/audit",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "notes", "{{noteId}}", "audit"]
+            },
+            "description": "Get the full edit history (audit trail) for a specific note."
+          }
+        }
+      ]
+    },
+    {
+      "name": "💬 Feature 6 — Parent Communication",
+      "description": "In-app coach-parent messaging. Phone numbers hidden. Messages cannot be deleted.",
+      "item": [
+        {
+          "name": "Start Direct Chat with Parent",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.data && jsonData.data._id) {",
+                  "    pm.collectionVariables.set('roomId', jsonData.data._id);",
+                  "    console.log('Room ID saved: ' + jsonData.data._id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"parentId\": \"{{parentId}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/chat/direct",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "chat", "direct"]
+            },
+            "description": "Start or retrieve a direct chat room with a parent.\n\nCoach can only contact parents whose children are in their assigned classes."
+          }
+        },
+        {
+          "name": "Send Class Broadcast",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"Reminder: Please bring shin pads and water bottles to tomorrow's training session. See you there!\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/chat/broadcast/{{classId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "chat", "broadcast", "{{classId}}"]
+            },
+            "description": "Send a broadcast message to all parents in a class.\n\nCreates a BROADCAST chat room for the class (or reuses existing one).\nAll parents in the class receive a push notification."
+          }
+        },
+        {
+          "name": "Send Message",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"roomId\": \"{{roomId}}\",\n  \"text\": \"Hi, I wanted to discuss your child's progress in today's session.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/chat/message",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "chat", "message"]
+            },
+            "description": "Send a message in a chat room.\n\nSupports file attachments via `file` field (multipart/form-data).\n\nMessages **cannot be deleted**.\nParent members are notified via push notification."
+          }
+        },
+        {
+          "name": "Send Message with Attachment",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "roomId", "value": "{{roomId}}", "type": "text" },
+                { "key": "text", "value": "Here is the training plan", "type": "text" },
+                { "key": "fileType", "value": "FILE", "type": "text" },
+                { "key": "file", "type": "file", "src": "" }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/chat/message",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "chat", "message"]
+            },
+            "description": "Send a message with a file attachment.\n\n**fileType options:** `IMAGE`, `VIDEO`, `FILE`, `AUDIO`"
+          }
+        },
+        {
+          "name": "Get My Chat Rooms",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/chat/rooms?page=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "chat", "rooms"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" }
+              ]
+            },
+            "description": "Get list of chat rooms for the authenticated coach.\nIncludes last message and unread count for each room."
+          }
+        },
+        {
+          "name": "Get Room Messages",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/chat/room/{{roomId}}/messages?page=1&limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "chat", "room", "{{roomId}}", "messages"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "50" }
+              ]
+            },
+            "description": "Get messages for a specific room. Paginated.\n\nAlso marks unread messages as read for the coach."
+          }
+        },
+        {
+          "name": "Get Class Parents (for messaging)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/chat/class/{{classId}}/parents",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "chat", "class", "{{classId}}", "parents"]
+            },
+            "description": "Get list of parents in a class that the coach can message.\n\n**Phone numbers are NOT exposed** — only names and email shown.\nEach parent entry includes their children in the class."
+          }
+        },
+        {
+          "name": "[Admin] View All Conversations",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{adminToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/chat/conversations?page=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "admin", "chat", "conversations"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" },
+                { "key": "coachId", "value": "", "disabled": true }
+              ]
+            },
+            "description": "**Super Admin only.** View all coach-parent conversations for safeguarding and dispute management.\n\nFilter by `coachId` to see a specific coach's conversations."
+          }
+        }
+      ]
+    },
+    {
+      "name": "🔍 Admin Oversight — Audit Logs",
+      "description": "Super Admin audit log viewing for all critical system actions.",
+      "item": [
+        {
+          "name": "Get All Audit Logs",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{adminToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/audit-logs?page=1&limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "admin", "audit-logs"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "50" },
+                { "key": "action", "value": "ATTENDANCE_UPDATED", "disabled": true },
+                { "key": "entityType", "value": "CoachNote", "disabled": true },
+                { "key": "userId", "value": "", "disabled": true },
+                { "key": "startDate", "value": "2026-07-01", "disabled": true },
+                { "key": "endDate", "value": "2026-07-31", "disabled": true }
+              ]
+            },
+            "description": "**Super Admin only.** View all audit logs with filtering.\n\n**Action filters:**\n- `ATTENDANCE_CREATED`, `ATTENDANCE_UPDATED`\n- `NOTE_CREATED`, `NOTE_UPDATED`\n- `TEMP_PLAYER_CREATED`, `TEMP_PLAYER_APPROVED`, `TEMP_PLAYER_REJECTED`\n\n**Entity type filters:** `Attendance`, `CoachNote`, `TemporaryPlayer`, `Message`\n\nEach log includes: user, IP, device, timestamp, old value, new value."
+          }
+        },
+        {
+          "name": "Get Entity Audit Logs",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{adminToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/audit-logs/CoachNote/{{noteId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "admin", "audit-logs", "CoachNote", "{{noteId}}"]
+            },
+            "description": "**Super Admin only.** Get audit history for a specific entity.\n\nReplace `CoachNote` with the entity type and `{{noteId}}` with the entity ID.\n\n**Entity types:** `Attendance`, `CoachNote`, `TemporaryPlayer`"
+          }
+        }
+      ]
+    }
+  ]
+}

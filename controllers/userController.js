@@ -1570,22 +1570,36 @@ exports.markPlayerAbsent = async (req, res) => {
 
     await attendanceDoc.save();
 
-    // 5. Send Notification to Admin
+    // 5. Send Notification to Admin & Assigned Coach
     try {
       const formattedDateStr = targetDate.toISOString().split("T")[0];
+      const notifData = {
+        parentId: String(req.parent._id),
+        playerId: String(playerId),
+        classId: String(classId),
+        sessionDate: formattedDateStr,
+        reason: reason.trim(),
+      };
+
       await sendNotification({
         recipientType: "ADMIN",
         adminId: null,
         title: "Player Absence Notice 😷",
         message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for class "${classDoc.name}" on ${formattedDateStr}. Reason: ${reason.trim()}`,
         type: "ATTENDANCE_ALERT",
-        data: {
-          playerId: String(playerId),
-          classId: String(classId),
-          sessionDate: formattedDateStr,
-          reason: reason.trim(),
-        },
+        data: notifData,
       });
+
+      if (classDoc.coach) {
+        await sendNotification({
+          recipientType: "COACH",
+          coachId: classDoc.coach,
+          title: "Player Absence Notice 😷",
+          message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for class "${classDoc.name}" on ${formattedDateStr}. Reason: ${reason.trim()}`,
+          type: "ATTENDANCE_ALERT",
+          data: notifData,
+        });
+      }
     } catch (notifErr) {
       console.error("Absence notice notification error:", notifErr.message);
     }

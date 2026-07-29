@@ -6,6 +6,7 @@ const adminRoutes = require("./routes/adminRoutes");
 const seedAdmin = require("./config/seedAdmin.js");
 const userRoutes = require("./routes/userRoutes.js")
 const authRoutes = require("./routes/authRoutes.js")
+const coachRoutes = require("./routes/coachRoutes.js")
 const path = require("path");
 
 dotenv.config();
@@ -19,6 +20,7 @@ app.use(cors());
 app.use(express.json());
 
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+app.use("/public", express.static(path.join(__dirname, "public")));
 
 
 app.get("/", (req, res) => {
@@ -36,6 +38,16 @@ app.get("/api-docs", (req, res) => {
 app.use("/api/admin", adminRoutes);
 app.use("/api/user", userRoutes);
 app.use("/api/auth", authRoutes)
+app.use("/api/coach", coachRoutes)
 
-const PORT = process.env.PORT
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const http = require("http");
+const { initSocket } = require("./sockets/chatSocket");
+
+const server = http.createServer(app);
+
+// Initialize Real-Time Socket.IO
+initSocket(server);
+
+const PORT = process.env.PORT || 4001;
+server.listen(PORT, () => console.log(`🚀 Server with Socket.IO running on port ${PORT}`));
+

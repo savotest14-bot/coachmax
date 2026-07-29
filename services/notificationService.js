@@ -82,20 +82,45 @@ const sendPushToTokens = async (tokens, payload) => {
  * Create DB Notification + Send Push Notification
  */
 const sendNotification = async ({
-  recipientType = "PARENT", // "ADMIN" | "PARENT" | "ALL"
+  recipientType = "PARENT", // "ADMIN" | "COACH" | "PARENT" | "ALL"
   parentId = null,
   adminId = null,
+  coachId = null,
+  userId = null,
   title,
   message,
   type = "ANNOUNCEMENT",
   data = {},
 }) => {
   try {
+    let targetParentId = parentId;
+    let targetAdminId = adminId || coachId;
+
+    // Fallback if generic userId was passed
+    if (!targetParentId && !targetAdminId && userId) {
+      if (recipientType === "PARENT") targetParentId = userId;
+      else targetAdminId = userId;
+    }
+
+    // Auto-detect recipient role if targetAdminId is provided
+    let finalRecipientType = recipientType;
+
+    if (targetAdminId) {
+      const adminDoc = await Admin.findById(targetAdminId).select("role fcmTokens");
+      if (adminDoc) {
+        if (adminDoc.role === "COACH") {
+          finalRecipientType = "COACH";
+        } else if (adminDoc.role === "SUPER_ADMIN" || adminDoc.role === "ADMIN") {
+          finalRecipientType = "ADMIN";
+        }
+      }
+    }
+
     // 1. Create Notification Record in DB
     const notifDoc = await Notification.create({
-      recipientType,
-      parent: parentId || null,
-      admin: adminId || null,
+      recipientType: finalRecipientType,
+      parent: targetParentId || null,
+      admin: targetAdminId || null,
       title,
       message,
       type,
@@ -105,9 +130,9 @@ const sendNotification = async ({
     // 2. Collect FCM Tokens for Target Recipients
     let fcmTokens = [];
 
-    if (recipientType === "PARENT") {
-      if (parentId) {
-        const parentDoc = await Parent.findById(parentId).select("fcmTokens");
+    if (finalRecipientType === "PARENT") {
+      if (targetParentId) {
+        const parentDoc = await Parent.findById(targetParentId).select("fcmTokens");
         if (parentDoc && parentDoc.fcmTokens) {
           fcmTokens.push(...parentDoc.fcmTokens);
         }
@@ -118,20 +143,33 @@ const sendNotification = async ({
           if (p.fcmTokens) fcmTokens.push(...p.fcmTokens);
         });
       }
-    } else if (recipientType === "ADMIN") {
-      if (adminId) {
-        const adminDoc = await Admin.findById(adminId).select("fcmTokens");
+    } else if (finalRecipientType === "ADMIN") {
+      if (targetAdminId) {
+        const adminDoc = await Admin.findById(targetAdminId).select("fcmTokens");
         if (adminDoc && adminDoc.fcmTokens) {
           fcmTokens.push(...adminDoc.fcmTokens);
         }
       } else {
-        // Global for all admins
-        const admins = await Admin.find().select("fcmTokens");
+        // Global for Super Admins
+        const admins = await Admin.find({ role: { $in: ["SUPER_ADMIN", "ADMIN"] } }).select("fcmTokens");
         admins.forEach((a) => {
           if (a.fcmTokens) fcmTokens.push(...a.fcmTokens);
         });
       }
-    } else if (recipientType === "ALL") {
+    } else if (finalRecipientType === "COACH") {
+      if (targetAdminId) {
+        const coachDoc = await Admin.findById(targetAdminId).select("fcmTokens");
+        if (coachDoc && coachDoc.fcmTokens) {
+          fcmTokens.push(...coachDoc.fcmTokens);
+        }
+      } else {
+        // Global for all Coaches
+        const coaches = await Admin.find({ role: "COACH" }).select("fcmTokens");
+        coaches.forEach((c) => {
+          if (c.fcmTokens) fcmTokens.push(...c.fcmTokens);
+        });
+      }
+    } else if (finalRecipientType === "ALL") {
       const parents = await Parent.find({ isBlocked: false }).select("fcmTokens");
       const admins = await Admin.find().select("fcmTokens");
 

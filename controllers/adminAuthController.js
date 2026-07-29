@@ -339,8 +339,8 @@ exports.removeClassFromUser = async (req, res) => {
   session.startTransaction();
 
   try {
-    const userId = req.params.userId || req.params.playerId || req.body.userId || req.body.playerId;
-    const classId = req.params.classId || req.body.classId;
+    const userId = req.params?.userId || req.params?.playerId || req.body?.userId || req.body?.playerId;
+    const classId = req.params?.classId || req.body?.classId;
 
     if (!userId || !classId) {
       throw new Error("Both userId/playerId and classId are required");

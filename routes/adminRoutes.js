@@ -57,6 +57,10 @@ const {
 } = require("../controllers/assessmentController");
 
 const {
+  getUniquePlayersByCoach,
+} = require("../controllers/coachController");
+
+const {
   createTrainingSession,
   updateTrainingSession,
 } = require("../controllers/trainingController");
@@ -150,6 +154,7 @@ router.put("/updateRating/:userId", auth, isAdmin, updatePlayerRating);
 router.post("/assignClass/:userId", auth, isAdmin, assignClassToUser);
 router.post("/removeClass/:userId", auth, isAdmin, removeClassFromUser);
 router.post("/assignCoachToClass/:classId", auth, isAdmin, assignCoachToClass);
+router.get("/coach/:coachId/unique-players", auth, isAdmin, getUniquePlayersByCoach);
 
 // Banners management
 router.post("/createBanner", auth, isAdmin, uploads.single("bannerImg"), createBanner);
@@ -287,5 +292,45 @@ router.get("/notifications", auth, isAdmin, getAdminNotifications);
 router.patch("/notifications/read-all", auth, isAdmin, markAllAdminNotificationsRead);
 router.patch("/notifications/:notificationId/read", auth, isAdmin, markAdminNotificationRead);
 router.post("/send-notification", auth, isAdmin, sendAdminCustomNotification);
+
+// ═══════════════════════════════════════════════
+// Coach Mobile App — Admin Oversight Endpoints
+// ═══════════════════════════════════════════════
+
+const {
+  approveTemporaryPlayer,
+  rejectTemporaryPlayer,
+  deleteTemporaryPlayer,
+  getTemporaryPlayers: getAdminTemporaryPlayers,
+} = require("../controllers/temporaryPlayerController");
+
+const {
+  getAttendanceHistory,
+} = require("../controllers/coachAttendanceController");
+
+const {
+  getAuditLogs,
+  getEntityAuditLogs,
+} = require("../controllers/auditLogController");
+
+const {
+  getAllConversations,
+} = require("../controllers/parentChatController");
+
+// ✅ Temporary Player Management (Admin only)
+router.get("/temporary-players", auth, isAdmin, getAdminTemporaryPlayers);
+router.patch("/temporary-players/:id/approve", auth, isAdmin, approveTemporaryPlayer);
+router.patch("/temporary-players/:id/reject", auth, isAdmin, rejectTemporaryPlayer);
+router.delete("/temporary-players/:id", auth, isAdmin, deleteTemporaryPlayer);
+
+// ✅ Attendance History Audit (Admin only)
+router.get("/attendance-history/:classId", auth, isAdmin, getAttendanceHistory);
+
+// ✅ Audit Logs (Admin only)
+router.get("/audit-logs", auth, isAdmin, getAuditLogs);
+router.get("/audit-logs/:entityType/:entityId", auth, isAdmin, getEntityAuditLogs);
+
+// ✅ Coach-Parent Conversations (Admin safeguarding)
+router.get("/chat/conversations", auth, isAdmin, getAllConversations);
 
 module.exports = router;

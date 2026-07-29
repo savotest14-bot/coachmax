@@ -120,22 +120,36 @@ exports.markAllParentNotificationsRead = async (req, res) => {
 
 
 // =============================================================
-// ADMIN NOTIFICATION CONTROLLERS
+// ADMIN & COACH NOTIFICATION CONTROLLERS
 // =============================================================
 
-// ✅ Get Admin Notifications (Paginated + Unread Count)
+// ✅ Get Admin / Coach Notifications (Paginated + Unread Count)
 exports.getAdminNotifications = async (req, res) => {
   try {
     const adminId = req.admin ? req.admin._id : null;
+    const role = req.role || req.admin?.role || "ADMIN";
+    const isSuperAdmin = role === "SUPER_ADMIN" || role === "ADMIN";
+
     let { page = 1, limit = 10, isRead } = req.query;
 
     page = Number(page);
     limit = Number(limit);
 
-    const query = {
-      recipientType: { $in: ["ADMIN", "ALL"] },
-      $or: [{ admin: adminId }, { admin: null }],
-    };
+    // Build role-aware query:
+    // Super Admins see global admin notifications (admin: null) + personal notifications
+    // Coaches see notifications specifically assigned to their coachId (admin: coachId)
+    let query = {};
+    if (isSuperAdmin) {
+      query = {
+        recipientType: { $in: ["ADMIN", "ALL"] },
+        $or: [{ admin: adminId }, { admin: null }],
+      };
+    } else {
+      query = {
+        recipientType: { $in: ["ADMIN", "ALL", "COACH"] },
+        admin: adminId,
+      };
+    }
 
     if (isRead !== undefined && isRead !== "") {
       query.isRead = isRead === "true" || isRead === true;
@@ -171,17 +185,24 @@ exports.getAdminNotifications = async (req, res) => {
   }
 };
 
-// ✅ Mark Single Admin Notification as Read
+// ✅ Mark Single Admin / Coach Notification as Read
 exports.markAdminNotificationRead = async (req, res) => {
   try {
     const { notificationId } = req.params;
     const adminId = req.admin ? req.admin._id : null;
+    const role = req.role || req.admin?.role || "ADMIN";
+    const isSuperAdmin = role === "SUPER_ADMIN" || role === "ADMIN";
 
-    const notification = await Notification.findOne({
-      _id: notificationId,
-      recipientType: { $in: ["ADMIN", "ALL"] },
-      $or: [{ admin: adminId }, { admin: null }],
-    });
+    let query = { _id: notificationId };
+    if (isSuperAdmin) {
+      query.recipientType = { $in: ["ADMIN", "ALL"] };
+      query.$or = [{ admin: adminId }, { admin: null }];
+    } else {
+      query.recipientType = { $in: ["ADMIN", "ALL", "COACH"] };
+      query.admin = adminId;
+    }
+
+    const notification = await Notification.findOne(query);
 
     if (!notification) {
       return res.status(404).json({
@@ -196,7 +217,7 @@ exports.markAdminNotificationRead = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Admin notification marked as read",
+      message: "Notification marked as read",
       data: notification,
     });
   } catch (error) {
@@ -207,25 +228,29 @@ exports.markAdminNotificationRead = async (req, res) => {
   }
 };
 
-// ✅ Mark All Admin Notifications as Read
+// ✅ Mark All Admin / Coach Notifications as Read
 exports.markAllAdminNotificationsRead = async (req, res) => {
   try {
     const adminId = req.admin ? req.admin._id : null;
+    const role = req.role || req.admin?.role || "ADMIN";
+    const isSuperAdmin = role === "SUPER_ADMIN" || role === "ADMIN";
 
-    await Notification.updateMany(
-      {
-        recipientType: { $in: ["ADMIN", "ALL"] },
-        $or: [{ admin: adminId }, { admin: null }],
-        isRead: false,
-      },
-      {
-        $set: { isRead: true, readAt: new Date() },
-      }
-    );
+    let query = { isRead: false };
+    if (isSuperAdmin) {
+      query.recipientType = { $in: ["ADMIN", "ALL"] };
+      query.$or = [{ admin: adminId }, { admin: null }];
+    } else {
+      query.recipientType = { $in: ["ADMIN", "ALL", "COACH"] };
+      query.admin = adminId;
+    }
+
+    await Notification.updateMany(query, {
+      $set: { isRead: true, readAt: new Date() },
+    });
 
     return res.status(200).json({
       success: true,
-      message: "All admin notifications marked as read",
+      message: "All notifications marked as read",
     });
   } catch (error) {
     return res.status(500).json({
@@ -265,6 +290,51 @@ exports.sendAdminCustomNotification = async (req, res) => {
         ? "Notification sent to parent successfully"
         : "Announcement broadcasted to all parents successfully",
       data: notifDoc,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+// ✅ Save / Update Admin or Coach FCM Token
+exports.saveAdminFcmToken = async (req, res) => {
+  try {
+    const { fcmToken } = req.body;
+    const adminId = req.admin ? req.admin._id : null;
+
+    if (!fcmToken) {
+      return res.status(400).json({
+        success: false,
+        message: "fcmToken is required",
+      });
+    }
+
+    if (!adminId) {
+      return res.status(400).json({
+        success: false,
+        message: "Admin or Coach ID not found in token",
+      });
+    }
+
+    const adminDoc = await Admin.findByIdAndUpdate(
+      adminId,
+      { fcmToken },
+      { new: true }
+    );
+
+    if (!adminDoc) {
+      return res.status(404).json({
+        success: false,
+        message: "Admin/Coach account not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "FCM token saved successfully",
     });
   } catch (error) {
     return res.status(500).json({

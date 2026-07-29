@@ -10,8 +10,12 @@ exports.getOrCreateDirectRoom = async (req, res) => {
       return res.status(400).json({ success: false, message: "targetUserId and targetModel are required" });
     }
 
-    const currentUserId = req.role === "ADMIN" ? req.admin._id : req.parent._id;
-    const currentModel = req.role === "ADMIN" ? "Admin" : "Parent";
+    const currentUserId = req.admin ? req.admin._id : (req.parent || req.user)?._id;
+    const currentModel = req.admin ? "Admin" : "Parent";
+
+    if (!currentUserId) {
+      return res.status(401).json({ success: false, message: "Unauthorized access" });
+    }
 
     // Try finding existing direct room with these exact two members
     let room = await ChatRoom.findOne({
@@ -54,8 +58,12 @@ exports.sendMessage = async (req, res) => {
       return res.status(404).json({ success: false, message: "Room not found" });
     }
 
-    const currentUserId = req.role === "ADMIN" ? req.admin._id : req.parent._id;
-    const currentModel = req.role === "ADMIN" ? "Admin" : "Parent";
+    const currentUserId = req.admin ? req.admin._id : (req.parent || req.user)?._id;
+    const currentModel = req.admin ? "Admin" : "Parent";
+
+    if (!currentUserId) {
+      return res.status(401).json({ success: false, message: "Unauthorized access" });
+    }
 
     let attachments = [];
     if (req.file) {
@@ -80,7 +88,11 @@ exports.sendMessage = async (req, res) => {
 exports.getRoomMessages = async (req, res) => {
   try {
     const { roomId } = req.params;
-    const currentUserId = req.role === "ADMIN" ? req.admin._id : req.parent._id;
+    const currentUserId = req.admin ? req.admin._id : (req.parent || req.user)?._id;
+
+    if (!currentUserId) {
+      return res.status(401).json({ success: false, message: "Unauthorized access" });
+    }
 
     const messages = await Message.find({ room: roomId }).sort({ createdAt: 1 });
 
@@ -99,8 +111,12 @@ exports.getRoomMessages = async (req, res) => {
 // ✅ Fetch Chat Rooms list
 exports.getMyRooms = async (req, res) => {
   try {
-    const currentUserId = req.role === "ADMIN" ? req.admin._id : req.parent._id;
-    const currentModel = req.role === "ADMIN" ? "Admin" : "Parent";
+    const currentUserId = req.admin ? req.admin._id : (req.parent || req.user)?._id;
+    const currentModel = req.admin ? "Admin" : "Parent";
+
+    if (!currentUserId) {
+      return res.status(401).json({ success: false, message: "Unauthorized access" });
+    }
 
     const rooms = await ChatRoom.find({
       "members.user": currentUserId,

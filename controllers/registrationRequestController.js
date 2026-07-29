@@ -325,7 +325,7 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
 // Requirement: PATCH /admin/player/:playerId/assign-classes
 exports.assignClassesToPlayer = async (req, res) => {
   try {
-    const playerId = req.params.playerId || req.body.playerId;
+    const playerId = req.params?.playerId || req.body?.playerId;
     const { registrationRequestId, classIds, paymentStatus } = req.body;
 
     if (!playerId) {
@@ -494,7 +494,11 @@ Payment Status: ${paymentStatus}`;
         message: notificationMsg,
         type: "PLAYER_ALLOCATED",
         data: {
+          parentId: playerDoc.parentId ? String(playerDoc.parentId) : "",
           playerId: playerDoc._id ? String(playerDoc._id) : "",
+          requestId: requestDoc._id ? String(requestDoc._id) : "",
+          classIds: classIds.map(String),
+          termId: derivedTermId ? String(derivedTermId) : "",
           paymentStatus,
         },
       });

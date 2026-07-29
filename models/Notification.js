@@ -4,7 +4,7 @@ const notificationSchema = new mongoose.Schema(
   {
     recipientType: {
       type: String,
-      enum: ["ADMIN", "PARENT", "ALL"],
+      enum: ["ADMIN", "COACH", "PARENT", "ALL"],
       required: true,
       default: "PARENT",
     },
@@ -43,6 +43,12 @@ const notificationSchema = new mongoose.Schema(
         "PAYMENT_REJECTED",
         "ORDER_PAID",
         "GENERAL",
+        "TEMPORARY_PLAYER_ADDED",
+        "ATTENDANCE_SUBMITTED",
+        "MEDICAL_ALERT",
+        "PARENT_MESSAGE",
+        "CLASS_BROADCAST",
+        "COACH_ASSIGNMENT",
       ],
       default: "ANNOUNCEMENT",
     },

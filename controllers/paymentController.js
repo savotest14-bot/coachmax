@@ -531,8 +531,11 @@ exports.approvePayment = async (req, res) => {
         message: `Your payment of ${payment.amount} for Invoice #${invoice.invoiceNumber} has been verified & approved.`,
         type: "PAYMENT_APPROVED",
         data: {
+          parentId: String(payment.parent),
           paymentId: String(payment._id),
           invoiceId: String(invoice._id),
+          invoiceNumber: String(invoice.invoiceNumber),
+          amount: String(payment.amount),
         },
       });
     } catch (notifErr) {
@@ -594,8 +597,10 @@ exports.rejectPayment = async (req, res) => {
         message: `Your payment proof for Invoice #${invoice ? invoice.invoiceNumber : ""} was rejected. Reason: ${reason}. Please resubmit payment.`,
         type: "PAYMENT_REJECTED",
         data: {
+          parentId: String(payment.parent),
           paymentId: String(payment._id),
           invoiceId: invoice ? String(invoice._id) : "",
+          invoiceNumber: invoice ? String(invoice.invoiceNumber) : "",
           reason,
         },
       });

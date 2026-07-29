@@ -9,7 +9,7 @@ const { sendNotification } = require("../services/notificationService");
 const generateInvoiceNumber = async () => {
   const year = new Date().getFullYear();
   const prefix = `INV-${year}-`;
-  
+
   const lastInvoice = await Invoice.findOne({
     invoiceNumber: new RegExp(`^${prefix}`),
   })
@@ -124,8 +124,11 @@ exports.createInvoice = async (req, res) => {
         message: `An invoice #${invoiceNumber} for amount ${finalTotal} has been issued. Due date: ${new Date(dueDate).toLocaleDateString()}.`,
         type: "INVOICE_CREATED",
         data: {
+          parentId: String(parentId),
           invoiceId: String(invoice._id),
+          invoiceNumber: String(invoiceNumber),
           totalAmount: String(finalTotal),
+          dueDate: new Date(dueDate).toISOString(),
         },
       });
     } catch (notifErr) {
@@ -182,7 +185,7 @@ exports.getAdminInvoices = async (req, res) => {
 
     if (search) {
       const searchRegex = new RegExp(search, "i");
-      
+
       const [matchingParents, matchingPlayers] = await Promise.all([
         Parent.find({
           $or: [{ fullName: searchRegex }, { email: searchRegex }, { phone: searchRegex }],

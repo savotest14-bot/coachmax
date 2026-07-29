@@ -22,7 +22,8 @@ exports.forgotPassword = async (req, res) => {
     }
 
     const Model = role === "ADMIN" ? Admin : Parent;
-    const user = await Model.findOne({ email: email.toLowerCase() });
+
+    const user = await Model.findOne({ email: email });
 
     if (!user) {
       return res.status(404).json({
@@ -388,9 +389,8 @@ exports.updateChild = async (req, res) => {
       req.body.firstName !== undefined ||
       req.body.lastName !== undefined
     ) {
-      updateFields.fullName = `${req.body.firstName || child.firstName} ${
-        req.body.lastName || child.lastName
-      }`;
+      updateFields.fullName = `${req.body.firstName || child.firstName} ${req.body.lastName || child.lastName
+        }`;
     }
 
     if (req.body.email !== undefined)
@@ -439,7 +439,7 @@ exports.updateChild = async (req, res) => {
 
         fs.access(oldPath, fs.constants.F_OK, (err) => {
           if (!err) {
-            fs.unlink(oldPath, () => {});
+            fs.unlink(oldPath, () => { });
           }
         });
       }
