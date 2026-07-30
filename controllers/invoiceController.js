@@ -2,8 +2,21 @@ const Invoice = require("../models/Invoice");
 const Parent = require("../models/Parent");
 const User = require("../models/User");
 const BankDetails = require("../models/BankDetails");
+const PaymentSettings = require("../models/PaymentSettings");
 const Notification = require("../models/Notification");
 const { sendNotification } = require("../services/notificationService");
+
+const getOrCreatePaymentSettings = async () => {
+  let settings = await PaymentSettings.findOne();
+  if (!settings) {
+    settings = await PaymentSettings.create({
+      isOnlineEnabled: true,
+      isCodEnabled: true,
+    });
+  }
+  return settings;
+};
+
 
 // Helper to generate sequential invoice number e.g. INV-2026-000001
 const generateInvoiceNumber = async () => {
@@ -397,7 +410,7 @@ exports.getParentInvoices = async (req, res) => {
     const pageLimit = Math.max(1, parseInt(limit, 10) || 10);
     const skip = (currentPage - 1) * pageLimit;
 
-    const [invoices, total, activeBankDetails] = await Promise.all([
+    const [invoices, total, activeBankDetails, paymentSettings] = await Promise.all([
       Invoice.find(query)
         .populate("players", "firstName lastName fullName category assignedClasses")
         .sort({ createdAt: -1 })
@@ -405,6 +418,7 @@ exports.getParentInvoices = async (req, res) => {
         .limit(pageLimit),
       Invoice.countDocuments(query),
       BankDetails.findOne({ isActive: true }).sort({ updatedAt: -1 }),
+      getOrCreatePaymentSettings(),
     ]);
 
     return res.status(200).json({
@@ -418,6 +432,14 @@ exports.getParentInvoices = async (req, res) => {
       },
       data: invoices,
       bankDetails: activeBankDetails || null,
+      paymentSettings: {
+        isOnlineEnabled: paymentSettings.isOnlineEnabled,
+        isCodEnabled: paymentSettings.isCodEnabled,
+        allowedPaymentMethods: [
+          ...(paymentSettings.isOnlineEnabled ? ["ONLINE"] : []),
+          ...(paymentSettings.isCodEnabled ? ["COD"] : []),
+        ],
+      },
     });
   } catch (err) {
     return res.status(500).json({
@@ -443,12 +465,23 @@ exports.getParentInvoiceById = async (req, res) => {
       });
     }
 
-    const activeBankDetails = await BankDetails.findOne({ isActive: true }).sort({ updatedAt: -1 });
+    const [activeBankDetails, paymentSettings] = await Promise.all([
+      BankDetails.findOne({ isActive: true }).sort({ updatedAt: -1 }),
+      getOrCreatePaymentSettings(),
+    ]);
 
     return res.status(200).json({
       success: true,
       data: invoice,
       bankDetails: activeBankDetails || null,
+      paymentSettings: {
+        isOnlineEnabled: paymentSettings.isOnlineEnabled,
+        isCodEnabled: paymentSettings.isCodEnabled,
+        allowedPaymentMethods: [
+          ...(paymentSettings.isOnlineEnabled ? ["ONLINE"] : []),
+          ...(paymentSettings.isCodEnabled ? ["COD"] : []),
+        ],
+      },
     });
   } catch (err) {
     return res.status(500).json({

@@ -107,6 +107,8 @@ const {
   approvePayment,
   rejectPayment,
   getPaymentDashboardStats,
+  getPaymentSettings,
+  updatePaymentSettings,
 } = require("../controllers/paymentController");
 
 const {
@@ -269,7 +271,9 @@ router.put("/invoices/:id", auth, isAdmin, updateInvoice);
 router.delete("/invoices/:id", auth, isAdmin, deleteInvoice);
 
 
-// ✅ Payment Management (Admin only)
+// ✅ Payment Management & Controls (Admin only)
+router.get("/payments/settings", auth, isAdmin, getPaymentSettings);
+router.put("/payments/settings", auth, isAdmin, updatePaymentSettings);
 router.get("/payments", auth, isAdmin, getAdminPayments);
 router.get("/payments/:id", auth, isAdmin, getAdminPaymentById);
 router.patch("/payments/:id/approve", auth, isAdmin, approvePayment);

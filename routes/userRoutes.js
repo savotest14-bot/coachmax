@@ -51,6 +51,7 @@ const {
   payOnline,
   resubmitPayment,
   getParentPayments,
+  getPaymentSettings,
 } = require("../controllers/paymentController");
 
 const {
@@ -149,8 +150,9 @@ router.get("/leagues/:leagueId/standings", getLeagueStandings);
 router.get("/leagues/:leagueId/leaderboard", getLeagueLeaderboard);
 router.get("/leagues/:leagueId/fixtures", getFixtures);
 
-// Bank Details
+// Bank Details & Payment Settings
 router.get("/bank-details", getBankDetails);
+router.get("/payment-settings", auth, getPaymentSettings);
 
 // Payments & Invoicing (Parent)
 router.get("/invoices", auth, getParentInvoices);

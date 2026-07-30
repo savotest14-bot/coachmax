@@ -6,7 +6,86 @@ const User = require("../models/User");
 const Order = require("../models/Order");
 const Notification = require("../models/Notification");
 const BankDetails = require("../models/BankDetails");
+const PaymentSettings = require("../models/PaymentSettings");
 const { sendNotification } = require("../services/notificationService");
+
+// Helper to get or create singleton PaymentSettings
+const getOrCreatePaymentSettings = async () => {
+  let settings = await PaymentSettings.findOne();
+  if (!settings) {
+    settings = await PaymentSettings.create({
+      isOnlineEnabled: true,
+      isCodEnabled: true,
+    });
+  }
+  return settings;
+};
+exports.getOrCreatePaymentSettings = getOrCreatePaymentSettings;
+
+// ✅ Get Payment Settings (Public / Parent / Admin)
+exports.getPaymentSettings = async (req, res) => {
+  try {
+    const settings = await getOrCreatePaymentSettings();
+    return res.status(200).json({
+      success: true,
+      data: {
+        isOnlineEnabled: settings.isOnlineEnabled,
+        isCodEnabled: settings.isCodEnabled,
+        allowedPaymentMethods: [
+          ...(settings.isOnlineEnabled ? ["ONLINE"] : []),
+          ...(settings.isCodEnabled ? ["COD"] : []),
+        ],
+        updatedAt: settings.updatedAt,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+// ✅ Update Payment Settings (Admin only)
+exports.updatePaymentSettings = async (req, res) => {
+  try {
+    const { isOnlineEnabled, isCodEnabled } = req.body;
+
+    const settings = await getOrCreatePaymentSettings();
+
+    if (isOnlineEnabled !== undefined) {
+      settings.isOnlineEnabled = Boolean(isOnlineEnabled);
+    }
+    if (isCodEnabled !== undefined) {
+      settings.isCodEnabled = Boolean(isCodEnabled);
+    }
+
+    if (req.admin) {
+      settings.updatedBy = req.admin._id;
+    }
+
+    await settings.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Payment settings updated successfully",
+      data: {
+        isOnlineEnabled: settings.isOnlineEnabled,
+        isCodEnabled: settings.isCodEnabled,
+        allowedPaymentMethods: [
+          ...(settings.isOnlineEnabled ? ["ONLINE"] : []),
+          ...(settings.isCodEnabled ? ["COD"] : []),
+        ],
+        updatedAt: settings.updatedAt,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
 
 // ✅ Parent Pay COD (Cash on Delivery / Offline)
 exports.payCOD = async (req, res) => {
@@ -14,6 +93,14 @@ exports.payCOD = async (req, res) => {
     const parentId = req.parent._id;
     const { invoiceId } = req.params;
     const { remarks = "" } = req.body;
+
+    const settings = await getOrCreatePaymentSettings();
+    if (!settings.isCodEnabled) {
+      return res.status(400).json({
+        success: false,
+        message: "Cash on Delivery (COD) payment method is currently disabled by Admin.",
+      });
+    }
 
     const invoice = await Invoice.findById(invoiceId);
     if (!invoice) {
@@ -87,6 +174,14 @@ exports.payOnline = async (req, res) => {
     const parentId = req.parent._id;
     const { invoiceId } = req.params;
     const { transactionId, remarks = "" } = req.body;
+
+    const settings = await getOrCreatePaymentSettings();
+    if (!settings.isOnlineEnabled) {
+      return res.status(400).json({
+        success: false,
+        message: "Online payment method is currently disabled by Admin.",
+      });
+    }
 
     const invoice = await Invoice.findOne({ _id: invoiceId, parent: parentId });
     if (!invoice) {
