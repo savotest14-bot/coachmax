@@ -7,6 +7,9 @@ const BASE_UPLOAD_PATH = path.join(process.cwd(), "uploads");
 
 const UPLOAD_PATHS = Object.freeze({
   profiles: "profiles",
+  profileImage: "profiles",
+  profile: "profiles",
+  image: "profiles",
   bannerImg: "bannerImg",
   eventImg: "eventImg",
   teamLogo: "teamlogos",

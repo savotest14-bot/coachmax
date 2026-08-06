@@ -81,6 +81,10 @@ const {
 const {
   createCategory: createStoreCategory,
   createProduct,
+  updateProduct,
+  deleteProduct,
+  getProductById,
+  getAdminProducts,
   getAllCategories,
   updateCategory,
   deleteCategory,
@@ -250,6 +254,10 @@ router.get("/store/categories", auth, isAdmin, getAllCategories);
 router.put("/store/categories/:id", auth, isAdmin, updateCategory);
 router.delete("/store/categories/:id", auth, isAdmin, deleteCategory);
 router.post("/store/products", auth, isAdmin, uploads.array("images", 5), createProduct);
+router.get("/store/products", auth, isAdmin, getAdminProducts);
+router.put("/store/products/:id", auth, isAdmin, uploads.array("images", 5), updateProduct);
+router.delete("/store/products/:id", auth, isAdmin, deleteProduct);
+router.get("/store/products/:id", auth, isAdmin, getProductById);
 router.get("/store/orders", auth, isAdmin, getAllOrders);
 router.get("/store/orders/:id", auth, isAdmin, getOrderById);
 router.patch("/store/orders/:id", auth, isAdmin, updateOrderStatus);

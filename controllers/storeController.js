@@ -186,7 +186,7 @@ exports.createProduct = async (req, res) => {
   }
 };
 
-// ✅ Get Products List
+// ✅ Get Products List (User store catalog)
 exports.getProducts = async (req, res) => {
   try {
     const {
@@ -252,6 +252,217 @@ exports.getProducts = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: err.message,
+    });
+  }
+};
+
+// ✅ Get All Products for Admin (Filter by search, category, status; returns all status if no status passed)
+exports.getAdminProducts = async (req, res) => {
+  try {
+    const {
+      search = "",
+      category,
+      categoryId,
+      status,
+      availabilityStatus,
+      page = 1,
+      limit = 10,
+    } = req.query;
+
+    const query = {};
+
+    const targetCategory = categoryId || category;
+    if (targetCategory) {
+      query.category = targetCategory;
+    }
+
+    if (status) {
+      query.status = status;
+    }
+
+    if (availabilityStatus) {
+      query.availabilityStatus = availabilityStatus;
+    }
+
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: "i" } },
+        { description: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const currentPage = Math.max(1, parseInt(page, 10) || 1);
+    const pageLimit = Math.max(1, parseInt(limit, 10) || 10);
+    const skip = (currentPage - 1) * pageLimit;
+
+    const [products, total] = await Promise.all([
+      Product.find(query)
+        .populate("category", "name description")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(pageLimit),
+      Product.countDocuments(query),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      count: products.length,
+      data: products,
+      pagination: {
+        page: currentPage,
+        limit: pageLimit,
+        total,
+        totalPages: Math.ceil(total / pageLimit),
+        hasMore: skip + products.length < total,
+        nextPage: skip + products.length < total ? currentPage + 1 : null,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+// ✅ Get Single Product By ID
+exports.getProductById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const product = await Product.findById(id).populate("category", "name description");
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: product,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+// ✅ Update Product (Admin only)
+exports.updateProduct = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      name,
+      shortHighlight,
+      description,
+      category,
+      price,
+      stock,
+      sizes,
+      colors,
+      availabilityStatus,
+      status,
+      existingImages,
+    } = req.body;
+
+    const product = await Product.findById(id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    if (name !== undefined) product.name = name;
+    if (shortHighlight !== undefined) product.shortHighlight = shortHighlight;
+    if (description !== undefined) product.description = description;
+    if (category !== undefined) product.category = category;
+    if (price !== undefined) product.price = Number(price);
+    if (stock !== undefined) product.stock = Number(stock);
+    if (availabilityStatus !== undefined) product.availabilityStatus = availabilityStatus;
+    if (status !== undefined) product.status = status;
+
+    if (sizes !== undefined) {
+      product.sizes = Array.isArray(sizes)
+        ? sizes
+        : typeof sizes === "string"
+        ? JSON.parse(sizes)
+        : [];
+    }
+
+    if (colors !== undefined) {
+      product.colors = Array.isArray(colors)
+        ? colors
+        : typeof colors === "string"
+        ? JSON.parse(colors)
+        : [];
+    }
+
+    let updatedImages = [];
+    if (existingImages) {
+      updatedImages = Array.isArray(existingImages)
+        ? existingImages
+        : typeof existingImages === "string"
+        ? JSON.parse(existingImages)
+        : [];
+    } else if (!req.files || req.files.length === 0) {
+      updatedImages = product.images;
+    }
+
+    if (req.files && req.files.length > 0) {
+      const newImages = req.files.map(
+        (file) => `uploads/images/${file.filename}`
+      );
+      updatedImages = [...updatedImages, ...newImages];
+    }
+
+    product.images = updatedImages;
+
+    await product.save();
+
+    const populatedProduct = await Product.findById(id).populate("category", "name");
+
+    return res.status(200).json({
+      success: true,
+      message: "Product updated successfully.",
+      data: populatedProduct,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+// ✅ Delete Product (Admin only - sets status to INACTIVE)
+exports.deleteProduct = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const product = await Product.findById(id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found",
+      });
+    }
+
+    product.status = "INACTIVE";
+    await product.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Product deleted successfully.",
+      data: product,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
     });
   }
 };

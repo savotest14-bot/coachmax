@@ -480,10 +480,26 @@ exports.getActiveBanners = async (req, res) => {
 // ✅ Retrieve Categories
 exports.getCategories = async (req, res) => {
   try {
-    const categories = await Category.find().sort({ displayOrder: 1 });
+    const { isEvent } = req.query;
+
+    const filter = {};
+
+    if (isEvent === "true") {
+      filter.isEvent = true;
+    } else if (isEvent === "false" || isEvent === undefined) {
+      // Default: only regular categories
+      filter.isEvent = false;
+    }
+    // If isEvent === "all", don't apply any filter
+
+    const categories = await Category.find(filter).sort({ displayOrder: 1 });
+
     res.json(categories);
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 };
 
@@ -1288,7 +1304,19 @@ exports.getDashboard = async (req, res) => {
 
 exports.getAllTerms = async (req, res) => {
   try {
-    const terms = await Term.find().sort({ startDate: 1 });
+    const { isEvent } = req.query;
+
+    const filter = {};
+
+    if (isEvent === "true") {
+      filter.isEvent = true;
+    } else if (isEvent === "false" || isEvent === undefined) {
+      // Default: only non-event terms
+      filter.isEvent = false;
+    }
+    // If isEvent === "all", don't add any filter
+
+    const terms = await Term.find(filter).sort({ startDate: 1 });
 
     res.json({
       data: terms,

@@ -11,6 +11,10 @@ const categorySchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    isEvent: {
+      type: Boolean,
+      default: false,
+    },
     description: {
       type: String,
       default: "",

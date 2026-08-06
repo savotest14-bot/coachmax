@@ -15,10 +15,10 @@ const adminSchema = new mongoose.Schema(
             unique: true,
             required: true,
         },
-        profile:String,
+        profileImage: { type: String, default: null },
         otp: String,
         otpExpire: Date,
-        isOtpVerified: {type:Boolean, default:false},
+        isOtpVerified: { type: Boolean, default: false },
         password: {
             type: String,
             required: true,

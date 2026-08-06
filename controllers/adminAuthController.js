@@ -15,6 +15,7 @@ const Class = require("../models/Class");
 const Attendance = require("../models/Attendance");
 const { Parser } = require("json2csv");
 const Parent = require("../models/Parent");
+const ChatRoom = require("../models/ChatRoom");
 
 exports.adminLogin = async (req, res) => {
   try {
@@ -718,7 +719,7 @@ exports.exportUsers = async (req, res) => {
 
 exports.createCategory = async (req, res) => {
   try {
-    const { name } = req.body;
+    const { name, isEvent } = req.body;
 
     if (!name) {
       return res.status(400).json({
@@ -726,22 +727,30 @@ exports.createCategory = async (req, res) => {
       });
     }
 
-    const existing = await Category.findOne({ name: name.toUpperCase() });
+    const existing = await Category.findOne({
+      name: name.toUpperCase(),
+    });
+
     if (existing) {
       return res.status(400).json({
         message: "Category already exists",
       });
     }
 
-    const category = await Category.create({
+    const categoryData = {
       name: name.toUpperCase(),
-    });
+    };
+
+    if (isEvent === true) {
+      categoryData.isEvent = true;
+    }
+
+    const category = await Category.create(categoryData);
 
     res.json({
       message: "Category created successfully",
       category,
     });
-
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -799,18 +808,26 @@ exports.createProgram = async (req, res) => {
 
 exports.createTerm = async (req, res) => {
   try {
-    const { name, year, startDate, endDate } = req.body;
+    const { name, year, startDate, endDate, isEvent } = req.body;
+
     const parseDate = (dateStr) => {
       const [day, month, year] = dateStr.split("/").map(Number);
       return new Date(year, month - 1, day);
     };
 
-    const term = await Term.create({
+    const termData = {
       name,
       year,
       startDate: parseDate(startDate),
       endDate: parseDate(endDate),
-    });
+    };
+
+    // Only set if provided, otherwise schema default (false) will be used
+    if (isEvent === true) {
+      termData.isEvent = true;
+    }
+
+    const term = await Term.create(termData);
 
     res.json({
       message: "Term created successfully",
@@ -823,7 +840,19 @@ exports.createTerm = async (req, res) => {
 
 exports.getAllTerms = async (req, res) => {
   try {
-    const terms = await Term.find().sort({ startDate: 1 });
+    const { isEvent } = req.query;
+
+    const filter = {};
+
+    if (isEvent === "true") {
+      filter.isEvent = true;
+    } else if (isEvent === "false" || isEvent === undefined) {
+      // Default: only non-event terms
+      filter.isEvent = false;
+    }
+    // If isEvent === "all", don't add any filter
+
+    const terms = await Term.find(filter).sort({ startDate: 1 });
 
     res.json({
       data: terms,
@@ -1659,10 +1688,46 @@ exports.getCoachById = async (req, res) => {
 
 exports.updateCoach = async (req, res) => {
   try {
+    const coachId = req.params.id;
+    const newMobile = req.body.mobile || req.body.phone;
+    const newEmail = req.body.email;
+
+    if (newMobile) {
+      const existingAdminMobile = await Admin.findOne({
+        mobile: newMobile,
+        _id: { $ne: coachId },
+      });
+      const existingParentMobile = await Parent.findOne({
+        phone: newMobile,
+      });
+
+      if (existingAdminMobile || existingParentMobile) {
+        return res.status(400).json({
+          message: "Mobile number is already registered by another user.",
+        });
+      }
+    }
+
+    if (newEmail) {
+      const existingAdminEmail = await Admin.findOne({
+        email: newEmail.toLowerCase(),
+        _id: { $ne: coachId },
+      });
+      const existingParentEmail = await Parent.findOne({
+        email: newEmail.toLowerCase(),
+      });
+
+      if (existingAdminEmail || existingParentEmail) {
+        return res.status(400).json({
+          message: "Email is already registered by another user.",
+        });
+      }
+    }
+
     const coach = await Admin.findOneAndUpdate(
-      { _id: req.params.id, role: "COACH" },
+      { _id: coachId, role: "COACH" },
       req.body,
-      { new: true }
+      { new: true, runValidators: true }
     ).select("-password");
 
     if (!coach) {
@@ -1677,6 +1742,11 @@ exports.updateCoach = async (req, res) => {
     });
 
   } catch (err) {
+    if (err.code === 11000) {
+      return res.status(400).json({
+        message: "Email or mobile number is already registered by another user.",
+      });
+    }
     res.status(500).json({ message: err.message });
   }
 };
@@ -1921,10 +1991,18 @@ exports.getClassFullTable = async (req, res) => {
       };
     });
 
+    // ✅ 5. Check if broadcast chatroom is present
+    const broadcastRoom = await ChatRoom.findOne({
+      classId: classId,
+      type: "BROADCAST",
+    }).select("_id");
+
     res.json({
       classId: cls._id,
       className: cls.name,
-      coach: { _id: cls.coach._id, name: cls.coach.name },
+      coach: cls.coach ? { _id: cls.coach._id, name: cls.coach.name } : null,
+      broadcastChatRoomId: broadcastRoom ? broadcastRoom._id : null,
+      broadcastRoomId: broadcastRoom ? broadcastRoom._id : null,
       totalSessions: sessionDates.length,
       sessions: sessionDates,
       players,
@@ -2062,6 +2140,13 @@ exports.getPlayerDetails = async (req, res) => {
   try {
     const { playerId } = req.params;
 
+    if (!mongoose.Types.ObjectId.isValid(playerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid player ID",
+      });
+    }
+
     const player = await User.findById(playerId)
       .populate({
         path: "parentId",
@@ -2080,20 +2165,75 @@ exports.getPlayerDetails = async (req, res) => {
       });
     }
 
-    const otherPlayers = await User.find({
-      parentId: player.parentId._id,
-      _id: { $ne: player._id },
+    const parentId = player.parentId?._id;
+    const otherPlayers = parentId
+      ? await User.find({
+        parentId: parentId,
+        _id: { $ne: player._id },
+      })
+        .select("_id fullName")
+        .lean()
+      : [];
+
+    // Fetch per-day attendance records for this player
+    const attendanceRecords = await Attendance.find({
+      "records.player": playerId,
     })
-      .select("_id fullName")
+      .populate("class", "name dayOfWeek startTime endTime")
+      .sort({ sessionDate: -1 })
       .lean();
+
+    // Map to per-day attendance format
+    const perDayAttendance = attendanceRecords.map((att) => {
+      const playerRecord = att.records.find(
+        (r) => r.player && r.player.toString() === playerId.toString()
+      );
+      return {
+        attendanceId: att._id,
+        class: att.class,
+        sessionDate: att.sessionDate,
+        status: playerRecord?.status || "NOT_MARKED",
+        comment: playerRecord?.comment || "",
+        remarks: playerRecord?.remarks || "",
+        reason: playerRecord?.reason || "",
+        markedByParent: playerRecord?.markedByParent || false,
+        lateArrival: playerRecord?.lateArrival || false,
+        attendanceType: playerRecord?.attendanceType || "REGULAR",
+      };
+    });
+
+    // Calculate overall attendance metrics
+    const totalSessions = perDayAttendance.length;
+    const presentCount = perDayAttendance.filter((a) => a.status === "PRESENT").length;
+    const absentCount = perDayAttendance.filter((a) => a.status === "ABSENT").length;
+    const lateCount = perDayAttendance.filter((a) => a.status === "LATE").length;
+    const trialCount = perDayAttendance.filter((a) => a.status === "TRIAL").length;
+    const attendedCount = presentCount + lateCount;
+
+    const overallAttendancePercentage =
+      totalSessions > 0
+        ? Number(((attendedCount / totalSessions) * 100).toFixed(2))
+        : 0;
+
+    const overallAttendance = {
+      totalSessions,
+      presentCount,
+      absentCount,
+      lateCount,
+      trialCount,
+      attendedCount,
+      percentage: overallAttendancePercentage,
+    };
 
     return res.status(200).json({
       success: true,
       message: "Player details fetched successfully.",
       data: {
         player,
-        parent: player.parentId,
+        parent: player.parentId || null,
         otherPlayers,
+        perDayAttendance,
+        overallAttendance,
       },
     });
   } catch (error) {

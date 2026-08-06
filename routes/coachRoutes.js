@@ -11,6 +11,8 @@ const {
   getPlayerProfile,
   getClassPlayers,
   getUniquePlayersByCoach,
+  getPlayerDetails,
+  getClassDropdown,
 } = require("../controllers/coachController");
 
 const {
@@ -58,6 +60,7 @@ const router = express.Router();
 // ─── Feature 1: Assigned Classes & Teams ─────
 router.get("/classes", auth, isCoach, getMyAssignedClasses);
 router.get("/classes/:classId", auth, isCoach, getAssignedClassById);
+router.get("/getClasses", auth, getClassDropdown)
 router.get("/classes/:classId/players", auth, isCoach, getClassPlayers);
 router.get("/teams", auth, isCoach, getMyAssignedTeams);
 router.get("/unique-players", auth, isCoach, getUniquePlayersByCoach);
@@ -96,5 +99,12 @@ router.get("/notifications", auth, isCoach, getAdminNotifications);
 router.patch("/notifications/read-all", auth, isCoach, markAllAdminNotificationsRead);
 router.patch("/notifications/:notificationId/read", auth, isCoach, markAdminNotificationRead);
 router.post("/fcm-token", auth, isCoach, saveAdminFcmToken);
+
+router.get(
+  "/player/:playerId",
+  auth,
+  isCoach,
+  getPlayerDetails
+);
 
 module.exports = router;

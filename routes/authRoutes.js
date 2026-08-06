@@ -16,7 +16,7 @@ router.post("/resetPassword", resetPassword);
 
 router.get("/getMyProfile", auth, getMyProfile);
 
-router.put("/updateMyProfile",auth, uploads.single("profiles"), updateMyProfile);
+router.put("/updateMyProfile", auth, uploads.any(), updateMyProfile);
 
 router.put(
   "/updateChild/:childId",

@@ -29,6 +29,10 @@ const termSchema = new mongoose.Schema(
       enum: ["UPCOMING", "ACTIVE", "COMPLETED"],
       default: "ACTIVE",
     },
+    isEvent: {
+      type: Boolean,
+      default: false,
+    },
     notes: {
       type: String,
       default: "",

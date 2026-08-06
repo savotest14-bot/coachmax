@@ -9,6 +9,8 @@ const fs = require("fs");
 const path = require("path");
 const User = require("../models/User");
 const Invoice = require("../models/Invoice");
+const Class = require("../models/Class");
+const Attendance = require("../models/Attendance");
 
 
 exports.forgotPassword = async (req, res) => {
@@ -222,6 +224,13 @@ exports.getMyProfile = async (req, res) => {
   try {
     let data = req.role === "ADMIN" ? req.admin : req.parent;
 
+    if (!data) {
+      return res.status(404).json({
+        success: false,
+        message: "User profile not found",
+      });
+    }
+
     data = data.toObject();
 
     // Remove sensitive fields
@@ -232,8 +241,110 @@ exports.getMyProfile = async (req, res) => {
 
     let players = [];
     let unpaidInvoiceCount = 0;
+    let coachStats = {};
 
-    if (req.role !== "ADMIN") {
+    if (req.role === "ADMIN" && data.role === "COACH") {
+      const assignedClasses = await Class.find({
+        $or: [{ coach: data._id }, { assistantCoach: data._id }],
+        status: "ACTIVE",
+      })
+        .populate("term", "startDate endDate")
+        .select("players term dayOfWeek");
+
+      const assignedClassesCount = assignedClasses.length;
+
+      const playerIdsSet = new Set();
+      const classIds = [];
+      const now = new Date();
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+      let sessionsToBeDeliveredCount = 0;
+      let sessionsToBeDeliveredThisMonthCount = 0;
+
+      const dayMap = {
+        SUNDAY: 0,
+        MONDAY: 1,
+        TUESDAY: 2,
+        WEDNESDAY: 3,
+        THURSDAY: 4,
+        FRIDAY: 5,
+        SATURDAY: 6,
+      };
+
+      assignedClasses.forEach((cls) => {
+        classIds.push(cls._id);
+        (cls.players || []).forEach((pId) => {
+          if (pId) playerIdsSet.add(pId.toString());
+        });
+
+        if (cls.term && cls.term.startDate && cls.term.endDate && cls.dayOfWeek) {
+          const start = new Date(cls.term.startDate);
+          start.setUTCHours(0, 0, 0, 0);
+          const end = new Date(cls.term.endDate);
+          end.setUTCHours(0, 0, 0, 0);
+
+          const targetDay = dayMap[cls.dayOfWeek.toUpperCase()];
+          if (targetDay !== undefined) {
+            let current = new Date(start);
+            while (current.getUTCDay() !== targetDay) {
+              current.setUTCDate(current.getUTCDate() + 1);
+            }
+            while (current <= end) {
+              sessionsToBeDeliveredCount++;
+              if (current >= startOfMonth && current <= endOfMonth) {
+                sessionsToBeDeliveredThisMonthCount++;
+              }
+              current.setUTCDate(current.getUTCDate() + 7);
+            }
+          }
+        }
+      });
+
+      const uniquePlayersCount = playerIdsSet.size;
+
+      let overallAttendancePercentage = 0;
+      if (classIds.length > 0) {
+        const attendances = await Attendance.find({
+          class: { $in: classIds },
+        }).select("records");
+
+        let totalRecords = 0;
+        let presentRecords = 0;
+
+        attendances.forEach((att) => {
+          (att.records || []).forEach((r) => {
+            totalRecords++;
+            if (r.status === "PRESENT" || r.status === "LATE") {
+              presentRecords++;
+            }
+          });
+        });
+
+        overallAttendancePercentage =
+          totalRecords > 0
+            ? Number(((presentRecords / totalRecords) * 100).toFixed(2))
+            : 0;
+      }
+
+      // Temporary players created by this coach this month
+      const temporaryPlayersThisMonthCount = await User.countDocuments({
+        createdBy: data._id,
+        createdAt: { $gte: startOfMonth },
+      });
+
+      coachStats = {
+        assignedClassesCount,
+        uniquePlayersCount,
+        overallAttendancePercentage,
+        temporaryPlayersThisMonthCount,
+        temporaryPlayersCreatedThisMonth: temporaryPlayersThisMonthCount,
+        sessionsToBeDeliveredCount,
+        sessionsToBeDelivered: sessionsToBeDeliveredCount,
+        sessionsToBeDeliveredThisMonthCount,
+        sessionsToBeDeliveredThisMonth: sessionsToBeDeliveredThisMonthCount,
+      };
+    } else if (req.role !== "ADMIN") {
       // Get parent's players
       players = await User.find({ parentId: data._id })
         .populate("category", "name")
@@ -258,6 +369,7 @@ exports.getMyProfile = async (req, res) => {
         ...data,
         players,
         unpaidInvoiceCount,
+        ...(data.role === "COACH" ? coachStats : {}),
       },
     });
   } catch (err) {
@@ -282,15 +394,26 @@ exports.updateMyProfile = async (req, res) => {
       currentUser = req.parent;
     }
 
-    // Upload new profile image
-    if (req.file) {
-      const imagePath = `uploads/profiles/${req.file.filename}`;
+    if (!currentUser) {
+      return res.status(404).json({
+        success: false,
+        message: "User profile not found.",
+      });
+    }
+
+    // Support single file upload from req.file or req.files (e.g. from uploads.any())
+    const uploadedFile = req.file || (req.files && req.files.length > 0 ? req.files[0] : null);
+
+    if (uploadedFile) {
+      const folderName = uploadedFile.destination ? path.basename(uploadedFile.destination) : "profiles";
+      const imagePath = `uploads/${folderName}/${uploadedFile.filename}`;
+
       updateFields.profileImage = imagePath;
 
-      // Delete old profile image
-      if (currentUser.profileImage) {
-        const oldPath = path.resolve(currentUser.profileImage);
-
+      // Delete old profile image if exists
+      const oldImage = currentUser.profileImage;
+      if (oldImage) {
+        const oldPath = path.resolve(oldImage);
         fs.access(oldPath, fs.constants.F_OK, (err) => {
           if (!err) {
             fs.unlink(oldPath, (err) => {
@@ -301,21 +424,32 @@ exports.updateMyProfile = async (req, res) => {
           }
         });
       }
+    } else if (req.body.profileImage !== undefined || req.body.profile !== undefined) {
+      updateFields.profileImage = req.body.profileImage !== undefined ? req.body.profileImage : req.body.profile;
     }
 
     if (req.role === "ADMIN") {
-      updateFields.name = req.body.name;
-      updateFields.mobile = req.body.mobile;
+      // Support both `name` and `fullName` for Admin/Coach
+      if (req.body.name !== undefined) updateFields.name = req.body.name;
+      if (req.body.fullName !== undefined) updateFields.name = req.body.fullName;
+
+      // Support both `mobile` and `phone` for Admin/Coach
+      if (req.body.mobile !== undefined) updateFields.mobile = req.body.mobile;
+      if (req.body.phone !== undefined) updateFields.mobile = req.body.phone;
+
+      if (req.body.email !== undefined) updateFields.email = req.body.email;
     } else {
-      updateFields.fullName = req.body.fullName;
-      updateFields.phone = req.body.phone;
-      updateFields.address = req.body.address;
-      updateFields.city = req.body.city;
-      updateFields.state = req.body.state;
-      updateFields.postcode = req.body.postcode;
-      updateFields.country = req.body.country;
-      updateFields.emergencyContact = req.body.emergencyContact;
-      updateFields.relationship = req.body.relationship;
+      if (req.body.fullName !== undefined) updateFields.fullName = req.body.fullName;
+      if (req.body.name !== undefined && req.body.fullName === undefined) updateFields.fullName = req.body.name;
+      if (req.body.phone !== undefined) updateFields.phone = req.body.phone;
+      if (req.body.mobile !== undefined && req.body.phone === undefined) updateFields.phone = req.body.mobile;
+      if (req.body.address !== undefined) updateFields.address = req.body.address;
+      if (req.body.city !== undefined) updateFields.city = req.body.city;
+      if (req.body.state !== undefined) updateFields.state = req.body.state;
+      if (req.body.postcode !== undefined) updateFields.postcode = req.body.postcode;
+      if (req.body.country !== undefined) updateFields.country = req.body.country;
+      if (req.body.emergencyContact !== undefined) updateFields.emergencyContact = req.body.emergencyContact;
+      if (req.body.relationship !== undefined) updateFields.relationship = req.body.relationship;
 
       if (req.body.notificationSettings) {
         updateFields.notificationSettings =
@@ -331,6 +465,51 @@ exports.updateMyProfile = async (req, res) => {
         delete updateFields[key];
       }
     });
+
+    // Check for duplicate mobile number across both Admin and Parent models
+    const newMobile = updateFields.mobile || updateFields.phone;
+    if (newMobile) {
+      const currentMobile = currentUser.mobile || currentUser.phone;
+      if (newMobile !== currentMobile) {
+        const existingAdmin = await Admin.findOne({
+          mobile: newMobile,
+          _id: { $ne: currentUser._id },
+        });
+        const existingParent = await Parent.findOne({
+          phone: newMobile,
+          _id: { $ne: currentUser._id },
+        });
+
+        if (existingAdmin || existingParent) {
+          return res.status(400).json({
+            success: false,
+            message: "Mobile number is already registered by another user.",
+          });
+        }
+      }
+    }
+
+    // Check for duplicate email across both Admin and Parent models
+    if (updateFields.email) {
+      const currentEmail = currentUser.email;
+      if (updateFields.email.toLowerCase() !== (currentEmail ? currentEmail.toLowerCase() : "")) {
+        const existingAdminEmail = await Admin.findOne({
+          email: updateFields.email,
+          _id: { $ne: currentUser._id },
+        });
+        const existingParentEmail = await Parent.findOne({
+          email: updateFields.email.toLowerCase(),
+          _id: { $ne: currentUser._id },
+        });
+
+        if (existingAdminEmail || existingParentEmail) {
+          return res.status(400).json({
+            success: false,
+            message: "Email is already registered by another user.",
+          });
+        }
+      }
+    }
 
     const updatedUser = await Model.findByIdAndUpdate(
       currentUser._id,
@@ -352,6 +531,13 @@ exports.updateMyProfile = async (req, res) => {
       data: updatedUser,
     });
   } catch (error) {
+    if (error.code === 11000) {
+      const isMobile = error.keyPattern && (error.keyPattern.mobile || error.keyPattern.phone);
+      return res.status(400).json({
+        success: false,
+        message: isMobile ? "Mobile number is already registered by another user." : "Email is already registered by another user.",
+      });
+    }
     return res.status(500).json({
       success: false,
       message: error.message,

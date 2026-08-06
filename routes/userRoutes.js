@@ -60,6 +60,7 @@ const {
 
 const {
   getProducts,
+  getProductById,
   addToCart,
   getCart,
   checkout,
@@ -175,6 +176,7 @@ router.get("/parent/payments", auth, getParentPayments);
 // Store
 router.get("/store/categories", auth, getAllCategories);
 router.get("/store/products", getProducts);
+router.get("/store/products/:id", getProductById);
 router.get("/store/cart", auth, getCart);
 router.post("/store/cart/add", auth, addToCart);
 router.patch("/store/cart/update-quantity", auth, updateCartQuantity);

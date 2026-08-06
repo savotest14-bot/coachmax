@@ -6,6 +6,7 @@ const CoachNote = require("../models/CoachNote");
 const MedicalProfile = require("../models/MedicalProfile");
 const Term = require("../models/Term");
 const mongoose = require("mongoose");
+const Admin = require("../models/Admin");
 
 // ─────────────────────────────────────────────
 // Helper: Generate class sessions from term dates
@@ -133,6 +134,52 @@ exports.getMyAssignedClasses = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+
+exports.getClassDropdown = async (req, res) => {
+  try {
+    const adminId = req.admin._id;
+
+    // Fetch latest admin details from DB
+    const admin = await Admin.findById(adminId).select("role");
+
+    if (!admin) {
+      return res.status(404).json({
+        success: false,
+        message: "Admin not found",
+      });
+    }
+
+    let query = {
+      status: "ACTIVE",
+    };
+
+    // Coach -> only assigned classes
+    if (admin.role === "COACH") {
+      query.$or = [
+        { coach: adminId },
+        { assistantCoach: adminId },
+      ];
+    }
+
+    // Super Admin -> all active classes
+    const classes = await Class.find(query)
+      .select("_id name")
+      .sort({ name: 1 });
+
+    return res.status(200).json({
+      success: true,
+      message: "Classes fetched successfully",
+      data: classes,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
 
 /**
  * GET /api/coach/classes/:classId
@@ -456,12 +503,12 @@ exports.getClassPlayers = async (req, res) => {
       medicalConditionDetails: p.medicalConditionDetails || "",
       parent: p.parentId
         ? {
-            _id: p.parentId._id,
-            fullName: p.parentId.fullName,
-            phone: p.parentId.phone,
-            email: p.parentId.email,
-            emergencyContact: p.parentId.emergencyContact,
-          }
+          _id: p.parentId._id,
+          fullName: p.parentId.fullName,
+          phone: p.parentId.phone,
+          email: p.parentId.email,
+          emergencyContact: p.parentId.emergencyContact,
+        }
         : null,
     }));
 
@@ -561,5 +608,103 @@ exports.getUniquePlayersByCoach = async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+exports.getPlayerDetails = async (req, res) => {
+  try {
+    const { playerId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(playerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid player ID",
+      });
+    }
+
+    const player = await User.findById(playerId)
+      .populate({
+        path: "parentId",
+        select: "-password -tokens -otp -otpExpire -__v",
+      })
+      .populate("category", "name")
+      .populate("programs", "name")
+      .populate("term", "name")
+      .populate("assignedClasses", "name")
+      .lean();
+
+    if (!player) {
+      return res.status(404).json({
+        success: false,
+        message: "Player not found",
+      });
+    }
+
+    // Fetch per-day attendance records for this player
+    const attendanceRecords = await Attendance.find({
+      "records.player": playerId,
+    })
+      .populate("class", "name dayOfWeek startTime endTime")
+      .sort({ sessionDate: -1 })
+      .lean();
+
+    // Map to per-day attendance format
+    const perDayAttendance = attendanceRecords.map((att) => {
+      const playerRecord = att.records.find(
+        (r) => r.player && r.player.toString() === playerId.toString()
+      );
+      return {
+        attendanceId: att._id,
+        class: att.class,
+        sessionDate: att.sessionDate,
+        status: playerRecord?.status || "NOT_MARKED",
+        comment: playerRecord?.comment || "",
+        remarks: playerRecord?.remarks || "",
+        reason: playerRecord?.reason || "",
+        markedByParent: playerRecord?.markedByParent || false,
+        lateArrival: playerRecord?.lateArrival || false,
+        attendanceType: playerRecord?.attendanceType || "REGULAR",
+      };
+    });
+
+    // Calculate overall attendance metrics
+    const totalSessions = perDayAttendance.length;
+    const presentCount = perDayAttendance.filter((a) => a.status === "PRESENT").length;
+    const absentCount = perDayAttendance.filter((a) => a.status === "ABSENT").length;
+    const lateCount = perDayAttendance.filter((a) => a.status === "LATE").length;
+    const trialCount = perDayAttendance.filter((a) => a.status === "TRIAL").length;
+    const attendedCount = presentCount + lateCount;
+
+    const overallAttendancePercentage =
+      totalSessions > 0
+        ? Number(((attendedCount / totalSessions) * 100).toFixed(2))
+        : 0;
+
+    const overallAttendance = {
+      totalSessions,
+      presentCount,
+      absentCount,
+      lateCount,
+      trialCount,
+      attendedCount,
+      percentage: overallAttendancePercentage,
+    };
+
+    return res.status(200).json({
+      success: true,
+      message: "Player details fetched successfully.",
+      data: {
+        player,
+        parent: player.parentId || null,
+        perDayAttendance,
+        overallAttendance,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
