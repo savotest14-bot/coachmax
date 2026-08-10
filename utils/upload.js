@@ -54,6 +54,7 @@ const ALLOWED_MIME_TYPES = new Set([
   "image/webp",
   "image/gif",
   "image/avif",
+  "application/octet-stream",
   "image/svg+xml",
   "text/csv",
   "application/vnd.ms-excel",
@@ -70,6 +71,7 @@ const ALLOWED_MIME_TYPES = new Set([
 
 const fileFilter = (req, file, cb) => {
   if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
+    console.log("Unsupported file type", file.mimetype, file.originalname);
     return cb(new Error("Unsupported file type"), false);
   }
   cb(null, true);

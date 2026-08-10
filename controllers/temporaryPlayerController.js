@@ -12,6 +12,7 @@ const Notification = require("../models/Notification");
 const sendEmail = require("../utils/sendEmail");
 const { welcomeEmail } = require("../utils/emailTemplates");
 const { sendNotification } = require("../services/notificationService");
+const { generateClassInvoice } = require("../services/invoiceService");
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
@@ -308,6 +309,17 @@ exports.approveTemporaryPlayer = async (req, res) => {
     if (term) player.term = term;
 
     await player.save();
+
+    // ✅ Automatic Invoice Generation on Class Assignment
+    if (assignedClasses && Array.isArray(assignedClasses)) {
+      try {
+        for (const clsId of assignedClasses) {
+          await generateClassInvoice({ userId: player._id, classId: clsId });
+        }
+      } catch (invErr) {
+        console.error("Auto invoice generation error in approveTemporaryPlayer:", invErr.message);
+      }
+    }
 
     // Audit log
     await AuditLog.create({

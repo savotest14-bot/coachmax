@@ -16,6 +16,7 @@ const Attendance = require("../models/Attendance");
 const { Parser } = require("json2csv");
 const Parent = require("../models/Parent");
 const ChatRoom = require("../models/ChatRoom");
+const { generateClassInvoice, generateTransferInvoice } = require("../services/invoiceService");
 
 exports.adminLogin = async (req, res) => {
   try {
@@ -325,6 +326,13 @@ exports.assignClassToUser = async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
+    // ✅ Automatic Invoice Generation on Class Assignment
+    try {
+      await generateClassInvoice({ userId, classId });
+    } catch (invErr) {
+      console.error("Auto invoice generation error in assignClassToUser:", invErr.message);
+    }
+
     res.json({ message: "Class assigned successfully" });
 
   } catch (err) {
@@ -390,6 +398,138 @@ exports.removeClassFromUser = async (req, res) => {
     session.endSession();
 
     res.status(400).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+// ✅ Transfer Player from One Class to Another Class (Admin)
+exports.transferPlayerClass = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const userId = req.params?.userId || req.params?.playerId || req.body?.userId || req.body?.playerId;
+    const { fromClassId, toClassId } = req.body;
+
+    if (!userId || !fromClassId || !toClassId) {
+      return res.status(400).json({
+        success: false,
+        message: "userId/playerId, fromClassId, and toClassId are required",
+      });
+    }
+
+    if (fromClassId.toString() === toClassId.toString()) {
+      return res.status(400).json({
+        success: false,
+        message: "fromClassId and toClassId cannot be the same class",
+      });
+    }
+
+    const user = await User.findById(userId).session(session);
+    const fromClass = await Class.findById(fromClassId).session(session);
+    const toClass = await Class.findById(toClassId).session(session);
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "Player not found" });
+    }
+    if (!fromClass) {
+      return res.status(404).json({ success: false, message: "Previous class (fromClass) not found" });
+    }
+    if (!toClass) {
+      return res.status(404).json({ success: false, message: "Target class (toClass) not found" });
+    }
+
+    // Check if player is currently in fromClass
+    const isAssigned = (user.assignedClasses || []).some(
+      (c) => c.toString() === fromClassId.toString()
+    );
+
+    if (!isAssigned) {
+      return res.status(400).json({
+        success: false,
+        message: "Player is not currently assigned to the specified fromClass",
+      });
+    }
+
+    // Check capacity for toClass if capacity is defined
+    if (toClass.capacity && toClass.players.length >= toClass.capacity) {
+      return res.status(400).json({
+        success: false,
+        message: "Target class is at maximum capacity",
+      });
+    }
+
+    // 1. Remove fromClassId from user.assignedClasses
+    user.assignedClasses = (user.assignedClasses || []).filter(
+      (c) => c.toString() !== fromClassId.toString()
+    );
+
+    // 2. Add fromClassId to user.removedClasses
+    user.removedClasses = user.removedClasses || [];
+    if (!user.removedClasses.some((c) => c.toString() === fromClassId.toString())) {
+      user.removedClasses.push(fromClassId);
+    }
+
+    // 3. Add toClassId to user.assignedClasses
+    if (!user.assignedClasses.some((c) => c.toString() === toClassId.toString())) {
+      user.assignedClasses.push(toClassId);
+    }
+
+    // 4. Remove toClassId from user.removedClasses if previously removed
+    user.removedClasses = user.removedClasses.filter(
+      (c) => c.toString() !== toClassId.toString()
+    );
+
+    // 5. Remove userId from fromClass.players roster
+    fromClass.players = (fromClass.players || []).filter(
+      (p) => p.toString() !== userId.toString()
+    );
+
+    // 6. Add userId to toClass.players roster
+    if (!toClass.players.some((p) => p.toString() === userId.toString())) {
+      toClass.players.push(userId);
+    }
+
+    await user.save({ session });
+    await fromClass.save({ session });
+    await toClass.save({ session });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    // 7. Auto Invoice Generation if new class price > previous class price
+    let transferInvoiceResult = { invoice: null, priceDiff: 0, invoiceGenerated: false };
+    try {
+      transferInvoiceResult = await generateTransferInvoice({
+        userId,
+        fromClass,
+        toClass,
+      });
+    } catch (invErr) {
+      console.error("Auto transfer invoice error:", invErr.message);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: transferInvoiceResult.invoiceGenerated
+        ? `Player transferred successfully. Invoice #${transferInvoiceResult.invoice.invoiceNumber} generated for price difference ($${transferInvoiceResult.priceDiff}).`
+        : "Player transferred to new class successfully. No invoice required.",
+      data: {
+        player: user,
+        fromClass: { _id: fromClass._id, name: fromClass.name, price: fromClass.price },
+        toClass: { _id: toClass._id, name: toClass.name, price: toClass.price },
+        priceDifference: transferInvoiceResult.priceDiff,
+        invoiceGenerated: transferInvoiceResult.invoiceGenerated,
+        invoice: transferInvoiceResult.invoice,
+      },
+    });
+
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+    return res.status(500).json({
       success: false,
       message: err.message,
     });
@@ -840,25 +980,35 @@ exports.createTerm = async (req, res) => {
 
 exports.getAllTerms = async (req, res) => {
   try {
-    const { isEvent } = req.query;
+    const { isEvent, year } = req.query;
 
     const filter = {};
 
+    // Event filter
     if (isEvent === "true") {
       filter.isEvent = true;
     } else if (isEvent === "false" || isEvent === undefined) {
-      // Default: only non-event terms
       filter.isEvent = false;
     }
-    // If isEvent === "all", don't add any filter
+    // If isEvent === "all", don't apply event filter
 
-    const terms = await Term.find(filter).sort({ startDate: 1 });
+    // Year filter
+    if (year) {
+      filter.year = Number(year);
+    }
+
+    const terms = await Term.find(filter).sort({
+      year: 1,
+      startDate: 1,
+    });
 
     res.json({
       data: terms,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(500).json({
+      message: err.message,
+    });
   }
 };
 
@@ -945,7 +1095,17 @@ exports.createClass = async (req, res) => {
       location,
       coach,
       capacity,
+      price,
     } = req.body;
+
+    if (price !== undefined && price !== null) {
+      const numPrice = Number(price);
+      if (isNaN(numPrice) || numPrice < 0) {
+        return res.status(400).json({
+          message: "Price must be a non-negative number",
+        });
+      }
+    }
 
     if (
       !term ||
@@ -1022,6 +1182,7 @@ exports.createClass = async (req, res) => {
       location,
       coach,
       capacity,
+      price: price !== undefined && price !== null ? Number(price) : 0,
     });
 
     res.json({
@@ -1104,7 +1265,17 @@ exports.updateClass = async (req, res) => {
       location,
       coach,
       capacity,
+      price,
     } = req.body;
+
+    if (price !== undefined && price !== null) {
+      const numPrice = Number(price);
+      if (isNaN(numPrice) || numPrice < 0) {
+        return res.status(400).json({
+          message: "Price must be a non-negative number",
+        });
+      }
+    }
 
     const updatedData = {};
 
@@ -1226,6 +1397,11 @@ exports.updateClass = async (req, res) => {
         });
       }
       updatedData.capacity = capacity;
+    }
+
+    // ✅ Price validation
+    if (price !== undefined && price !== null) {
+      updatedData.price = Number(price);
     }
 
     // ✅ Prevent coach conflict (if relevant fields updated)
@@ -1861,30 +2037,38 @@ exports.getCoachClassesWithSessions = async (req, res) => {
 
 exports.getClassFiltersWithTimeSlots = async (req, res) => {
   try {
-    const { categoryId, programId, day } = req.query;
+    const { categoryId, programId, day, termId, term } = req.query;
+    const selectedTerm = termId || term;
 
     // ✅ base query
     const query = {};
     if (categoryId) query.category = categoryId;
     if (programId) query.program = programId;
     if (day) query.dayOfWeek = day;
+    if (selectedTerm) query.term = selectedTerm;
 
     const classes = await Class.find(query)
       .populate("category", "name")
-      .populate("program", "name");
+      .populate("program", "name")
+      .populate("term", "name year startDate endDate");
 
     // ✅ categories
     const categories = [...new Map(
-      classes.map(c => [c.category._id, c.category])
+      classes.filter(c => c.category).map(c => [c.category._id.toString(), c.category])
     ).values()];
 
     // ✅ programs
     const programs = [...new Map(
-      classes.map(c => [c.program._id, c.program])
+      classes.filter(c => c.program).map(c => [c.program._id.toString(), c.program])
+    ).values()];
+
+    // ✅ terms
+    const terms = [...new Map(
+      classes.filter(c => c.term).map(c => [c.term._id.toString(), c.term])
     ).values()];
 
     // ✅ days
-    const days = [...new Set(classes.map(c => c.dayOfWeek))];
+    const days = [...new Set(classes.map(c => c.dayOfWeek).filter(Boolean))];
 
     // ✅ time slots (only if day is selected)
     let timeSlots = [];
@@ -1898,6 +2082,7 @@ exports.getClassFiltersWithTimeSlots = async (req, res) => {
     }
 
     res.json({
+      terms,
       categories,
       programs,
       days,
@@ -1919,10 +2104,10 @@ exports.getClassFullTable = async (req, res) => {
       .populate({
         path: "players",
         select:
-          "fullName email dob phone contactName paymentStatus isMedicalCondition medicalConditionDetails rating prefferedFoot parentId",
+          "fullName email dob phone contactName paymentStatus isMedicalCondition medicalConditionDetails rating prefferedFoot parentId profileImage",
         populate: {
           path: "parentId",
-          select: "fullName email phone", // choose the fields you need
+          select: "fullName email phone profileImage", // choose the fields you need
         },
       });
 
@@ -1972,6 +2157,7 @@ exports.getClassFullTable = async (req, res) => {
         email: player.email,
         dob: player.dob,
         phone: player.phone,
+        profileImage: player.profileImage,
         guardian: player.contactName,
         isMedicalCondition: player.isMedicalCondition,
         medicalConditionDetails: player.medicalConditionDetails,
@@ -1985,6 +2171,7 @@ exports.getClassFullTable = async (req, res) => {
             name: player.parentId.fullName,
             email: player.parentId.email,
             phone: player.parentId.phone,
+            profileImage: player.parentId.profileImage,
           }
           : null,
         attendance,
@@ -2243,3 +2430,271 @@ exports.getPlayerDetails = async (req, res) => {
     });
   }
 };
+
+/**
+ * @desc Preview Clone Term - Fetch classes and players to clone, check duplicate class existence
+ * @route POST /api/admin/cloneTerm/preview
+ * @access Private/Admin
+ */
+exports.previewCloneTerm = async (req, res) => {
+  try {
+    const { sourceTermId, targetTermId } = req.body;
+
+    if (!sourceTermId || !targetTermId) {
+      return res.status(400).json({
+        success: false,
+        message: "sourceTermId and targetTermId are required.",
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(sourceTermId) || !mongoose.Types.ObjectId.isValid(targetTermId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid sourceTermId or targetTermId format.",
+      });
+    }
+
+    if (sourceTermId === targetTermId) {
+      return res.status(400).json({
+        success: false,
+        message: "Source term and target term cannot be the same.",
+      });
+    }
+
+    const sourceTerm = await Term.findById(sourceTermId);
+    if (!sourceTerm) {
+      return res.status(404).json({
+        success: false,
+        message: "Source term not found.",
+      });
+    }
+
+    const targetTerm = await Term.findById(targetTermId);
+    if (!targetTerm) {
+      return res.status(404).json({
+        success: false,
+        message: "Target term not found.",
+      });
+    }
+
+    // Fetch source classes with populated category, program, coach, players
+    const sourceClasses = await Class.find({ term: sourceTermId })
+      .populate("category", "name")
+      .populate("program", "name")
+      .populate("coach", "fullName name")
+      .populate("players", "firstName lastName fullName");
+
+    // Fetch existing target classes to check for duplicate class existence
+    const targetClasses = await Class.find({ term: targetTermId });
+
+    const classesPreview = sourceClasses.map((cls) => {
+      // Check if duplicate class exists in target term
+      const alreadyExists = targetClasses.some((tCls) => {
+        const sameName = tCls.name === cls.name;
+        const sameCategory = String(tCls.category) === String(cls.category?._id || cls.category);
+        const sameProgram = String(tCls.program) === String(cls.program?._id || cls.program);
+        const sameDay = tCls.dayOfWeek === cls.dayOfWeek;
+        const sameStartTime = tCls.startTime === cls.startTime;
+        return sameName && sameCategory && sameProgram && sameDay && sameStartTime;
+      });
+
+      const playersList = (cls.players || []).map((player) => {
+        const playerName =
+          player.fullName ||
+          [player.firstName, player.lastName].filter(Boolean).join(" ") ||
+          "Unknown Player";
+        return {
+          _id: player._id,
+          name: playerName,
+          selected: true,
+        };
+      });
+
+      return {
+        classId: cls._id,
+        name: cls.name,
+        category: cls.category?.name || "",
+        program: cls.program?.name || "",
+        coach: cls.coach?.fullName || cls.coach?.name || "",
+        playerCount: playersList.length,
+        alreadyExists,
+        players: playersList,
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      sourceTerm: {
+        _id: sourceTerm._id,
+        name: sourceTerm.name,
+      },
+      targetTerm: {
+        _id: targetTerm._id,
+        name: targetTerm.name,
+      },
+      classes: classesPreview,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+/**
+ * @desc Clone Term - Perform selective clone of classes and players within a transaction
+ * @route POST /api/admin/cloneTerm
+ * @access Private/Admin
+ */
+exports.cloneTerm = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { sourceTermId, targetTermId, classes } = req.body;
+
+    if (!sourceTermId || !targetTermId) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({
+        success: false,
+        message: "sourceTermId and targetTermId are required.",
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(sourceTermId) || !mongoose.Types.ObjectId.isValid(targetTermId)) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({
+        success: false,
+        message: "Invalid sourceTermId or targetTermId format.",
+      });
+    }
+
+    if (sourceTermId === targetTermId) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({
+        success: false,
+        message: "Source term and target term cannot be the same.",
+      });
+    }
+
+    const sourceTerm = await Term.findById(sourceTermId).session(session);
+    if (!sourceTerm) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({
+        success: false,
+        message: "Source term not found.",
+      });
+    }
+
+    const targetTerm = await Term.findById(targetTermId).session(session);
+    if (!targetTerm) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({
+        success: false,
+        message: "Target term not found.",
+      });
+    }
+
+    const selectedClasses = Array.isArray(classes) ? classes : [];
+    let classesSelected = selectedClasses.length;
+    let classesCloned = 0;
+    let classesSkipped = 0;
+    let playersSelected = 0;
+    let playersCopied = 0;
+
+    for (const item of selectedClasses) {
+      const { classId, players: playerIds } = item;
+      const playerList = Array.isArray(playerIds) ? playerIds : [];
+      playersSelected += playerList.length;
+
+      if (!classId || !mongoose.Types.ObjectId.isValid(classId)) {
+        classesSkipped++;
+        continue;
+      }
+
+      const sourceClass = await Class.findById(classId).session(session);
+      if (!sourceClass || String(sourceClass.term) !== String(sourceTermId)) {
+        classesSkipped++;
+        continue;
+      }
+
+      // Check duplicate in target term
+      const existingClass = await Class.findOne({
+        term: targetTermId,
+        name: sourceClass.name,
+        category: sourceClass.category,
+        program: sourceClass.program,
+        dayOfWeek: sourceClass.dayOfWeek,
+        startTime: sourceClass.startTime,
+      }).session(session);
+
+      if (existingClass) {
+        classesSkipped++;
+        continue;
+      }
+
+      // Filter player IDs to ensure they belonged to the original class
+      const validPlayerIds = playerList.filter((pId) =>
+        sourceClass.players.some((spId) => String(spId) === String(pId))
+      );
+
+      // Create new class document copying fields, ignoring _id, createdAt, updatedAt, attendance
+      const classObject = sourceClass.toObject();
+      delete classObject._id;
+      delete classObject.createdAt;
+      delete classObject.updatedAt;
+
+      classObject.term = targetTermId;
+      classObject.players = validPlayerIds;
+
+      const [newClass] = await Class.create([classObject], { session });
+      classesCloned++;
+      playersCopied += validPlayerIds.length;
+
+      // Update users / players
+      for (const playerId of validPlayerIds) {
+        const user = await User.findById(playerId).session(session);
+        if (user) {
+          const updateData = {
+            $addToSet: { assignedClasses: newClass._id },
+          };
+
+          if (user.term && String(user.term) === String(sourceTermId)) {
+            updateData.$set = { term: targetTermId };
+          }
+
+          await User.updateOne({ _id: playerId }, updateData, { session });
+        }
+      }
+    }
+
+    await session.commitTransaction();
+    session.endSession();
+
+    return res.status(200).json({
+      success: true,
+      message: "Term cloned successfully.",
+      summary: {
+        classesSelected,
+        classesCloned,
+        classesSkipped,
+        playersSelected,
+        playersCopied,
+        attendanceCopied: false,
+      },
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};

@@ -349,7 +349,16 @@ const initSocket = (server) => {
           status: populatedMsg.tickStatus,
         });
 
-        // Update room timestamp
+        // Update room timestamp and lastMessage
+        const senderName = socket.user?.fullName || socket.user?.name || "User";
+        room.lastMessage = {
+          text: text || (processedAttachments.length > 0 ? "Attachment" : ""),
+          sender: userIdStr,
+          senderModel: socket.refModel,
+          senderName,
+          timestamp: new Date(),
+          type: processedAttachments.length > 0 ? "ATTACHMENT" : "TEXT",
+        };
         room.updatedAt = new Date();
         await room.save();
 
@@ -544,6 +553,19 @@ const initSocket = (server) => {
             message: text,
           });
         });
+
+        // Update broadcast room lastMessage
+        const senderName = socket.user?.fullName || socket.user?.name || "Coach";
+        broadcastRoom.lastMessage = {
+          text: text || "",
+          sender: userIdStr,
+          senderModel: "Admin",
+          senderName,
+          timestamp: new Date(),
+          type: "TEXT",
+        };
+        broadcastRoom.updatedAt = new Date();
+        await broadcastRoom.save();
 
         if (callback) callback({ success: true, data: populatedMsg });
       } catch (err) {

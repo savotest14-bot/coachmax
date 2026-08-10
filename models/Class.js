@@ -43,6 +43,12 @@ const classSchema = new mongoose.Schema(
 
     capacity: Number,
 
+    price: {
+      type: Number,
+      default: 0,
+      min: [0, "Price cannot be negative"],
+    },
+
     players: [
       {
         type: mongoose.Schema.Types.ObjectId,

@@ -482,6 +482,131 @@
           ]
         }
       ]
+    },
+    {
+      "name": "Class & Auto-Invoice Management",
+      "item": [
+        {
+          "name": "1. Create Class with Price (Admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{admin_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"U12 Elite Training\",\n  \"term\": \"607d1f77bcf86cd799439010\",\n  \"program\": \"607d1f77bcf86cd799439011\",\n  \"category\": \"607d1f77bcf86cd799439012\",\n  \"dayOfWeek\": \"MONDAY\",\n  \"startTime\": \"16:00\",\n  \"endTime\": \"17:30\",\n  \"location\": \"Main Pitch\",\n  \"coach\": \"607d1f77bcf86cd799439013\",\n  \"capacity\": 20,\n  \"price\": 150\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/admin/createClass",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "createClass"]
+            },
+            "description": "Create a new class configured with a positive price."
+          },
+          "response": []
+        },
+        {
+          "name": "2. Update Class Price (Admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{admin_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"price\": 175\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/admin/updateClass/{{class_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "updateClass", "{{class_id}}"]
+            },
+            "description": "Update existing class price (must be positive number)."
+          },
+          "response": []
+        },
+        {
+          "name": "3. Assign Class to Player (Triggers Auto-Invoice)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{admin_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"classIds\": [\"{{class_id}}\"],\n  \"paymentStatus\": \"UNPAID\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/admin/player/{{player_id}}/assign-classes",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "player", "{{player_id}}", "assign-classes"]
+            },
+            "description": "Admin assigns class to player. Automatically generates an UNPAID invoice linked to player and parent with class price."
+          },
+          "response": []
+        },
+        {
+          "name": "4. Transfer Player Class (Auto Invoice for Price Difference)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{admin_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{player_id}}\",\n  \"fromClassId\": \"607d1f77bcf86cd799439003\",\n  \"toClassId\": \"{{class_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/admin/transferClass",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "transferClass"]
+            },
+            "description": "Admin transfers player from one class to another. Moves old class to removedClasses and generates invoice for price difference if toClass price > fromClass price."
+          },
+          "response": []
+        }
+      ]
     }
   ]
 }

@@ -30,6 +30,24 @@ const chatRoomSchema = new mongoose.Schema(
       ref: "Class",
       default: null,
     },
+    lastMessage: {
+      text: { type: String, default: "" },
+      sender: {
+        type: mongoose.Schema.Types.ObjectId,
+        refPath: "lastMessage.senderModel",
+      },
+      senderModel: {
+        type: String,
+        enum: ["Parent", "Admin"],
+      },
+      senderName: { type: String, default: "" },
+      timestamp: { type: Date },
+      type: {
+        type: String,
+        enum: ["TEXT", "ATTACHMENT"],
+        default: "TEXT",
+      },
+    },
   },
   { timestamps: true }
 );

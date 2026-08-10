@@ -484,7 +484,10 @@ exports.getAdminPayments = async (req, res) => {
         .populate("parent", "fullName email phone")
         .populate({
           path: "invoice",
-          populate: { path: "players", select: "firstName lastName fullName" },
+          populate: [
+            { path: "players", select: "firstName lastName fullName" },
+            { path: "class", select: "name price dayOfWeek startTime endTime venue location" },
+          ],
         })
         .populate("approvedBy", "name email")
         .sort({ createdAt: -1 })
@@ -524,6 +527,7 @@ exports.getAdminPaymentById = async (req, res) => {
         populate: [
           { path: "players", select: "firstName lastName fullName category assignedClasses" },
           { path: "parent", select: "fullName email phone" },
+          { path: "class", select: "name price dayOfWeek startTime endTime venue location" },
         ],
       })
       .populate("approvedBy", "name email");

@@ -17,6 +17,8 @@ const {
   getAllTerms,
   getTermById,
   updateTerm,
+  previewCloneTerm,
+  cloneTerm,
   createClass,
   getAllClasses,
   getClassById,
@@ -41,6 +43,7 @@ const {
   getAllClassesForAssign,
   updatePlayerRating,
   removeClassFromUser,
+  transferPlayerClass,
   getPlayerDetails,
 } = require("../controllers/adminAuthController");
 
@@ -159,6 +162,8 @@ router.put("/updatePaymentStatus/:userId", auth, isAdmin, updatePaymentStatus);
 router.put("/updateRating/:userId", auth, isAdmin, updatePlayerRating);
 router.post("/assignClass/:userId", auth, isAdmin, assignClassToUser);
 router.post("/removeClass/:userId", auth, isAdmin, removeClassFromUser);
+router.post("/transferClass", auth, isAdmin, transferPlayerClass);
+router.post("/transferClass/:userId", auth, isAdmin, transferPlayerClass);
 router.post("/assignCoachToClass/:classId", auth, isAdmin, assignCoachToClass);
 router.get("/coach/:coachId/unique-players", auth, isAdmin, getUniquePlayersByCoach);
 
@@ -191,6 +196,8 @@ router.post("/createTerm", auth, isAdmin, createTerm);
 router.get("/getAllTerms", auth, isAdmin, getAllTerms);
 router.get("/getTermById/:id", auth, isAdmin, getTermById);
 router.put("/updateTerm/:id", auth, isAdmin, updateTerm);
+router.post("/cloneTerm/preview", auth, isAdmin, previewCloneTerm);
+router.post("/cloneTerm", auth, isAdmin, cloneTerm);
 
 // Classes
 router.post("/createClass", auth, isAdmin, createClass);

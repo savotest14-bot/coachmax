@@ -78,6 +78,19 @@ exports.sendMessage = async (req, res) => {
       readReceipts: [{ user: currentUserId, readAt: new Date() }],
     });
 
+    // Update room lastMessage
+    const senderName = req.admin?.name || req.admin?.fullName || req.parent?.fullName || "User";
+    room.lastMessage = {
+      text: text || (attachments.length > 0 ? "Attachment" : ""),
+      sender: currentUserId,
+      senderModel: currentModel,
+      senderName,
+      timestamp: new Date(),
+      type: attachments.length > 0 ? "ATTACHMENT" : "TEXT",
+    };
+    room.updatedAt = new Date();
+    await room.save();
+
     res.status(201).json({ success: true, message: "Message sent", data: message });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

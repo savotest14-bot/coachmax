@@ -191,8 +191,20 @@ exports.sendClassBroadcast = async (req, res) => {
       readReceipts: [{ user: coachId, readAt: new Date() }],
     });
 
-    // Notify all parents
+    // Update broadcast room lastMessage
     const coachName = req.admin.name || req.admin.fullName || "Coach";
+    broadcastRoom.lastMessage = {
+      text: text || "",
+      sender: coachId,
+      senderModel: "Admin",
+      senderName: coachName,
+      timestamp: new Date(),
+      type: "TEXT",
+    };
+    broadcastRoom.updatedAt = new Date();
+    await broadcastRoom.save();
+
+    // Notify all parents
     for (const pid of parentIds) {
       sendNotification({
         recipientType: "PARENT",
@@ -290,6 +302,16 @@ exports.sendMessage = async (req, res) => {
       readReceipts: [{ user: currentUserId, readAt: new Date() }],
     });
 
+    // Update room lastMessage
+    const lastMsgSenderName = req.admin?.name || req.admin?.fullName || req.parent?.fullName || "User";
+    room.lastMessage = {
+      text: text || (attachments.length > 0 ? "Attachment" : ""),
+      sender: currentUserId,
+      senderModel: currentModel,
+      senderName: lastMsgSenderName,
+      timestamp: new Date(),
+      type: attachments.length > 0 ? "ATTACHMENT" : "TEXT",
+    };
     room.updatedAt = new Date();
     await room.save();
 

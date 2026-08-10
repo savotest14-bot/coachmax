@@ -52,13 +52,17 @@ const invoiceSchema = new mongoose.Schema(
       type: Number, // Backward compatibility field (synchronized with totalAmount)
       default: 0,
     },
+    class: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Class",
+    },
     dueDate: {
       type: Date,
       required: true,
     },
     type: {
       type: String,
-      enum: ["ACADEMY_FEE", "TOURNAMENT_FEE", "CAMP_FEE", "STORE_ORDER", "CUSTOM"],
+      enum: ["ACADEMY_FEE", "TOURNAMENT_FEE", "CAMP_FEE", "STORE_ORDER", "CUSTOM", "CLASS_FEE"],
       default: "CUSTOM",
     },
     description: {

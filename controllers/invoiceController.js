@@ -150,7 +150,8 @@ exports.createInvoice = async (req, res) => {
 
     const populatedInvoice = await Invoice.findById(invoice._id)
       .populate("parent", "fullName email phone")
-      .populate("players", "firstName lastName fullName gender category");
+      .populate("players", "firstName lastName fullName gender category")
+      .populate("class", "name price dayOfWeek startTime endTime venue location");
 
     return res.status(201).json({
       success: true,
@@ -227,6 +228,7 @@ exports.getAdminInvoices = async (req, res) => {
       Invoice.find(query)
         .populate("parent", "fullName email phone emergencyContact")
         .populate("players", "firstName lastName fullName category")
+        .populate("class", "name price dayOfWeek startTime endTime venue location")
         .populate("verifiedBy", "name email")
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -261,6 +263,7 @@ exports.getAdminInvoiceById = async (req, res) => {
     const invoice = await Invoice.findById(id)
       .populate("parent", "fullName email phone emergencyContact relationship")
       .populate("players", "firstName lastName fullName gender category assignedClasses")
+      .populate("class", "name price dayOfWeek startTime endTime venue location")
       .populate("verifiedBy", "name email");
 
     if (!invoice) {
@@ -345,7 +348,8 @@ exports.updateInvoice = async (req, res) => {
 
     const updatedInvoice = await Invoice.findById(id)
       .populate("parent", "fullName email phone")
-      .populate("players", "firstName lastName fullName");
+      .populate("players", "firstName lastName fullName")
+      .populate("class", "name price dayOfWeek startTime endTime venue location");
 
     return res.status(200).json({
       success: true,
@@ -413,6 +417,7 @@ exports.getParentInvoices = async (req, res) => {
     const [invoices, total, activeBankDetails, paymentSettings] = await Promise.all([
       Invoice.find(query)
         .populate("players", "firstName lastName fullName category assignedClasses")
+        .populate("class", "name price dayOfWeek startTime endTime venue location")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(pageLimit),
@@ -456,7 +461,8 @@ exports.getParentInvoiceById = async (req, res) => {
     const { id } = req.params;
 
     const invoice = await Invoice.findOne({ _id: id, parent: parentId })
-      .populate("players", "firstName lastName fullName category assignedClasses");
+      .populate("players", "firstName lastName fullName category assignedClasses")
+      .populate("class", "name price dayOfWeek startTime endTime venue location");
 
     if (!invoice) {
       return res.status(404).json({

@@ -7,6 +7,7 @@ const Category = require("../models/Category");
 const Program = require("../models/Program");
 const Notification = require("../models/Notification");
 const { sendNotification } = require("../services/notificationService");
+const { generateClassInvoice } = require("../services/invoiceService");
 
 // ✅ List / Search / Filter Registration Requests (Admin)
 exports.getRegistrationRequests = async (req, res) => {
@@ -189,7 +190,19 @@ exports.getUnallocatedPlayers = async (req, res) => {
 
 exports.getPlayersByCategoryAndProgram = async (req, res) => {
   try {
-    const { category, program, search, allocationStatus } = req.query;
+    const { category, program, search, allocationStatus, page = 1, limit = 10, offset } = req.query;
+
+    const limitNum = Math.max(1, parseInt(limit, 10) || 10);
+    let skip = 0;
+    let pageNum = 1;
+
+    if (offset !== undefined && offset !== null && offset !== "") {
+      skip = Math.max(0, parseInt(offset, 10) || 0);
+      pageNum = Math.floor(skip / limitNum) + 1;
+    } else {
+      pageNum = Math.max(1, parseInt(page, 10) || 1);
+      skip = (pageNum - 1) * limitNum;
+    }
 
     const query = {
       isBlocked: false,
@@ -262,40 +275,47 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
     }
 
     // ---------------------------------------------------
-    // Fetch Players
+    // Fetch Total & Paginated Players
     // ---------------------------------------------------
-    const players = await User.find(query)
-      .populate(
-        "parentId",
-        "fullName email phone emergencyContact relationship"
-      )
-      .populate("category", "name")
-      .populate("programs", "name")
-      .populate("term", "name")
-      .populate(
-        "assignedClasses",
-        "name dayOfWeek startTime endTime venue location"
-      )
-      .sort({ createdAt: -1 });
+    const [total, players] = await Promise.all([
+      User.countDocuments(query),
+      User.find(query)
+        .populate(
+          "parentId",
+          "fullName email phone emergencyContact relationship"
+        )
+        .populate("category", "name")
+        .populate("programs", "name")
+        .populate("term", "name")
+        .populate(
+          "assignedClasses",
+          "name dayOfWeek startTime endTime venue location"
+        )
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum),
+    ]);
 
     // ---------------------------------------------------
     // Attach Registration Request (if PENDING request exists)
     // ---------------------------------------------------
     let registrationRequestsMap = {};
 
-    const pendingRequests = await RegistrationRequest.find({
-      player: { $in: players.map((p) => p._id) },
-      status: "PENDING",
-    })
-      .populate("category", "name")
-      .populate("programs", "name")
-      .populate("preferredClasses", "name dayOfWeek startTime endTime venue location")
-      .populate("preferredTerm", "name startDate endDate");
+    if (players.length > 0) {
+      const pendingRequests = await RegistrationRequest.find({
+        player: { $in: players.map((p) => p._id) },
+        status: "PENDING",
+      })
+        .populate("category", "name")
+        .populate("programs", "name")
+        .populate("preferredClasses", "name dayOfWeek startTime endTime venue location")
+        .populate("preferredTerm", "name startDate endDate");
 
-    registrationRequestsMap = pendingRequests.reduce((acc, request) => {
-      acc[request.player.toString()] = request;
-      return acc;
-    }, {});
+      registrationRequestsMap = pendingRequests.reduce((acc, request) => {
+        acc[request.player.toString()] = request;
+        return acc;
+      }, {});
+    }
 
     // ---------------------------------------------------
     // Build Response
@@ -307,9 +327,25 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
       return obj;
     });
 
+    const hasMore = skip + players.length < total;
+    const nextPage = hasMore ? pageNum + 1 : null;
+    const totalPages = Math.ceil(total / limitNum);
+
     return res.status(200).json({
       success: true,
       count: data.length,
+      total,
+      hasMore,
+      nextPage,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        offset: skip,
+        total,
+        totalPages,
+        hasMore,
+        nextPage,
+      },
       data,
     });
   } catch (error) {
@@ -477,6 +513,15 @@ exports.assignClassesToPlayer = async (req, res) => {
     playerDoc.category = assignedCategory;
     playerDoc.programs = updatedProgramIds;
     await playerDoc.save();
+
+    // ✅ Automatic Invoice Generation on Class Assignment
+    try {
+      for (const clsId of classIds) {
+        await generateClassInvoice({ userId: playerId, classId: clsId });
+      }
+    } catch (invErr) {
+      console.error("Auto invoice generation error in assignClassesToPlayer:", invErr.message);
+    }
 
     // Send Parent Notification
     try {

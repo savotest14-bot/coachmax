@@ -1304,25 +1304,35 @@ exports.getDashboard = async (req, res) => {
 
 exports.getAllTerms = async (req, res) => {
   try {
-    const { isEvent } = req.query;
+    const { isEvent, year } = req.query;
 
     const filter = {};
 
+    // Event filter
     if (isEvent === "true") {
       filter.isEvent = true;
     } else if (isEvent === "false" || isEvent === undefined) {
-      // Default: only non-event terms
       filter.isEvent = false;
     }
-    // If isEvent === "all", don't add any filter
+    // If isEvent === "all", don't apply event filter
 
-    const terms = await Term.find(filter).sort({ startDate: 1 });
+    // Year filter
+    if (year) {
+      filter.year = Number(year);
+    }
+
+    const terms = await Term.find(filter).sort({
+      year: 1,
+      startDate: 1,
+    });
 
     res.json({
       data: terms,
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(500).json({
+      message: err.message,
+    });
   }
 };
 
