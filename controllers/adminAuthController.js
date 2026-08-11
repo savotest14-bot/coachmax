@@ -17,6 +17,13 @@ const { Parser } = require("json2csv");
 const Parent = require("../models/Parent");
 const ChatRoom = require("../models/ChatRoom");
 const RegistrationRequest = require("../models/RegistrationRequest");
+const Invoice = require("../models/Invoice");
+const Payment = require("../models/Payment");
+const Event = require("../models/Event");
+const EventRegistration = require("../models/EventRegistration");
+const Order = require("../models/Order");
+const Product = require("../models/Product");
+const News = require("../models/News");
 const { generateClassInvoice, generateTransferInvoice } = require("../services/invoiceService");
 
 exports.adminLogin = async (req, res) => {
@@ -2692,6 +2699,294 @@ exports.cloneTerm = async (req, res) => {
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+// ✅ Comprehensive Admin Dashboard Overview API
+exports.getAdminDashboardOverview = async (req, res) => {
+  try {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    // Get pending registration request player IDs for unallocated calculation
+    const pendingRequestPlayerIds = await RegistrationRequest.find({ status: "PENDING" }).distinct("player");
+
+    // Execute queries in parallel using Promise.all for maximum performance
+    const [
+      totalPlayers,
+      activePlayers,
+      pendingPlayers,
+      blockedPlayers,
+      unallocatedPlayersCount,
+      playersTrial,
+      playersUnpaid,
+      playersPaid,
+      playersOverdue,
+      playersOthers,
+
+      totalParents,
+      approvedParents,
+      pendingParents,
+      blockedParents,
+
+      totalCoaches,
+      activeCoaches,
+      superAdmins,
+
+      totalClasses,
+      classCapacityAggregate,
+      classRosterAggregate,
+      totalPrograms,
+      totalCategories,
+      totalTerms,
+      activeTerms,
+
+      totalRequests,
+      pendingRequests,
+      completedRequests,
+      requestTypesAggregate,
+
+      totalEvents,
+      upcomingEvents,
+      ongoingEvents,
+      completedEvents,
+      totalEventRegistrations,
+
+      totalInvoices,
+      paidInvoices,
+      unpaidInvoices,
+      pendingPaymentApprovals,
+      rejectedPayments,
+      todaysCollectionsAgg,
+      monthlyCollectionsAgg,
+      totalRevenueAgg,
+      outstandingAmountAgg,
+
+      totalProducts,
+      totalOrders,
+      ordersByStatusAgg,
+      storeRevenueAgg,
+
+      totalNews,
+      featuredNews,
+      rawNewsCategories,
+
+      recentRegistrationRequests,
+      recentPendingPayments,
+      recentPlayers,
+      recentTemporaryPlayers,
+    ] = await Promise.all([
+      // 1. Players
+      User.countDocuments({ parentId: { $exists: true } }),
+      User.countDocuments({ parentId: { $exists: true }, playerStatus: "ACTIVE" }),
+      User.countDocuments({ parentId: { $exists: true }, playerStatus: "PENDING_APPROVAL" }),
+      User.countDocuments({ parentId: { $exists: true }, isBlocked: true }),
+      User.countDocuments({
+        parentId: { $exists: true },
+        isBlocked: false,
+        $or: [
+          { assignedClasses: { $exists: false } },
+          { assignedClasses: { $size: 0 } },
+          { assignedClasses: null },
+          { hasPendingRequest: true },
+          { _id: { $in: pendingRequestPlayerIds } },
+        ],
+      }),
+      User.countDocuments({ parentId: { $exists: true }, paymentStatus: "TRIAL" }),
+      User.countDocuments({ parentId: { $exists: true }, paymentStatus: "UNPAID" }),
+      User.countDocuments({ parentId: { $exists: true }, paymentStatus: "PAID" }),
+      User.countDocuments({ parentId: { $exists: true }, paymentStatus: "OVER_DUE" }),
+      User.countDocuments({ parentId: { $exists: true }, paymentStatus: "OTHERS" }),
+
+      // 2. Parents
+      Parent.countDocuments({}),
+      Parent.countDocuments({ status: "APPROVED" }),
+      Parent.countDocuments({ status: "PENDING" }),
+      Parent.countDocuments({ isBlocked: true }),
+
+      // 3. Coaches & Admins
+      Admin.countDocuments({ role: "COACH" }),
+      Admin.countDocuments({ role: "COACH", status: "ACTIVE" }),
+      Admin.countDocuments({ role: "SUPER_ADMIN" }),
+
+      // 4. Classes, Programs & Terms
+      Class.countDocuments({}),
+      Class.aggregate([{ $group: { _id: null, total: { $sum: "$capacity" } } }]),
+      Class.aggregate([{ $project: { count: { $size: { $ifNull: ["$players", []] } } } }, { $group: { _id: null, total: { $sum: "$count" } } }]),
+      Program.countDocuments({ status: "ACTIVE" }),
+      Category.countDocuments({}),
+      Term.countDocuments({}),
+      Term.countDocuments({ startDate: { $lte: new Date() }, endDate: { $gte: new Date() } }),
+
+      // 5. Registration Requests
+      RegistrationRequest.countDocuments({}),
+      RegistrationRequest.countDocuments({ status: "PENDING" }),
+      RegistrationRequest.countDocuments({ status: "COMPLETED" }),
+      RegistrationRequest.aggregate([{ $group: { _id: "$requestType", count: { $sum: 1 } } }]),
+
+      // 6. Events & Registrations
+      Event.countDocuments({}),
+      Event.countDocuments({ status: "UPCOMING" }),
+      Event.countDocuments({ status: "ONGOING" }),
+      Event.countDocuments({ status: "COMPLETED" }),
+      EventRegistration.countDocuments({ status: "REGISTERED" }),
+
+      // 7. Financials, Invoices & Payments
+      Invoice.countDocuments({ status: "ACTIVE" }),
+      Invoice.countDocuments({ status: "ACTIVE", paymentStatus: "PAID" }),
+      Invoice.countDocuments({ status: "ACTIVE", paymentStatus: { $ne: "PAID" } }),
+      Payment.countDocuments({ status: "PENDING" }),
+      Payment.countDocuments({ status: "REJECTED" }),
+      Payment.aggregate([{ $match: { status: "APPROVED", approvedAt: { $gte: startOfToday } } }, { $group: { _id: null, total: { $sum: "$amount" } } }]),
+      Payment.aggregate([{ $match: { status: "APPROVED", approvedAt: { $gte: startOfMonth } } }, { $group: { _id: null, total: { $sum: "$amount" } } }]),
+      Payment.aggregate([{ $match: { status: "APPROVED" } }, { $group: { _id: null, total: { $sum: "$amount" } } }]),
+      Invoice.aggregate([{ $match: { status: "ACTIVE", paymentStatus: { $ne: "PAID" } } }, { $group: { _id: null, total: { $sum: { $cond: [{ $gt: ["$totalAmount", 0] }, "$totalAmount", { $ifNull: ["$amount", 0] }] } } } }]),
+
+      // 8. Store & Merchandise
+      Product.countDocuments({}),
+      Order.countDocuments({}),
+      Order.aggregate([{ $group: { _id: "$orderStatus", count: { $sum: 1 } } }]),
+      Order.aggregate([{ $match: { orderStatus: "COMPLETED" } }, { $group: { _id: null, total: { $sum: "$totalAmount" } } }]),
+
+      // 9. Announcements / News
+      News.countDocuments({}),
+      News.countDocuments({ featured: true }),
+      News.distinct("category"),
+
+      // 10. Recent Activity Lists (Limit 5 each)
+      RegistrationRequest.find({ status: "PENDING" })
+        .populate("parent", "fullName email phone")
+        .populate("player", "fullName email phone paymentStatus")
+        .populate("category", "name")
+        .populate("programs", "name")
+        .sort({ createdAt: -1 })
+        .limit(5),
+
+      Payment.find({ status: "PENDING" })
+        .populate("parent", "fullName email phone")
+        .populate("invoice", "invoiceNumber type totalAmount")
+        .sort({ createdAt: -1 })
+        .limit(5),
+
+      User.find({ parentId: { $exists: true } })
+        .populate("parentId", "fullName email phone")
+        .populate("category", "name")
+        .select("firstName lastName fullName email phone paymentStatus playerStatus createdAt")
+        .sort({ createdAt: -1 })
+        .limit(5),
+
+      User.find({ parentId: { $exists: true }, createdByRole: "COACH" })
+        .populate("parentId", "fullName email phone")
+        .populate("createdBy", "name email")
+        .select("firstName lastName fullName email phone playerStatus temporarySessionDate createdAt")
+        .sort({ createdAt: -1 })
+        .limit(5),
+    ]);
+
+    // Format request types breakdown map
+    const requestTypesBreakdown = {};
+    (requestTypesAggregate || []).forEach((item) => {
+      if (item._id) requestTypesBreakdown[item._id] = item.count;
+    });
+
+    // Format order status breakdown map
+    const orderStatusBreakdown = {};
+    (ordersByStatusAgg || []).forEach((item) => {
+      if (item._id) orderStatusBreakdown[item._id] = item.count;
+    });
+
+    const responseData = {
+      players: {
+        total: totalPlayers,
+        active: activePlayers,
+        pendingApproval: pendingPlayers,
+        unallocated: unallocatedPlayersCount,
+        allocated: Math.max(0, totalPlayers - unallocatedPlayersCount),
+        blocked: blockedPlayers,
+        paymentStatusBreakdown: {
+          TRIAL: playersTrial,
+          UNPAID: playersUnpaid,
+          PAID: playersPaid,
+          OVER_DUE: playersOverdue,
+          OTHERS: playersOthers,
+        },
+      },
+      parents: {
+        total: totalParents,
+        approved: approvedParents,
+        pending: pendingParents,
+        blocked: blockedParents,
+      },
+      staff: {
+        totalCoaches,
+        activeCoaches,
+        superAdmins,
+      },
+      academics: {
+        totalClasses,
+        totalCapacity: classCapacityAggregate.length > 0 ? classCapacityAggregate[0].total : 0,
+        enrolledSlots: classRosterAggregate.length > 0 ? classRosterAggregate[0].total : 0,
+        totalActivePrograms: totalPrograms,
+        totalCategories,
+        totalTerms,
+        activeTermsCount: activeTerms,
+      },
+      registrationRequests: {
+        total: totalRequests,
+        pending: pendingRequests,
+        completed: completedRequests,
+        byType: requestTypesBreakdown,
+      },
+      events: {
+        total: totalEvents,
+        upcoming: upcomingEvents,
+        ongoing: ongoingEvents,
+        completed: completedEvents,
+        totalRegistrations: totalEventRegistrations,
+      },
+      financials: {
+        totalInvoices,
+        paidInvoices,
+        unpaidInvoices,
+        totalRevenue: totalRevenueAgg.length > 0 ? totalRevenueAgg[0].total : 0,
+        todaysCollections: todaysCollectionsAgg.length > 0 ? todaysCollectionsAgg[0].total : 0,
+        monthlyCollections: monthlyCollectionsAgg.length > 0 ? monthlyCollectionsAgg[0].total : 0,
+        outstandingAmount: outstandingAmountAgg.length > 0 ? outstandingAmountAgg[0].total : 0,
+        pendingPaymentApprovals,
+        rejectedPayments,
+      },
+      store: {
+        totalProducts,
+        totalOrders,
+        byStatus: orderStatusBreakdown,
+        storeRevenue: storeRevenueAgg.length > 0 ? storeRevenueAgg[0].total : 0,
+      },
+      announcements: {
+        totalNews,
+        featured: featuredNews,
+        categoriesCount: (rawNewsCategories || []).filter(Boolean).length,
+      },
+      recentActivity: {
+        pendingRequests: recentRegistrationRequests,
+        pendingPayments: recentPendingPayments,
+        recentPlayers,
+        recentTemporaryPlayers,
+      },
+    };
+
+    return res.status(200).json({
+      success: true,
+      data: responseData,
+    });
+  } catch (error) {
     return res.status(500).json({
       success: false,
       message: error.message,

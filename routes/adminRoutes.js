@@ -19,6 +19,7 @@ const {
   updateTerm,
   previewCloneTerm,
   cloneTerm,
+  getAdminDashboardOverview,
   createClass,
   getAllClasses,
   getClassById,
@@ -281,7 +282,6 @@ router.get("/news/categories", auth, isAdmin, getNewsCategories);
 router.get("/news", auth, isAdmin, getAllNews);
 router.get("/news/:id", auth, isAdmin, getNewsById);
 router.put("/news/:id", auth, isAdmin, uploads.array("images", 5), updateNews);
-router.patch("/news/:id", auth, isAdmin, uploads.array("images", 5), updateNews);
 router.delete("/news/:id", auth, isAdmin, deleteNews);
 
 // ✅ Bank Details Management (Admin only)
@@ -308,6 +308,7 @@ router.patch("/payments/:id/reject", auth, isAdmin, rejectPayment);
 router.post("/payments/:id/reject", auth, isAdmin, rejectPayment);
 
 // ✅ Admin Dashboard / Statistics
+router.get("/dashboard", auth, isAdmin, getAdminDashboardOverview);
 router.get("/dashboard/payments", auth, isAdmin, getPaymentDashboardStats);
 
 router.get(
