@@ -3,6 +3,7 @@ const Parent = require("../models/Parent");
 const AuditLog = require("../models/AuditLog");
 const Admin = require("../models/Admin");
 const Class = require("../models/Class");
+const RegistrationRequest = require("../models/RegistrationRequest");
 const Attendance = require("../models/Attendance");
 const AttendanceHistory = require("../models/AttendanceHistory");
 const CoachNote = require("../models/CoachNote");
@@ -42,6 +43,13 @@ exports.createTemporaryPlayer = async (req, res) => {
       allergies,
       classId,
       sessionDate,
+      category,
+      categories,
+      programs,
+      preferredTerm,
+      preferredClasses,
+      prefferedFoot,
+      gender,
     } = req.body;
 
     // Required field validation
@@ -54,15 +62,15 @@ exports.createTemporaryPlayer = async (req, res) => {
       });
     }
 
-    // Verify class assignment for coach
-    if (req.admin.role === "COACH") {
-      const classData = await Class.findById(classId).select("coach assistantCoach").session(session);
-      if (!classData) {
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(404).json({ success: false, message: "Class not found" });
-      }
+    // Verify class assignment for coach & fetch class info
+    const classData = await Class.findById(classId).select("coach assistantCoach category program term venue location").session(session);
+    if (!classData) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ success: false, message: "Class not found" });
+    }
 
+    if (req.admin.role === "COACH") {
       const isAssigned =
         (classData.coach && classData.coach.toString() === coachId.toString()) ||
         (classData.assistantCoach && classData.assistantCoach.toString() === coachId.toString());
@@ -78,7 +86,7 @@ exports.createTemporaryPlayer = async (req, res) => {
     }
 
     // 1. Find or create Parent record
-    const emailToUse = parentEmail ? parentEmail.toLowerCase() : `temp.${Date.now()}.${Math.floor(Math.random()*1000)}@tempcoachmax.com`;
+    const emailToUse = parentEmail ? parentEmail.toLowerCase() : `temp.${Date.now()}.${Math.floor(Math.random() * 1000)}@tempcoachmax.com`;
     let parent = await Parent.findOne({
       $or: [{ phone: parentPhone }, { email: emailToUse }],
     }).session(session);
@@ -117,6 +125,31 @@ exports.createTemporaryPlayer = async (req, res) => {
     const parsedSessionDate = new Date(sessionDate);
     parsedSessionDate.setUTCHours(0, 0, 0, 0);
 
+    // Derive category, programs, term, and preferred classes
+    const catList = Array.isArray(categories)
+      ? categories
+      : category
+        ? Array.isArray(category)
+          ? category
+          : [category]
+        : classData.category
+          ? [classData.category]
+          : [];
+    const primaryCat = catList[0] || classData.category || null;
+
+    const progList = Array.isArray(programs)
+      ? programs
+      : programs
+        ? [programs]
+        : classData.program
+          ? [classData.program]
+          : [];
+
+    const selectedTerm = preferredTerm || classData.term || null;
+    const prefClassList = Array.isArray(preferredClasses)
+      ? preferredClasses
+      : [classId];
+
     // 3. Create User (Player) record
     const hasMedical = !!(medicalConditions || allergies);
     const medicalDetails = [medicalConditions, allergies ? `Allergies: ${allergies}` : ""].filter(Boolean).join(" | ");
@@ -128,6 +161,8 @@ exports.createTemporaryPlayer = async (req, res) => {
           lastName,
           fullName: name.trim(),
           dob: parsedDob,
+          gender: gender || "OTHER",
+          prefferedFoot: prefferedFoot || undefined,
           parentId: parent._id,
           contactName: parentName,
           relationship: "Parent/Guardian",
@@ -136,6 +171,11 @@ exports.createTemporaryPlayer = async (req, res) => {
           playerStatus: req.admin.role === "SUPER_ADMIN" ? "ACTIVE" : "PENDING_APPROVAL",
           createdBy: coachId,
           createdByRole: req.admin.role,
+          category: primaryCat,
+          categories: catList,
+          programs: progList,
+          term: null,
+          hasPendingRequest: true,
           temporaryClass: classId,
           temporarySessionDate: parsedSessionDate,
           paymentStatus: "TRIAL",
@@ -146,6 +186,24 @@ exports.createTemporaryPlayer = async (req, res) => {
     );
 
     const player = newPlayerDocs[0];
+
+    // Create RegistrationRequest (TEMPORARY_PLAYER)
+    await RegistrationRequest.create(
+      [
+        {
+          parent: parent._id,
+          player: player._id,
+          category: primaryCat,
+          programs: progList,
+          preferredTerm: selectedTerm,
+          preferredClasses: prefClassList,
+          requestType: "TEMPORARY_PLAYER",
+          status: "PENDING",
+          createdBy: coachId,
+        },
+      ],
+      { session }
+    );
 
     // Audit log entry
     await AuditLog.create(
@@ -231,41 +289,133 @@ exports.createTemporaryPlayer = async (req, res) => {
 exports.getTemporaryPlayers = async (req, res) => {
   try {
     const coachId = req.admin._id;
-    let { page = 1, limit = 20, playerStatus = "PENDING_APPROVAL", classId } = req.query;
+    let {
+      page = 1,
+      limit = 20,
+      status,
+      requestType,
+      category,
+      program,
+      classId,
+      search,
+    } = req.query;
 
-    page = Number(page);
-    limit = Number(limit);
+    page = Number(page) || 1;
+    limit = Number(limit) || 20;
 
-    const query = {};
-
-    if (playerStatus) query.playerStatus = playerStatus;
-    if (classId) query.temporaryClass = classId;
-
-    // Coach sees players created by themselves, or assigned to their classes
+    // 1. Build Player query for temporary / coach created players
+    const playerQuery = {};
     if (req.admin.role === "COACH") {
-      query.createdBy = coachId;
+      playerQuery.createdBy = coachId;
+    }
+    if (classId) {
+      playerQuery.temporaryClass = classId;
     }
 
-    const total = await User.countDocuments(query);
+    // Find players matching coach/class criteria
+    const matchingPlayers = await User.find(playerQuery).select("_id parentId category programs temporaryClass createdBy");
+    const matchingPlayerIds = matchingPlayers.map((p) => p._id);
 
-    const players = await User.find(query)
-      .populate("parentId", "fullName email phone emergencyContact")
-      .populate("createdBy", "name email")
-      .populate("temporaryClass", "name dayOfWeek startTime endTime venue")
+    // Lazy migration: Ensure any matching user without a RegistrationRequest gets one
+    for (const tu of matchingPlayers) {
+      const existingReq = await RegistrationRequest.findOne({ player: tu._id });
+      if (!existingReq && tu.parentId) {
+        await RegistrationRequest.create({
+          parent: tu.parentId,
+          player: tu._id,
+          category: tu.category || null,
+          programs: tu.programs || [],
+          preferredClasses: tu.temporaryClass ? [tu.temporaryClass] : [],
+          requestType: "TEMPORARY_PLAYER",
+          status: "PENDING",
+          createdBy: tu.createdBy || coachId,
+        });
+      }
+    }
+
+    // 2. Build RegistrationRequest query
+    const reqQuery = {
+      $or: [
+        { requestType: { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] } },
+        { player: { $in: matchingPlayerIds } },
+      ],
+    };
+
+    if (status) {
+      reqQuery.status = status.toUpperCase();
+    } else {
+      reqQuery.status = "PENDING";
+    }
+
+    if (requestType) {
+      reqQuery.requestType = requestType;
+    }
+
+    if (category) {
+      reqQuery.category = category;
+    }
+
+    if (program) {
+      reqQuery.programs = program;
+    }
+
+    if (search) {
+      const searchRegex = new RegExp(search, "i");
+      const searchedPlayers = await User.find({
+        $or: [
+          { fullName: searchRegex },
+          { firstName: searchRegex },
+          { lastName: searchRegex },
+          { email: searchRegex },
+          { phone: searchRegex },
+        ],
+      }).select("_id");
+      const searchedPlayerIds = searchedPlayers.map((p) => p._id);
+
+      const searchedParents = await Parent.find({
+        fullName: searchRegex,
+      }).select("_id");
+      const searchedParentIds = searchedParents.map((p) => p._id);
+
+      const searchConditions = [
+        { player: { $in: searchedPlayerIds } },
+        { parent: { $in: searchedParentIds } },
+      ];
+
+      if (reqQuery.$and) {
+        reqQuery.$and.push({ $or: searchConditions });
+      } else {
+        reqQuery.$and = [{ $or: searchConditions }];
+      }
+    }
+
+    const total = await RegistrationRequest.countDocuments(reqQuery);
+
+    const requests = await RegistrationRequest.find(reqQuery)
+      .populate("parent", "fullName email phone address city")
+      .populate(
+        "player",
+        "firstName lastName fullName email phone dob gender profileImage rating paymentStatus term assignedClasses prefferedFoot isMedicalCondition medicalConditionDetails hasPendingRequest"
+      )
+      .populate("category", "name")
+      .populate("programs", "name")
+      .populate("preferredTerm", "name startDate endDate")
+      .populate("preferredClasses", "name dayOfWeek startTime endTime venue location")
+      .populate("assignedBy", "name email")
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit);
 
-    res.json({
+    return res.status(200).json({
       success: true,
-      total,
       page,
       limit,
+      total,
       totalPages: Math.ceil(total / limit),
-      data: players,
+      data: requests,
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
@@ -304,7 +454,14 @@ exports.approveTemporaryPlayer = async (req, res) => {
         { $addToSet: { players: player._id } }
       );
     }
-    if (category) player.category = category;
+    if (category) {
+      player.category = category;
+      player.categories = player.categories || [];
+      const catStr = category.toString();
+      if (!player.categories.some((c) => c.toString() === catStr)) {
+        player.categories.push(category);
+      }
+    }
     if (programs && Array.isArray(programs)) player.programs = programs;
     if (term) player.term = term;
 

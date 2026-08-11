@@ -13,6 +13,7 @@ const News = require("../models/News");
 const Invoice = require("../models/Invoice");
 const Fixture = require("../models/Fixture");
 const RegistrationRequest = require("../models/RegistrationRequest");
+const EventRegistration = require("../models/EventRegistration");
 const Notification = require("../models/Notification");
 const bcrypt = require("bcryptjs");
 const generateToken = require("../utils/generateToken");
@@ -279,6 +280,7 @@ exports.register = async (req, res) => {
             paymentStatus: "TRIAL",
 
             category,
+            categories: Array.isArray(categories) ? categories : (category ? [category] : []),
             programs: programIds,
             term: null,
 
@@ -556,6 +558,7 @@ exports.addChild = async (req, res) => {
       dob,
       gender,
       category,
+      categories,
       programs,
       prefferedFoot,
       isMedicalCondition,
@@ -663,6 +666,7 @@ exports.addChild = async (req, res) => {
       comments,
 
       category,
+      categories: Array.isArray(categories) ? categories : (category ? [category] : []),
       programs: programIds,
 
       // Player is assigned term by admin after approval
@@ -735,15 +739,15 @@ exports.addChild = async (req, res) => {
   }
 };
 
-// ✅ Request Additional Program for Existing Player (Parent)
+// ✅ Request Additional Program or Holiday Program for Existing Player (Parent)
 exports.requestAddProgram = async (req, res) => {
   try {
-    const { playerId, category, programs, preferredTerm, preferredClasses } = req.body;
+    const { playerId, category, categories, programs, preferredTerm, preferredClasses, requestType } = req.body;
 
-    if (!playerId || !category || !programs) {
+    if (!playerId || (!category && (!categories || categories.length === 0)) || !programs) {
       return res.status(400).json({
         success: false,
-        message: "playerId, category, and programs are required",
+        message: "playerId, category/categories, and programs are required",
       });
     }
 
@@ -765,13 +769,24 @@ exports.requestAddProgram = async (req, res) => {
 
     const programIds = Array.isArray(programs) ? programs : [programs];
 
+    const categoryList = Array.isArray(categories)
+      ? categories
+      : category
+      ? Array.isArray(category)
+        ? category
+        : [category]
+      : [];
+    const primaryCategory = categoryList[0] || category;
+
     // Validate Category & Programs
-    const categoryDoc = await Category.findById(category);
-    if (!categoryDoc) {
-      return res.status(404).json({
-        success: false,
-        message: "Category not found",
-      });
+    if (primaryCategory) {
+      const categoryDoc = await Category.findById(primaryCategory);
+      if (!categoryDoc) {
+        return res.status(404).json({
+          success: false,
+          message: "Category not found",
+        });
+      }
     }
 
     for (const progId of programIds) {
@@ -796,45 +811,51 @@ exports.requestAddProgram = async (req, res) => {
     }
 
     const prefClasses = Array.isArray(preferredClasses) ? preferredClasses : [];
+    const reqType = requestType || "ADD_PROGRAM";
 
-    // Create RegistrationRequest (ADD_PROGRAM) - DO NOT modify assignedClasses/term/paymentStatus on Player
+    // Create RegistrationRequest
     const registrationRequest = await RegistrationRequest.create({
       parent: req.parent._id,
       player: player._id,
-      category,
+      category: primaryCategory,
       programs: programIds,
       preferredTerm: prefTerm,
       preferredClasses: prefClasses,
-      requestType: "ADD_PROGRAM",
+      requestType: reqType,
       status: "PENDING",
       createdBy: req.parent._id,
     });
 
-    // Set hasPendingRequest flag on player if already assigned any class/program/term
-    const isAlreadyAssigned =
-      (player.assignedClasses && player.assignedClasses.length > 0) ||
-      (player.programs && player.programs.length > 0) ||
-      Boolean(player.term);
-
-    if (isAlreadyAssigned) {
-      player.hasPendingRequest = true;
-      await player.save();
+    // Update categories on player
+    player.categories = player.categories || [];
+    for (const catId of categoryList) {
+      const catStr = catId.toString();
+      if (!player.categories.some((c) => c.toString() === catStr)) {
+        player.categories.push(catId);
+      }
     }
+    if (!player.category && primaryCategory) {
+      player.category = primaryCategory;
+    }
+
+    // Set hasPendingRequest flag on player so they appear in unallocated list
+    player.hasPendingRequest = true;
+    await player.save();
 
     // Create Admin Notification (non-blocking)
     createAdminNotificationForRequest({
       parent: req.parent._id,
       player: player._id,
-      category,
+      category: primaryCategory,
       programs: programIds,
       preferredTerm: prefTerm,
       preferredClasses: prefClasses,
-      requestType: "ADD_PROGRAM",
+      requestType: reqType,
     });
 
     return res.status(201).json({
       success: true,
-      message: "Program addition request submitted successfully",
+      message: `${reqType === "HOLIDAY_PROGRAM" ? "Holiday program" : "Program addition"} request submitted successfully`,
       data: registrationRequest,
     });
   } catch (error) {
@@ -843,6 +864,12 @@ exports.requestAddProgram = async (req, res) => {
       message: error.message,
     });
   }
+};
+
+// ✅ Register specifically for a Holiday Program
+exports.registerForHolidayProgram = async (req, res) => {
+  req.body.requestType = "HOLIDAY_PROGRAM";
+  return exports.requestAddProgram(req, res);
 };
 
 const generateClassSessions = (term, classObj) => {
@@ -1652,6 +1679,122 @@ exports.markPlayerAbsent = async (req, res) => {
         status: "ABSENT",
         reason: reason.trim(),
       },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+// ✅ Get all programs & registrations for a parent's player(s)
+exports.getPlayerPrograms = async (req, res) => {
+  try {
+    const parentId = req.parent ? req.parent._id : req.user ? req.user._id : null;
+    const { playerId } = req.params;
+
+    if (!parentId) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized access",
+      });
+    }
+
+    let players = [];
+
+    if (playerId) {
+      const player = await User.findById(playerId);
+      if (!player) {
+        return res.status(404).json({
+          success: false,
+          message: "Player not found",
+        });
+      }
+
+      if (player.parentId.toString() !== parentId.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: "You are not authorized to view programs for this player",
+        });
+      }
+      players = [player];
+    } else {
+      players = await User.find({ parentId });
+    }
+
+    const playerIds = players.map((p) => p._id);
+
+    // Fetch full player data with populated programs & classes
+    const fullPlayers = await User.find({ _id: { $in: playerIds } })
+      .populate({
+        path: "programs",
+        populate: { path: "category", select: "name description" },
+      })
+      .populate("category", "name")
+      .populate("categories", "name")
+      .populate({
+        path: "assignedClasses",
+        populate: [
+          { path: "program", select: "name description fees ageGroup" },
+          { path: "category", select: "name" },
+          { path: "term", select: "name startDate endDate" },
+          { path: "coach", select: "fullName email phone" },
+        ],
+      });
+
+    // Fetch all RegistrationRequests for these players
+    const registrationRequests = await RegistrationRequest.find({
+      player: { $in: playerIds },
+    })
+      .populate("category", "name")
+      .populate("programs", "name description fees ageGroup")
+      .populate("preferredTerm", "name startDate endDate")
+      .populate("preferredClasses", "name dayOfWeek startTime endTime venue location")
+      .sort({ createdAt: -1 });
+
+    // Fetch EventRegistrations for these players
+    const eventRegistrations = await EventRegistration.find({
+      user: { $in: playerIds },
+      status: "REGISTERED",
+    })
+      .populate("event")
+      .sort({ createdAt: -1 });
+
+    // Format output
+    const results = fullPlayers.map((player) => {
+      const pIdStr = player._id.toString();
+
+      const pRequests = registrationRequests.filter(
+        (r) => r.player.toString() === pIdStr
+      );
+
+      const pEvents = eventRegistrations.filter(
+        (e) => e.user.toString() === pIdStr
+      );
+
+      return {
+        player: {
+          _id: player._id,
+          firstName: player.firstName,
+          lastName: player.lastName,
+          fullName: player.fullName,
+          profileImage: player.profileImage,
+          category: player.category,
+          categories: player.categories,
+          hasPendingRequest: player.hasPendingRequest,
+        },
+        enrolledPrograms: player.programs || [],
+        assignedClasses: player.assignedClasses || [],
+        registrationRequests: pRequests,
+        eventRegistrations: pEvents,
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      count: results.length,
+      data: playerId ? results[0] : results,
     });
   } catch (error) {
     return res.status(500).json({

@@ -41,7 +41,7 @@ const userSchema = new mongoose.Schema(
     },
     paymentStatus: {
       type: String,
-      enum: ["TRIAL", "UNPAID", "PAID", "OVER_DUE"],
+      enum: ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "OTHERS"],
       default: "TRIAL",
     },
 
@@ -49,6 +49,13 @@ const userSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Category",
     },
+
+    categories: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Category",
+      },
+    ],
 
     programs: [
       {
@@ -60,14 +67,14 @@ const userSchema = new mongoose.Schema(
       type: String,
       enum: ["LEFT", "RIGHT", "BOTH"],
     },
-   isMedicalCondition:{
+    isMedicalCondition: {
       type: Boolean,
       default: false,
     },
     medicalConditionDetails: {
       type: String,
       default: '',
-   },
+    },
     term: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Term",

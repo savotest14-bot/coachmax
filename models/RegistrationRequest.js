@@ -37,7 +37,7 @@ const registrationRequestSchema = new mongoose.Schema(
     ],
     requestType: {
       type: String,
-      enum: ["NEW_PLAYER", "ADD_PROGRAM"],
+      enum: ["NEW_PLAYER", "ADD_PROGRAM", "HOLIDAY_PROGRAM", "EVENT_REGISTRATION", "TEMPORARY_PLAYER", "TEMPORARY"],
       required: true,
     },
     status: {

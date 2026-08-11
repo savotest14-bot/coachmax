@@ -98,6 +98,11 @@ const {
 
 const {
   createNews,
+  getAllNews,
+  getNewsById,
+  updateNews,
+  deleteNews,
+  getNewsCategories,
 } = require("../controllers/newsController");
 
 const {
@@ -272,6 +277,12 @@ router.patch("/store/orders/:id", auth, isAdmin, updateOrderStatus);
 
 // ✅ NEW: News setups (Admin only)
 router.post("/news", auth, isAdmin, uploads.array("images", 5), createNews);
+router.get("/news/categories", auth, isAdmin, getNewsCategories);
+router.get("/news", auth, isAdmin, getAllNews);
+router.get("/news/:id", auth, isAdmin, getNewsById);
+router.put("/news/:id", auth, isAdmin, uploads.array("images", 5), updateNews);
+router.patch("/news/:id", auth, isAdmin, uploads.array("images", 5), updateNews);
+router.delete("/news/:id", auth, isAdmin, deleteNews);
 
 // ✅ Bank Details Management (Admin only)
 router.post("/bank-details", auth, isAdmin, uploads.single("qrCodeImage"), upsertBankDetails);

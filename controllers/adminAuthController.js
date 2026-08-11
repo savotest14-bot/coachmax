@@ -16,6 +16,7 @@ const Attendance = require("../models/Attendance");
 const { Parser } = require("json2csv");
 const Parent = require("../models/Parent");
 const ChatRoom = require("../models/ChatRoom");
+const RegistrationRequest = require("../models/RegistrationRequest");
 const { generateClassInvoice, generateTransferInvoice } = require("../services/invoiceService");
 
 exports.adminLogin = async (req, res) => {
@@ -115,19 +116,24 @@ exports.getUsers = async (req, res) => {
     page = Number(page);
     limit = Number(limit);
 
-    const query = {
-      parentId: { $exists: true },
-    };
+    const andConditions = [{ parentId: { $exists: true } }];
 
-    if (paymentStatus) query.paymentStatus = paymentStatus;
-    if (category) query.category = category;
-    if (program) query.programs = program;
+    if (paymentStatus) andConditions.push({ paymentStatus });
+    if (category) {
+      andConditions.push({ $or: [{ category }, { categories: category }] });
+    }
+    if (program) andConditions.push({ programs: program });
 
     if (unallocated === "true") {
-      query.$or = [
-        { assignedClasses: { $exists: false } },
-        { assignedClasses: { $size: 0 } },
-      ];
+      const pendingPlayerIds = await RegistrationRequest.find({ status: "PENDING" }).distinct("player");
+      andConditions.push({
+        $or: [
+          { assignedClasses: { $exists: false } },
+          { assignedClasses: { $size: 0 } },
+          { hasPendingRequest: true },
+          { _id: { $in: pendingPlayerIds } },
+        ],
+      });
     }
 
     if (search) {
@@ -136,23 +142,17 @@ exports.getUsers = async (req, res) => {
         { firstName: { $regex: search, $options: "i" } },
         { lastName: { $regex: search, $options: "i" } },
       ];
-
-      if (query.$or) {
-        query.$and = [
-          { $or: query.$or },
-          { $or: searchCriteria },
-        ];
-        delete query.$or;
-      } else {
-        query.$or = searchCriteria;
-      }
+      andConditions.push({ $or: searchCriteria });
     }
+
+    const query = andConditions.length === 1 ? andConditions[0] : { $and: andConditions };
 
     const total = await User.countDocuments(query);
 
     const users = await User.find(query)
       .populate("parentId", "fullName email phone address city state postcode country emergencyContact relationship")
       .populate("category", "name")
+      .populate("categories", "name")
       .populate("programs", "name")
       .populate({
         path: "assignedClasses",
@@ -192,7 +192,7 @@ exports.updatePaymentStatus = async (req, res) => {
       });
     }
 
-    const validStatus = ["TRIAL", "UNPAID", "PAID", "OVER_DUE"];
+    const validStatus = ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "OTHERS"];
 
     if (!paymentStatus || !validStatus.includes(paymentStatus)) {
       return res.status(400).json({
@@ -2697,4 +2697,4 @@ exports.cloneTerm = async (req, res) => {
       message: error.message,
     });
   }
-};
+};

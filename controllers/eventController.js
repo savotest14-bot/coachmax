@@ -1,5 +1,8 @@
 const Event = require("../models/Event");
 const EventRegistration = require("../models/EventRegistration");
+const User = require("../models/User");
+const Category = require("../models/Category");
+const RegistrationRequest = require("../models/RegistrationRequest");
 const fs = require("fs");
 const path = require("path");
 const mongoose = require("mongoose");
@@ -254,8 +257,8 @@ exports.getAllEventsForUser = async (req, res) => {
 
 exports.registerForEvent = async (req, res) => {
   try {
-    const userId = req.user._id;
-    const { eventId } = req.body;
+    const { eventId, playerId } = req.body;
+    const targetPlayerId = playerId || req.body.userId || req.user._id;
 
     const event = await Event.findById(eventId);
 
@@ -284,9 +287,12 @@ exports.registerForEvent = async (req, res) => {
       });
     }
 
+    // Find Player document
+    const player = await User.findById(targetPlayerId);
+
     // 🔥 check existing registration
     let existing = await EventRegistration.findOne({
-      user: userId,
+      user: targetPlayerId,
       event: eventId,
     });
 
@@ -304,6 +310,48 @@ exports.registerForEvent = async (req, res) => {
       });
     }
 
+    // Helper to handle RegistrationRequest & player status
+    const processRegistrationRequest = async () => {
+      if (player) {
+        let reqCategory = player.category || (player.categories && player.categories[0]);
+
+        if (event.category) {
+          if (mongoose.Types.ObjectId.isValid(event.category)) {
+            reqCategory = event.category;
+          } else {
+            const matchedCat = await Category.findOne({
+              name: new RegExp(`^${event.category}$`, "i"),
+            });
+            if (matchedCat) reqCategory = matchedCat._id;
+          }
+        }
+
+        if (reqCategory) {
+          player.categories = player.categories || [];
+          const catStr = reqCategory.toString();
+          if (!player.categories.some((c) => c.toString() === catStr)) {
+            player.categories.push(reqCategory);
+          }
+          if (!player.category) player.category = reqCategory;
+        }
+
+        player.hasPendingRequest = true;
+        await player.save();
+
+        if (reqCategory) {
+          await RegistrationRequest.create({
+            parent: player.parentId || req.user._id,
+            player: player._id,
+            category: reqCategory,
+            programs: [],
+            requestType: "EVENT_REGISTRATION",
+            status: "PENDING",
+            createdBy: req.user._id,
+          });
+        }
+      }
+    };
+
     // ✅ re-register (if previously cancelled)
     if (existing && existing.status === "CANCELLED") {
       existing.status = "REGISTERED";
@@ -312,6 +360,8 @@ exports.registerForEvent = async (req, res) => {
       await Event.findByIdAndUpdate(eventId, {
         $inc: { totalRegistered: 1 },
       });
+
+      await processRegistrationRequest();
 
       return res.json({
         success: true,
@@ -322,13 +372,15 @@ exports.registerForEvent = async (req, res) => {
 
     // ✅ first-time registration
     const registration = await EventRegistration.create({
-      user: userId,
+      user: targetPlayerId,
       event: eventId,
     });
 
     await Event.findByIdAndUpdate(eventId, {
       $inc: { totalRegistered: 1 },
     });
+
+    await processRegistrationRequest();
 
     res.json({
       success: true,

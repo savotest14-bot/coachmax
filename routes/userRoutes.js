@@ -11,6 +11,8 @@ const {
   getChildren,
   addChild,
   requestAddProgram,
+  registerForHolidayProgram,
+  getPlayerPrograms,
   getDashboard,
   getAllTerms,
   getPlayerProfile,
@@ -72,6 +74,8 @@ const {
 
 const {
   getAllNews,
+  getNewsById,
+  getNewsCategories,
 } = require("../controllers/newsController");
 
 const {
@@ -120,6 +124,8 @@ router.get("/getAllTerms", getAllTerms);
 router.get("/getChildren", auth, getChildren);
 router.post("/addChild", auth, uploads.single("profile"), addChild);
 router.post("/requestAddProgram", auth, requestAddProgram);
+router.post("/registerForHolidayProgram", auth, registerForHolidayProgram);
+router.get("/getPlayerPrograms/:playerId", auth, getPlayerPrograms);
 router.get("/getDashboard", auth, getDashboard);
 
 // Classes & Attendance
@@ -187,6 +193,8 @@ router.get("/store/my-orders", auth, getMyOrders);
 
 // News / Announcements
 router.get("/news", getAllNews);
+router.get("/news/categories", getNewsCategories);
+router.get("/news/:id", getNewsById);
 
 // Chat & Messaging
 router.post("/chat/room", auth, getOrCreateDirectRoom);

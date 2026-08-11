@@ -115,10 +115,12 @@ exports.getUnallocatedPlayers = async (req, res) => {
   try {
     const { category, program, search } = req.query;
 
+    const pendingPlayerIds = await RegistrationRequest.find({ status: "PENDING" }).distinct("player");
+
     // Find players from RegistrationRequest if category/program supplied
     let playerIdsFromRequests = [];
     if (category || program) {
-      const reqFilter = {};
+      const reqFilter = { status: "PENDING" };
       if (category) reqFilter.category = category;
       if (program) reqFilter.programs = program;
       const requests = await RegistrationRequest.find(reqFilter).select("player");
@@ -131,13 +133,17 @@ exports.getUnallocatedPlayers = async (req, res) => {
         { assignedClasses: { $exists: false } },
         { assignedClasses: { $size: 0 } },
         { assignedClasses: null },
+        { hasPendingRequest: true },
+        { _id: { $in: pendingPlayerIds } },
       ],
     };
 
     if (category || program) {
       const catProgConditions = [];
       const userDirectMatch = {};
-      if (category) userDirectMatch.category = category;
+      if (category) {
+        userDirectMatch.$or = [{ category: category }, { categories: category }];
+      }
       if (program) userDirectMatch.programs = program;
       catProgConditions.push(userDirectMatch);
 
@@ -170,6 +176,7 @@ exports.getUnallocatedPlayers = async (req, res) => {
     const unallocatedPlayers = await User.find(query)
       .populate("parentId", "fullName email phone emergencyContact relationship")
       .populate("category", "name")
+      .populate("categories", "name")
       .populate("programs", "name")
       .populate("term", "name")
       .populate("assignedClasses", "name dayOfWeek startTime endTime venue");
@@ -209,7 +216,7 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
     };
 
     if (category) {
-      query.category = category;
+      query.$or = [{ category: category }, { categories: category }];
     }
 
     if (program) {
@@ -285,6 +292,7 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
           "fullName email phone emergencyContact relationship"
         )
         .populate("category", "name")
+        .populate("categories", "name")
         .populate("programs", "name")
         .populate("term", "name")
         .populate(
@@ -510,7 +518,14 @@ exports.assignClassesToPlayer = async (req, res) => {
     }
     playerDoc.term = derivedTermId;
     playerDoc.paymentStatus = paymentStatus;
-    playerDoc.category = assignedCategory;
+    playerDoc.category = assignedCategory || playerDoc.category;
+    playerDoc.categories = playerDoc.categories || [];
+    if (assignedCategory) {
+      const catStr = assignedCategory.toString();
+      if (!playerDoc.categories.some((c) => c.toString() === catStr)) {
+        playerDoc.categories.push(assignedCategory);
+      }
+    }
     playerDoc.programs = updatedProgramIds;
     await playerDoc.save();
 
