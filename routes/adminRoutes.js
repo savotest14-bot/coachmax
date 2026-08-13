@@ -11,9 +11,12 @@ const {
   toggleBannerStatus,
   exportUsers,
   createCategory,
+  deletecatCategory,
   createProgram,
+  deleteProgram,
   assignClassToUser,
   createTerm,
+  deleteTerm,
   getAllTerms,
   getTermById,
   updateTerm,
@@ -21,6 +24,7 @@ const {
   cloneTerm,
   getAdminDashboardOverview,
   createClass,
+  deleteClassPermanently,
   getAllClasses,
   getClassById,
   updateClass,
@@ -89,9 +93,9 @@ const {
   deleteProduct,
   getProductById,
   getAdminProducts,
-  getAllCategories,
-  updateCategory,
-  deleteCategory,
+  getAllCategories: getStoreCategories,
+  updateCategory: updateStoreCategory,
+  deleteCategory: deleteStoreCategory,
   getAllOrders,
   getOrderById,
   updateOrderStatus,
@@ -105,6 +109,11 @@ const {
   deleteNews,
   getNewsCategories,
 } = require("../controllers/newsController");
+
+const {
+  deleteSingleMessage,
+  deleteFullChatRoom,
+} = require("../controllers/parentChatController");
 
 const {
   createInvoice,
@@ -193,12 +202,16 @@ router.post("/exportUsers", auth, isAdmin, exportUsers);
 router.post("/exportEventParticipants/:eventId", auth, isAdmin, exportEventParticipants);
 router.get("/exportClassCSV", auth, exportClassCSV);
 
-// Taxonomies creation
+// Taxonomies creation & deletion
 router.post("/createCategory", auth, isAdmin, createCategory);
+router.delete("/deleteCategory/:id", auth, isAdmin, deletecatCategory);
 router.post("/createProgram", auth, isAdmin, createProgram);
+router.delete("/deleteProgram/:id", auth, isAdmin, deleteProgram);
+router.delete("/program/:id", auth, isAdmin, deleteProgram);
 
 // Terms
 router.post("/createTerm", auth, isAdmin, createTerm);
+router.delete("/deleteTerm/:id", auth, isAdmin, deleteTerm);
 router.get("/getAllTerms", auth, isAdmin, getAllTerms);
 router.get("/getTermById/:id", auth, isAdmin, getTermById);
 router.put("/updateTerm/:id", auth, isAdmin, updateTerm);
@@ -207,6 +220,7 @@ router.post("/cloneTerm", auth, isAdmin, cloneTerm);
 
 // Classes
 router.post("/createClass", auth, isAdmin, createClass);
+router.delete("/deleteClass/:id", auth, isAdmin, deleteClassPermanently);
 router.get("/getAllClasses", auth, isAdmin, getAllClasses);
 router.get("/getAllClassesForAssign", getAllClassesForAssign);
 router.get("/getClassById/:id", auth, isAdmin, getClassById);
@@ -247,6 +261,7 @@ router.get(
   isAdmin,
   getAllLeagues
 );
+
 router.post("/teams", auth, isAdmin, uploads.single("teamLogo"), createTeam);
 router.get("/getAllTeams", auth, isAdmin, getAllTeams)
 router.post("/teams/:teamId/assign", auth, isAdmin, assignPlayerToTeam);
@@ -263,9 +278,9 @@ router.put(
 
 // ✅ NEW: Store setups (Admin only)
 router.post("/store/categories", auth, isAdmin, createStoreCategory);
-router.get("/store/categories", auth, isAdmin, getAllCategories);
-router.put("/store/categories/:id", auth, isAdmin, updateCategory);
-router.delete("/store/categories/:id", auth, isAdmin, deleteCategory);
+router.get("/store/categories", auth, isAdmin, getStoreCategories);
+router.put("/store/categories/:id", auth, isAdmin, updateStoreCategory);
+router.delete("/store/categories/:id", auth, isAdmin, deleteStoreCategory);
 router.post("/store/products", auth, isAdmin, uploads.array("images", 5), createProduct);
 router.get("/store/products", auth, isAdmin, getAdminProducts);
 router.put("/store/products/:id", auth, isAdmin, uploads.array("images", 5), updateProduct);
@@ -363,5 +378,10 @@ router.get("/audit-logs/:entityType/:entityId", auth, isAdmin, getEntityAuditLog
 
 // ✅ Coach-Parent Conversations (Admin safeguarding)
 router.get("/chat/conversations", auth, isAdmin, getAllConversations);
+
+// ✅ Chat Deletion (Admin only)
+
+router.delete("/deleteMessage/:messageId", auth, isAdmin, deleteSingleMessage);
+router.delete("/deleteChatRoom/:roomId", auth, isAdmin, deleteFullChatRoom);
 
 module.exports = router;

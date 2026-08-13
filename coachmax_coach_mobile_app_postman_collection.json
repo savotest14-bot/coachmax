@@ -145,6 +145,24 @@
       "description": "Coach can view only their assigned classes, teams, and sessions.",
       "item": [
         {
+          "name": "Get Coach Dashboard",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coachToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/coach/dashboard",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "coach", "dashboard"]
+            },
+            "description": "Returns overall dashboard metrics and overview for the authenticated coach.\n\n**Includes:**\n- Coach profile info\n- KPI stats (total assigned classes, teams, unique players, today's classes count, week's sessions count, pending attendance count, total notes, total temp players, unread notifications)\n- Today's classes with attendance status\n- Next 5 upcoming sessions\n- Recent 5 coach notes\n- Recent 5 notifications\n- Assigned classes summary"
+          }
+        },
+        {
           "name": "Get My Assigned Classes",
           "request": {
             "method": "GET",

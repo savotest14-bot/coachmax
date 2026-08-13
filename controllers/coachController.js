@@ -7,6 +7,8 @@ const MedicalProfile = require("../models/MedicalProfile");
 const Term = require("../models/Term");
 const mongoose = require("mongoose");
 const Admin = require("../models/Admin");
+const Notification = require("../models/Notification");
+const ChatRoom = require("../models/ChatRoom");
 
 // ─────────────────────────────────────────────
 // Helper: Generate class sessions from term dates
@@ -14,6 +16,10 @@ const Admin = require("../models/Admin");
 // ─────────────────────────────────────────────
 const generateClassSessions = (term, classObj) => {
   const sessions = [];
+  if (!term || !term.startDate || !term.endDate || !classObj || !classObj.dayOfWeek) {
+    return sessions;
+  }
+
   const start = new Date(term.startDate);
   start.setUTCHours(0, 0, 0, 0);
   const end = new Date(term.endDate);
@@ -24,7 +30,9 @@ const generateClassSessions = (term, classObj) => {
     THURSDAY: 4, FRIDAY: 5, SATURDAY: 6,
   };
 
-  const targetDay = dayMap[classObj.dayOfWeek];
+  const targetDay = dayMap[classObj.dayOfWeek.toUpperCase()];
+  if (targetDay === undefined) return sessions;
+
   let current = new Date(start);
 
   while (current.getUTCDay() !== targetDay) {
@@ -46,12 +54,29 @@ const generateClassSessions = (term, classObj) => {
 /**
  * GET /api/coach/classes
  * Returns only classes assigned to the authenticated coach.
- * Supports pagination, search, and filtering.
+ * Supports pagination, search, and filtering by termId, day-wise, and week-wise.
  */
 exports.getMyAssignedClasses = async (req, res) => {
   try {
     const coachId = req.admin._id;
-    let { page = 1, limit = 20, search = "", day, programId, categoryId } = req.query;
+    let {
+      page = 1,
+      limit = 20,
+      search = "",
+      day,
+      dayOfWeek,
+      programId,
+      categoryId,
+      termId,
+      term,
+      date,
+      dayDate,
+      startDate,
+      endDate,
+      weekDate,
+      week,
+      filterType,
+    } = req.query;
 
     page = Number(page);
     limit = Number(limit);
@@ -62,11 +87,135 @@ exports.getMyAssignedClasses = async (req, res) => {
       status: "ACTIVE",
     };
 
-    if (day) query.dayOfWeek = day;
+    // 1. Term Filter
+    const selectedTerm = termId || term;
+    if (selectedTerm) {
+      query.term = selectedTerm;
+    }
+
+    // 2. Program & Category Filters
     if (programId) query.program = programId;
     if (categoryId) query.category = categoryId;
+
+    // 3. Search Filter
     if (search) {
       query.name = { $regex: search, $options: "i" };
+    }
+
+    const weekdays = [
+      "SUNDAY",
+      "MONDAY",
+      "TUESDAY",
+      "WEDNESDAY",
+      "THURSDAY",
+      "FRIDAY",
+      "SATURDAY",
+    ];
+
+    let sessionStartRange = null;
+    let sessionEndRange = null;
+
+    // 4. Day-wise & Week-wise Filtering Logic
+    const selectedDayParam = day || dayOfWeek;
+    const isWeekFilter =
+      filterType === "week" ||
+      Boolean(weekDate) ||
+      Boolean(week) ||
+      Boolean(startDate && endDate);
+    const isDayFilter =
+      filterType === "day" ||
+      Boolean(date) ||
+      Boolean(dayDate) ||
+      Boolean(selectedDayParam && !isWeekFilter);
+
+    if (isWeekFilter) {
+      // Week-wise filtering
+      if (startDate && endDate) {
+        sessionStartRange = new Date(startDate);
+        sessionStartRange.setUTCHours(0, 0, 0, 0);
+
+        sessionEndRange = new Date(endDate);
+        sessionEndRange.setUTCHours(23, 59, 59, 999);
+      } else {
+        const refDateStr =
+          weekDate ||
+          date ||
+          (selectedDayParam && !isNaN(Date.parse(selectedDayParam))
+            ? selectedDayParam
+            : null);
+        const refDate = refDateStr ? new Date(refDateStr) : new Date();
+
+        if (!isNaN(refDate.getTime())) {
+          const dayIdx = refDate.getUTCDay();
+          const diffToMonday = dayIdx === 0 ? -6 : 1 - dayIdx;
+
+          sessionStartRange = new Date(refDate);
+          sessionStartRange.setUTCDate(refDate.getUTCDate() + diffToMonday);
+          sessionStartRange.setUTCHours(0, 0, 0, 0);
+
+          sessionEndRange = new Date(sessionStartRange);
+          sessionEndRange.setUTCDate(sessionStartRange.getUTCDate() + 6);
+          sessionEndRange.setUTCHours(23, 59, 59, 999);
+        }
+      }
+
+      // Filter by day of week if specified alongside week filter
+      if (
+        selectedDayParam &&
+        weekdays.includes(selectedDayParam.toUpperCase())
+      ) {
+        query.dayOfWeek = { $regex: new RegExp(`^${selectedDayParam}$`, "i") };
+      }
+    } else if (isDayFilter) {
+      // Day-wise filtering
+      if (
+        selectedDayParam &&
+        weekdays.includes(selectedDayParam.toUpperCase())
+      ) {
+        // Filter by weekday name (e.g. MONDAY)
+        query.dayOfWeek = { $regex: new RegExp(`^${selectedDayParam}$`, "i") };
+      } else {
+        // Filter by specific date (e.g. 2026-08-13) or today
+        const targetDateStr = date || dayDate || selectedDayParam;
+        const targetDate = targetDateStr ? new Date(targetDateStr) : new Date();
+
+        if (!isNaN(targetDate.getTime())) {
+          const dayName = weekdays[targetDate.getUTCDay()];
+          query.dayOfWeek = { $regex: new RegExp(`^${dayName}$`, "i") };
+
+          sessionStartRange = new Date(targetDate);
+          sessionStartRange.setUTCHours(0, 0, 0, 0);
+
+          sessionEndRange = new Date(targetDate);
+          sessionEndRange.setUTCHours(23, 59, 59, 999);
+        }
+      }
+    }
+
+    // Filter terms in MongoDB query to terms overlapping active date range if session date range is present
+    if (sessionStartRange && sessionEndRange) {
+      const activeTerms = await Term.find({
+        startDate: { $lte: sessionEndRange },
+        endDate: { $gte: sessionStartRange },
+      }).select("_id");
+
+      const activeTermIds = activeTerms.map((t) => t._id.toString());
+
+      if (selectedTerm) {
+        if (!activeTermIds.includes(selectedTerm.toString())) {
+          return res.json({
+            success: true,
+            message: "Assigned classes fetched successfully",
+            totalClasses: 0,
+            page,
+            limit,
+            totalPages: 0,
+            data: [],
+          });
+        }
+      } else {
+        query.term = { $in: activeTerms.map((t) => t._id) };
+      }
     }
 
     const total = await Class.countDocuments(query);
@@ -77,12 +226,29 @@ exports.getMyAssignedClasses = async (req, res) => {
       .populate("category", "name ageRange")
       .populate("coach", "name email mobile")
       .populate("assistantCoach", "name email mobile")
-      .populate("players", "fullName profileImage dob isMedicalCondition medicalConditionDetails")
+      .populate(
+        "players",
+        "fullName profileImage dob isMedicalCondition medicalConditionDetails"
+      )
       .sort({ dayOfWeek: 1, startTime: 1 })
       .skip((page - 1) * limit)
       .limit(limit);
 
-    // Build enriched class data with sessions
+    // Fetch broadcast chat rooms for returned classes
+    const classIds = classes.map((cls) => cls._id);
+    const chatRooms = await ChatRoom.find({
+      classId: { $in: classIds },
+      type: "BROADCAST",
+    }).select("_id classId");
+
+    const chatRoomMap = {};
+    chatRooms.forEach((room) => {
+      if (room.classId) {
+        chatRoomMap[room.classId.toString()] = room._id;
+      }
+    });
+
+    // Build enriched class data with sessions and chatRoomId / broadcastChatRoomId
     const result = [];
 
     for (const cls of classes) {
@@ -91,16 +257,29 @@ exports.getMyAssignedClasses = async (req, res) => {
         sessions = generateClassSessions(cls.term, cls);
       }
 
-      const formattedSessions = sessions.map((date) => ({
-        date: date.toISOString().split("T")[0],
-        day: date.getUTCDate(),
-        month: date.getUTCMonth() + 1,
-        year: date.getUTCFullYear(),
+      // Filter sessions by date range if day-wise or week-wise date range filter is active
+      if (sessionStartRange && sessionEndRange) {
+        sessions = sessions.filter(
+          (sessionDate) =>
+            sessionDate >= sessionStartRange && sessionDate <= sessionEndRange
+        );
+      }
+
+      const formattedSessions = sessions.map((dateObj) => ({
+        date: dateObj.toISOString().split("T")[0],
+        day: dateObj.getUTCDate(),
+        month: dateObj.getUTCMonth() + 1,
+        year: dateObj.getUTCFullYear(),
       }));
+
+      const roomId = chatRoomMap[cls._id.toString()] || null;
 
       result.push({
         classId: cls._id,
         className: cls.name,
+        chatRoomId: roomId,
+        broadcastChatRoomId: roomId,
+        broadcastRoomId: roomId,
         dayOfWeek: cls.dayOfWeek,
         startTime: cls.startTime,
         endTime: cls.endTime,
@@ -183,7 +362,7 @@ exports.getClassDropdown = async (req, res) => {
 
 /**
  * GET /api/coach/classes/:classId
- * Returns detailed class info for a specific assigned class.
+ * Returns detailed class info for a specific assigned class including player attendance.
  */
 exports.getAssignedClassById = async (req, res) => {
   try {
@@ -208,24 +387,133 @@ exports.getAssignedClassById = async (req, res) => {
       return res.status(404).json({ success: false, message: "Class not found" });
     }
 
+    // Fetch attendance records for this class
+    const attendanceRecords = await Attendance.find({ class: classId })
+      .select("sessionDate records markedBy createdAt updatedAt")
+      .populate("markedBy", "name email")
+      .sort({ sessionDate: -1 });
+
+    // Build attendance statistics map per player
+    const playerAttendanceMap = {};
+
+    attendanceRecords.forEach((attDoc) => {
+      const dateStr = attDoc.sessionDate
+        ? new Date(attDoc.sessionDate).toISOString().split("T")[0]
+        : "";
+
+      (attDoc.records || []).forEach((rec) => {
+        if (!rec.player) return;
+        const pid = rec.player.toString();
+
+        if (!playerAttendanceMap[pid]) {
+          playerAttendanceMap[pid] = {
+            presentCount: 0,
+            absentCount: 0,
+            lateCount: 0,
+            totalMarked: 0,
+            records: [],
+          };
+        }
+
+        const stats = playerAttendanceMap[pid];
+        stats.totalMarked += 1;
+
+        const statusUpper = (rec.status || "ABSENT").toUpperCase();
+        if (statusUpper === "PRESENT") stats.presentCount += 1;
+        else if (statusUpper === "ABSENT") stats.absentCount += 1;
+        else if (statusUpper === "LATE") stats.lateCount += 1;
+
+        stats.records.push({
+          sessionDate: dateStr,
+          status: rec.status,
+          comment: rec.comment || "",
+          remarks: rec.remarks || "",
+          reason: rec.reason || "",
+          lateArrival: Boolean(rec.lateArrival),
+        });
+      });
+    });
+
+    // Enrich players with attendance data
+    const enrichedPlayers = cls.players.map((p) => {
+      const playerObj = p.toObject ? p.toObject() : { ...p };
+      const pid = playerObj._id.toString();
+      const stats = playerAttendanceMap[pid] || {
+        presentCount: 0,
+        absentCount: 0,
+        lateCount: 0,
+        totalMarked: 0,
+        records: [],
+      };
+
+      const attendancePercentage =
+        stats.totalMarked > 0
+          ? Number(
+            (
+              ((stats.presentCount + stats.lateCount) / stats.totalMarked) *
+              100
+            ).toFixed(1)
+          )
+          : 0;
+
+      playerObj.attendance = {
+        presentCount: stats.presentCount,
+        absentCount: stats.absentCount,
+        lateCount: stats.lateCount,
+        totalMarkedSessions: stats.totalMarked,
+        attendancePercentage,
+        records: stats.records,
+      };
+
+      return playerObj;
+    });
+
     // Generate sessions
     let sessions = [];
     if (cls.term) {
       sessions = generateClassSessions(cls.term, cls);
     }
 
-    const formattedSessions = sessions.map((date) => ({
-      date: date.toISOString().split("T")[0],
-      day: date.getUTCDate(),
-      month: date.getUTCMonth() + 1,
-      year: date.getUTCFullYear(),
-    }));
+    const formattedSessions = sessions.map((date) => {
+      const dateStr = date.toISOString().split("T")[0];
+      const attDoc = attendanceRecords.find(
+        (att) =>
+          att.sessionDate &&
+          new Date(att.sessionDate).toISOString().split("T")[0] === dateStr
+      );
+
+      return {
+        date: dateStr,
+        day: date.getUTCDate(),
+        month: date.getUTCMonth() + 1,
+        year: date.getUTCFullYear(),
+        isAttendanceMarked: Boolean(attDoc),
+        attendance: attDoc
+          ? {
+            attendanceId: attDoc._id,
+            markedBy: attDoc.markedBy,
+            totalMarkedPlayers: attDoc.records ? attDoc.records.length : 0,
+          }
+          : null,
+      };
+    });
+
+    // Fetch associated broadcast chat room if any
+    const broadcastRoom = await ChatRoom.findOne({
+      classId: cls._id,
+      type: "BROADCAST",
+    }).select("_id");
+
+    const roomId = broadcastRoom ? broadcastRoom._id : null;
 
     res.json({
       success: true,
       data: {
         classId: cls._id,
         className: cls.name,
+        chatRoomId: roomId,
+        broadcastChatRoomId: roomId,
+        broadcastRoomId: roomId,
         dayOfWeek: cls.dayOfWeek,
         startTime: cls.startTime,
         endTime: cls.endTime,
@@ -240,10 +528,11 @@ exports.getAssignedClassById = async (req, res) => {
         category: cls.category,
         coach: cls.coach,
         assistantCoach: cls.assistantCoach,
-        totalPlayers: cls.players.length,
-        players: cls.players,
+        totalPlayers: enrichedPlayers.length,
+        players: enrichedPlayers,
         totalSessions: formattedSessions.length,
         sessions: formattedSessions,
+        attendanceRecords,
       },
     });
   } catch (err) {
@@ -706,5 +995,267 @@ exports.getPlayerDetails = async (req, res) => {
       success: false,
       message: error.message,
     });
+  }
+};
+
+/**
+ * GET /api/coach/dashboard
+ * Returns comprehensive coach dashboard metrics and overview.
+ */
+exports.getCoachDashboard = async (req, res) => {
+  try {
+    const coachId = req.admin._id;
+
+    // 1. Coach profile details
+    const coach = await Admin.findById(coachId).select(
+      "name email mobile profileImage role"
+    );
+    if (!coach) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Coach profile not found" });
+    }
+
+    // Today's date range (UTC)
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+
+    const endOfToday = new Date(today);
+    endOfToday.setUTCHours(23, 59, 59, 999);
+
+    // Current week date range (Monday to Sunday UTC)
+    const currentDayIdx = today.getUTCDay();
+    const diffToMonday = currentDayIdx === 0 ? -6 : 1 - currentDayIdx;
+
+    const weekStart = new Date(today);
+    weekStart.setUTCDate(today.getUTCDate() + diffToMonday);
+    weekStart.setUTCHours(0, 0, 0, 0);
+
+    const weekEnd = new Date(weekStart);
+    weekEnd.setUTCDate(weekStart.getUTCDate() + 6);
+    weekEnd.setUTCHours(23, 59, 59, 999);
+
+    // Execute queries in parallel for high performance
+    const [
+      assignedClasses,
+      assignedTeams,
+      coachNotesCount,
+      tempPlayersCount,
+      unreadNotificationsCount,
+      recentNotes,
+      recentNotifications,
+      todayAttendanceDocs,
+    ] = await Promise.all([
+      // Assigned Active Classes
+      Class.find({
+        $or: [{ coach: coachId }, { assistantCoach: coachId }],
+        status: "ACTIVE",
+      })
+        .populate("term", "name startDate endDate year")
+        .populate("program", "name ageGroup")
+        .populate("category", "name ageRange")
+        .populate("players", "fullName profileImage dob"),
+
+      // Assigned Teams
+      Team.find({
+        $or: [{ coach: coachId }, { assistantCoach: coachId }],
+      }).populate("players", "fullName profileImage"),
+
+      // Total Coach Notes
+      CoachNote.countDocuments({ coach: coachId }),
+
+      // Temporary Players Added by Coach
+      User.countDocuments({ createdBy: coachId }),
+
+      // Unread Notifications Count
+      Notification.countDocuments({
+        recipientType: { $in: ["ADMIN", "ALL", "COACH"] },
+        admin: coachId,
+        isRead: false,
+      }),
+
+      // Recent 5 Notes
+      CoachNote.find({ coach: coachId })
+        .populate("player", "fullName profileImage")
+        .populate("class", "name")
+        .sort({ createdAt: -1 })
+        .limit(5),
+
+      // Recent 5 Notifications
+      Notification.find({
+        recipientType: { $in: ["ADMIN", "ALL", "COACH"] },
+        admin: coachId,
+      })
+        .sort({ createdAt: -1 })
+        .limit(5),
+
+      // Attendance marked today for coach's classes
+      Attendance.find({
+        sessionDate: { $gte: today, $lte: endOfToday },
+      }),
+    ]);
+
+    // Fetch broadcast chat rooms for assigned classes
+    const classIds = assignedClasses.map((cls) => cls._id);
+    const chatRooms = await ChatRoom.find({
+      classId: { $in: classIds },
+      type: "BROADCAST",
+    }).select("_id classId");
+
+    const chatRoomMap = {};
+    chatRooms.forEach((room) => {
+      if (room.classId) {
+        chatRoomMap[room.classId.toString()] = room._id;
+      }
+    });
+
+    // Unique Players calculation across assigned classes and teams
+    const uniquePlayerIds = new Set();
+    assignedClasses.forEach((cls) => {
+      (cls.players || []).forEach((p) => uniquePlayerIds.add(p._id.toString()));
+    });
+    assignedTeams.forEach((team) => {
+      (team.players || []).forEach((p) => uniquePlayerIds.add(p._id.toString()));
+    });
+
+    // Today's classes & week session calculations
+    const todaysClasses = [];
+    const upcomingSessions = [];
+    let thisWeekSessionsCount = 0;
+
+    for (const cls of assignedClasses) {
+      if (!cls.term) continue;
+
+      const sessions = generateClassSessions(cls.term, cls);
+
+      // Sessions for this week
+      const weekSessions = sessions.filter(
+        (s) => s >= weekStart && s <= weekEnd
+      );
+      thisWeekSessionsCount += weekSessions.length;
+
+      // Check if session exists today
+      const isTodaySession = sessions.some((s) => {
+        const d = new Date(s);
+        d.setUTCHours(0, 0, 0, 0);
+        return d.getTime() === today.getTime();
+      });
+
+      const roomId = chatRoomMap[cls._id.toString()] || null;
+
+      if (isTodaySession) {
+        const attDoc = todayAttendanceDocs.find(
+          (att) => att.class.toString() === cls._id.toString()
+        );
+
+        todaysClasses.push({
+          classId: cls._id,
+          className: cls.name,
+          chatRoomId: roomId,
+          broadcastChatRoomId: roomId,
+          broadcastRoomId: roomId,
+          dayOfWeek: cls.dayOfWeek,
+          startTime: cls.startTime,
+          endTime: cls.endTime,
+          venue: cls.venue || cls.location || "",
+          location: cls.location || "",
+          program: cls.program,
+          category: cls.category,
+          totalPlayers: cls.players ? cls.players.length : 0,
+          sessionDate: today.toISOString().split("T")[0],
+          isAttendanceMarked: Boolean(attDoc),
+          attendanceId: attDoc ? attDoc._id : null,
+        });
+      }
+
+      // Collect upcoming sessions (sessions from today onwards)
+      sessions.forEach((sDate) => {
+        const sTime = new Date(sDate);
+        sTime.setUTCHours(0, 0, 0, 0);
+        if (sTime >= today) {
+          const attDoc = todayAttendanceDocs.find(
+            (att) =>
+              att.class.toString() === cls._id.toString() &&
+              new Date(att.sessionDate).toISOString().split("T")[0] ===
+              sDate.toISOString().split("T")[0]
+          );
+
+          upcomingSessions.push({
+            classId: cls._id,
+            className: cls.name,
+            chatRoomId: roomId,
+            broadcastChatRoomId: roomId,
+            broadcastRoomId: roomId,
+            sessionDate: sDate.toISOString().split("T")[0],
+            dayOfWeek: cls.dayOfWeek,
+            startTime: cls.startTime,
+            endTime: cls.endTime,
+            venue: cls.venue || cls.location || "",
+            programName: cls.program ? cls.program.name : "",
+            categoryName: cls.category ? cls.category.name : "",
+            isAttendanceMarked: Boolean(attDoc),
+          });
+        }
+      });
+    }
+
+    // Sort upcoming sessions by date ascending
+    upcomingSessions.sort(
+      (a, b) => new Date(a.sessionDate) - new Date(b.sessionDate)
+    );
+    const nextUpcomingSessions = upcomingSessions.slice(0, 5);
+
+    const pendingAttendanceTodayCount = todaysClasses.filter(
+      (c) => !c.isAttendanceMarked
+    ).length;
+
+    res.json({
+      success: true,
+      message: "Coach dashboard overview fetched successfully",
+      data: {
+        coach: {
+          coachId: coach._id,
+          name: coach.name,
+          email: coach.email,
+          mobile: coach.mobile,
+          profileImage: coach.profileImage,
+          role: coach.role,
+        },
+        stats: {
+          totalAssignedClasses: assignedClasses.length,
+          totalAssignedTeams: assignedTeams.length,
+          totalUniquePlayers: uniquePlayerIds.size,
+          todaysClassesCount: todaysClasses.length,
+          thisWeekSessionsCount,
+          pendingAttendanceTodayCount,
+          totalNotesCreated: coachNotesCount,
+          totalTemporaryPlayers: tempPlayersCount,
+          unreadNotificationsCount,
+        },
+        todaysClasses,
+        upcomingSessions: nextUpcomingSessions,
+        recentNotes,
+        recentNotifications,
+        assignedClassesSummary: assignedClasses.map((cls) => {
+          const roomId = chatRoomMap[cls._id.toString()] || null;
+          return {
+            classId: cls._id,
+            className: cls.name,
+            chatRoomId: roomId,
+            broadcastChatRoomId: roomId,
+            broadcastRoomId: roomId,
+            dayOfWeek: cls.dayOfWeek,
+            startTime: cls.startTime,
+            endTime: cls.endTime,
+            venue: cls.venue || cls.location || "",
+            program: cls.program ? cls.program.name : "",
+            category: cls.category ? cls.category.name : "",
+            totalPlayers: cls.players ? cls.players.length : 0,
+          };
+        }),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 };

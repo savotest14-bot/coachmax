@@ -24,6 +24,11 @@ const EventRegistration = require("../models/EventRegistration");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
 const News = require("../models/News");
+const AttendanceHistory = require("../models/AttendanceHistory");
+const CoachNote = require("../models/CoachNote");
+const TrainingSession = require("../models/TrainingSession");
+const Message = require("../models/Message");
+const AuditLog = require("../models/AuditLog");
 const { generateClassInvoice, generateTransferInvoice } = require("../services/invoiceService");
 
 exports.adminLogin = async (req, res) => {
@@ -903,6 +908,83 @@ exports.createCategory = async (req, res) => {
   }
 };
 
+/**
+ * DELETE /api/admin/deleteCategory/:id
+ * Delete category if it is not connected to any Class, Program, User, or RegistrationRequest.
+ */
+exports.deletecatCategory = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid category ID",
+      });
+    }
+
+    const category = await Category.findById(id);
+    if (!category) {
+      return res.status(404).json({
+        success: false,
+        message: "Category not found",
+      });
+    }
+
+    // Check references across connected entities in parallel
+    const [
+      classCount,
+      programCount,
+      userCount,
+      registrationRequestCount,
+    ] = await Promise.all([
+      Class.countDocuments({ category: id }),
+      Program.countDocuments({ category: id }),
+      User.countDocuments({
+        $or: [{ category: id }, { categories: id }],
+      }),
+      RegistrationRequest.countDocuments({
+        $or: [{ category: id }, { preferredCategories: id }],
+      }),
+    ]);
+
+    const totalUsage =
+      classCount + programCount + userCount + registrationRequestCount;
+
+    if (totalUsage > 0) {
+      const connections = [];
+      if (classCount > 0) connections.push(`${classCount} class(es)`);
+      if (programCount > 0) connections.push(`${programCount} program(s)`);
+      if (userCount > 0) connections.push(`${userCount} player(s)`);
+      if (registrationRequestCount > 0)
+        connections.push(`${registrationRequestCount} registration request(s)`);
+
+      return res.status(400).json({
+        success: false,
+        message: `Cannot delete category as it is currently connected to: ${connections.join(", ")}`,
+        data: {
+          classCount,
+          programCount,
+          userCount,
+          registrationRequestCount,
+        },
+      });
+    }
+
+    await Category.findByIdAndDelete(id);
+
+    return res.status(200).json({
+      success: true,
+      message: "Category deleted successfully",
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
 
 exports.createProgram = async (req, res) => {
   try {
@@ -953,6 +1035,74 @@ exports.createProgram = async (req, res) => {
   }
 };
 
+/**
+ * DELETE /api/admin/deleteProgram/:id
+ * Delete program if it is not connected to any Class, User, or RegistrationRequest.
+ */
+exports.deleteProgram = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid program ID",
+      });
+    }
+
+    const program = await Program.findById(id);
+    if (!program) {
+      return res.status(404).json({
+        success: false,
+        message: "Program not found",
+      });
+    }
+
+    // Check references across connected entities in parallel
+    const [
+      classCount,
+      userCount,
+      registrationRequestCount,
+    ] = await Promise.all([
+      Class.countDocuments({ program: id }),
+      User.countDocuments({ programs: id }),
+      RegistrationRequest.countDocuments({ preferredPrograms: id }),
+    ]);
+
+    const totalUsage = classCount + userCount + registrationRequestCount;
+
+    if (totalUsage > 0) {
+      const connections = [];
+      if (classCount > 0) connections.push(`${classCount} class(es)`);
+      if (userCount > 0) connections.push(`${userCount} player(s)`);
+      if (registrationRequestCount > 0)
+        connections.push(`${registrationRequestCount} registration request(s)`);
+
+      return res.status(400).json({
+        success: false,
+        message: `Cannot delete program as it is currently connected to: ${connections.join(", ")}`,
+        data: {
+          classCount,
+          userCount,
+          registrationRequestCount,
+        },
+      });
+    }
+
+    await Program.findByIdAndDelete(id);
+
+    return res.status(200).json({
+      success: true,
+      message: "Program deleted successfully",
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
 exports.createTerm = async (req, res) => {
   try {
     const { name, year, startDate, endDate, isEvent } = req.body;
@@ -982,6 +1132,74 @@ exports.createTerm = async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+};
+
+/**
+ * DELETE /api/admin/deleteTerm/:id
+ * Delete a Term only if it is NOT connected to any Class, User, or RegistrationRequest.
+ */
+exports.deleteTerm = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid term ID",
+      });
+    }
+
+    const term = await Term.findById(id);
+    if (!term) {
+      return res.status(404).json({
+        success: false,
+        message: "Term not found",
+      });
+    }
+
+    // Check references across connected entities in parallel
+    const [
+      classCount,
+      userCount,
+      registrationRequestCount,
+    ] = await Promise.all([
+      Class.countDocuments({ term: id }),
+      User.countDocuments({ term: id }),
+      RegistrationRequest.countDocuments({ preferredTerm: id }),
+    ]);
+
+    const totalUsage = classCount + userCount + registrationRequestCount;
+
+    if (totalUsage > 0) {
+      const connections = [];
+      if (classCount > 0) connections.push(`${classCount} class(es)`);
+      if (userCount > 0) connections.push(`${userCount} player(s)`);
+      if (registrationRequestCount > 0)
+        connections.push(`${registrationRequestCount} registration request(s)`);
+
+      return res.status(400).json({
+        success: false,
+        message: `Cannot delete term as it is currently connected to: ${connections.join(", ")}`,
+        data: {
+          classCount,
+          userCount,
+          registrationRequestCount,
+        },
+      });
+    }
+
+    await Term.findByIdAndDelete(id);
+
+    return res.status(200).json({
+      success: true,
+      message: "Term deleted successfully",
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 };
 
@@ -1202,22 +1420,180 @@ exports.createClass = async (req, res) => {
   }
 };
 
+/**
+ * DELETE /api/admin/deleteClass/:id or DELETE /api/admin/class/:id
+ * Permanently deletes a Class and cascades deletion across all related models:
+ * - Unassigns and removes classId from all users (assignedClasses, removedClasses, temporaryClass)
+ * - Deletes all Attendance records for this class
+ * - Deletes all AttendanceHistory records for this class
+ * - Deletes all CoachNotes for this class
+ * - Deletes all TrainingSessions for this class
+ * - Deletes all associated ChatRooms and their Messages (including attachment files on disk)
+ * - Removes classId from RegistrationRequests' preferredClasses
+ * - Preserves Invoices for billing/financial history
+ * - Deletes the Class document itself
+ * - Logs AuditLog for admin action tracking
+ */
+exports.deleteClassPermanently = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const adminId = req.admin ? req.admin._id : null;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid class ID",
+      });
+    }
+
+    const cls = await Class.findById(id);
+    if (!cls) {
+      return res.status(404).json({
+        success: false,
+        message: "Class not found",
+      });
+    }
+
+    // 1. Find all ChatRooms for this class to clean up messages and attachments
+    const chatRooms = await ChatRoom.find({ classId: id });
+    const chatRoomIds = chatRooms.map((r) => r._id);
+
+    if (chatRoomIds.length > 0) {
+      const messages = await Message.find({ room: { $in: chatRoomIds } });
+      messages.forEach((msg) => {
+        if (msg.attachments && Array.isArray(msg.attachments)) {
+          msg.attachments.forEach((att) => {
+            if (att.url && att.url.startsWith("/uploads/")) {
+              const filePath = path.join(__dirname, "..", att.url);
+              if (fs.existsSync(filePath)) {
+                try {
+                  fs.unlinkSync(filePath);
+                } catch (e) {}
+              }
+            }
+          });
+        }
+      });
+
+      await Message.deleteMany({ room: { $in: chatRoomIds } });
+      await ChatRoom.deleteMany({ classId: id });
+    }
+
+    // 2. Clean up references in User (Player) documents
+    await User.updateMany(
+      { $or: [{ assignedClasses: id }, { removedClasses: id }, { temporaryClass: id }] },
+      {
+        $pull: { assignedClasses: id, removedClasses: id },
+        $unset: { temporaryClass: 1 },
+      }
+    );
+
+    // 3. Clean up references in RegistrationRequest documents
+    await RegistrationRequest.updateMany(
+      { preferredClasses: id },
+      { $pull: { preferredClasses: id } }
+    );
+
+    // 4. Delete Attendance & AttendanceHistory
+    const attendanceDeleteResult = await Attendance.deleteMany({ class: id });
+    const attendanceHistoryDeleteResult = await AttendanceHistory.deleteMany({ classId: id });
+
+    // 5. Delete CoachNotes
+    const coachNotesDeleteResult = await CoachNote.deleteMany({ classId: id });
+
+    // 6. Delete TrainingSessions
+    const trainingSessionsDeleteResult = await TrainingSession.deleteMany({
+      $or: [{ class: id }, { classId: id }],
+    });
+
+    // 7. Delete the Class document itself (Invoices are preserved for billing history)
+    await Class.findByIdAndDelete(id);
+
+    // 8. Audit log
+    if (adminId) {
+      await AuditLog.create({
+        user: adminId,
+        userRole: req.admin?.role || "SUPER_ADMIN",
+        action: "CLASS_DELETED_PERMANENTLY",
+        entityType: "Class",
+        entityId: id,
+        ipAddress: req.ip || "",
+        deviceInfo: req.headers["user-agent"] || "",
+        description: `Permanently deleted class '${cls.name}' (${id}) while preserving invoice records.`,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Class '${cls.name}' and related class data deleted permanently (Invoices preserved)`,
+      data: {
+        classId: id,
+        className: cls.name,
+        attendanceDeletedCount: attendanceDeleteResult.deletedCount || 0,
+        attendanceHistoryDeletedCount: attendanceHistoryDeleteResult.deletedCount || 0,
+        coachNotesDeletedCount: coachNotesDeleteResult.deletedCount || 0,
+        trainingSessionsDeletedCount: trainingSessionsDeleteResult.deletedCount || 0,
+        chatRoomsDeletedCount: chatRooms.length,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
 exports.getAllClasses = async (req, res) => {
   try {
-    const { term, dayOfWeek, program, category } = req.query;
+    let {
+      termId,
+      day,
+      programId,
+      categoryId,
+      search = "",
+      page = 1,
+      limit = 20,
+    } = req.query;
+
+    page = Number(page) || 1;
+    limit = Number(limit) || 20;
 
     let filter = {};
 
-    if (term) filter.term = term;
-    if (dayOfWeek) filter.dayOfWeek = dayOfWeek;
-    if (program) filter.program = program;
-    if (category) filter.category = category;
+    const selectedTerm = termId;
+    const selectedDay = day;
+    const selectedProgram = programId;
+    const selectedCategory = categoryId;
+
+    if (selectedTerm) filter.term = selectedTerm;
+    if (selectedDay) {
+      filter.dayOfWeek = { $regex: new RegExp(`^${selectedDay}$`, "i") };
+    }
+    if (selectedProgram) filter.program = selectedProgram;
+    if (selectedCategory) filter.category = selectedCategory;
+    if (search) {
+      filter.name = { $regex: search, $options: "i" };
+    }
+
+    const total = await Class.countDocuments(filter);
 
     const classes = await Class.find(filter)
-      .populate("term program category coach")
-      .sort({ dayOfWeek: 1, startTime: 1 });
+      .populate("term program category coach assistantCoach")
+      .sort({ dayOfWeek: 1, startTime: 1 })
+      .skip((page - 1) * limit)
+      .limit(limit);
 
-    res.json({ data: classes });
+    res.json({
+      success: true,
+      message: "Classes fetched successfully",
+      totalClasses: total,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      data: classes,
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

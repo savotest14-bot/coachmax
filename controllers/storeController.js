@@ -263,7 +263,7 @@ exports.getAdminProducts = async (req, res) => {
       search = "",
       category,
       categoryId,
-      status,
+      status = 'ACTIVE',
       availabilityStatus,
       page = 1,
       limit = 10,
@@ -389,16 +389,16 @@ exports.updateProduct = async (req, res) => {
       product.sizes = Array.isArray(sizes)
         ? sizes
         : typeof sizes === "string"
-        ? JSON.parse(sizes)
-        : [];
+          ? JSON.parse(sizes)
+          : [];
     }
 
     if (colors !== undefined) {
       product.colors = Array.isArray(colors)
         ? colors
         : typeof colors === "string"
-        ? JSON.parse(colors)
-        : [];
+          ? JSON.parse(colors)
+          : [];
     }
 
     let updatedImages = [];
@@ -406,8 +406,8 @@ exports.updateProduct = async (req, res) => {
       updatedImages = Array.isArray(existingImages)
         ? existingImages
         : typeof existingImages === "string"
-        ? JSON.parse(existingImages)
-        : [];
+          ? JSON.parse(existingImages)
+          : [];
     } else if (!req.files || req.files.length === 0) {
       updatedImages = product.images;
     }

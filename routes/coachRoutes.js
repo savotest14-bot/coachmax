@@ -5,6 +5,7 @@ const { uploads } = require("../utils/upload");
 
 // Controllers
 const {
+  getCoachDashboard,
   getMyAssignedClasses,
   getAssignedClassById,
   getMyAssignedTeams,
@@ -34,7 +35,6 @@ const {
   getMyNotes,
   getNoteAuditHistory,
 } = require("../controllers/coachNoteController");
-
 const {
   startDirectChat,
   sendClassBroadcast,
@@ -42,6 +42,8 @@ const {
   getMyRooms,
   getRoomMessages,
   getClassParents,
+  deleteSingleMessage,
+  deleteFullChatRoom,
 } = require("../controllers/parentChatController");
 
 const {
@@ -56,6 +58,9 @@ const router = express.Router();
 // ═══════════════════════════════════════════════
 // All routes require auth + coach/super-admin role
 // ═══════════════════════════════════════════════
+
+// ─── Dashboard ──────────────────────────────
+router.get("/dashboard", auth, isCoach, getCoachDashboard);
 
 // ─── Feature 1: Assigned Classes & Teams ─────
 router.get("/classes", auth, isCoach, getMyAssignedClasses);
@@ -93,6 +98,8 @@ router.post("/chat/message", auth, uploads.single("file"), sendMessage);
 router.get("/chat/rooms", auth, getMyRooms);
 router.get("/chat/room/:roomId/messages", auth, getRoomMessages);
 router.get("/chat/class/:classId/parents", auth, getClassParents);
+router.delete("/chat/message/:messageId", auth, isCoach, deleteSingleMessage);
+router.delete("/chat/room/:roomId", auth, isCoach, deleteFullChatRoom);
 
 // ─── Feature 8: Coach Notifications ─────────
 router.get("/notifications", auth, isCoach, getAdminNotifications);

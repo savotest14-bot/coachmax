@@ -3,6 +3,11 @@ const Message = require("../models/Message");
 const Class = require("../models/Class");
 const User = require("../models/User");
 const AuditLog = require("../models/AuditLog");
+const Admin = require("../models/Admin");
+const Parent = require("../models/Parent");
+const mongoose = require("mongoose");
+const fs = require("fs");
+const path = require("path");
 const { sendNotification } = require("../services/notificationService");
 const { getIO, isUserOnline, calculateTickStatus } = require("../sockets/chatSocket");
 
@@ -662,5 +667,198 @@ exports.getClassParents = async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * DELETE /api/admin/chat/message/:messageId
+ * Admin permanently deletes a single message from a chat room.
+ */
+exports.deleteSingleMessage = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const adminId = req.admin ? req.admin._id : null;
+
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({ success: false, message: "Invalid message ID" });
+    }
+
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({ success: false, message: "Message not found" });
+    }
+
+    const roomId = message.room;
+
+    // Clean up attachment files from disk if stored locally
+    if (message.attachments && Array.isArray(message.attachments)) {
+      message.attachments.forEach((att) => {
+        if (att.url && att.url.startsWith("/uploads/")) {
+          const filePath = path.join(__dirname, "..", att.url);
+          if (fs.existsSync(filePath)) {
+            try {
+              fs.unlinkSync(filePath);
+            } catch (e) {}
+          }
+        }
+      });
+    }
+
+    // Permanently delete message document
+    await Message.findByIdAndDelete(messageId);
+
+    // Audit log
+    if (adminId) {
+      await AuditLog.create({
+        user: adminId,
+        userRole: req.admin?.role || "SUPER_ADMIN",
+        action: "MESSAGE_DELETED",
+        entityType: "Message",
+        entityId: messageId,
+        ipAddress: req.ip || "",
+        deviceInfo: req.headers["user-agent"] || "",
+        description: `Admin deleted message ${messageId} from room ${roomId}`,
+      });
+    }
+
+    // Update room's lastMessage if the deleted message was the latest message
+    if (roomId) {
+      const remainingLatestMsg = await Message.findOne({ room: roomId }).sort({
+        createdAt: -1,
+      });
+
+      if (remainingLatestMsg) {
+        const senderObj = remainingLatestMsg.sender || {};
+        let senderName = "";
+
+        if (senderObj.refModel === "Admin") {
+          const adminDoc = await Admin.findById(senderObj.user).select("name");
+          senderName = adminDoc ? adminDoc.name : "Admin";
+        } else if (senderObj.refModel === "Parent") {
+          const parentDoc = await Parent.findById(senderObj.user).select("fullName");
+          senderName = parentDoc ? parentDoc.fullName : "Parent";
+        }
+
+        await ChatRoom.findByIdAndUpdate(roomId, {
+          lastMessage: {
+            text: remainingLatestMsg.text || "",
+            sender: senderObj.user || null,
+            senderModel: senderObj.refModel || "Admin",
+            senderName,
+            timestamp: remainingLatestMsg.createdAt,
+            type:
+              remainingLatestMsg.attachments &&
+              remainingLatestMsg.attachments.length > 0
+                ? "ATTACHMENT"
+                : "TEXT",
+          },
+        });
+      } else {
+        // Reset lastMessage when room has no remaining messages
+        await ChatRoom.findByIdAndUpdate(roomId, {
+          lastMessage: {
+            text: "",
+            sender: null,
+            senderModel: null,
+            senderName: "",
+            timestamp: null,
+            type: "TEXT",
+          },
+        });
+      }
+
+      // Emit socket event if active
+      try {
+        const io = getIO();
+        if (io) {
+          io.to(`room_${roomId}`).emit("message_deleted", { messageId, roomId });
+        }
+      } catch (sErr) {}
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Message deleted permanently",
+      data: { messageId, roomId },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * DELETE /api/admin/chat/room/:roomId
+ * Admin permanently deletes an entire chat room and all its messages.
+ */
+exports.deleteFullChatRoom = async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const adminId = req.admin ? req.admin._id : null;
+
+    if (!mongoose.Types.ObjectId.isValid(roomId)) {
+      return res.status(400).json({ success: false, message: "Invalid chat room ID" });
+    }
+
+    const room = await ChatRoom.findById(roomId);
+    if (!room) {
+      return res.status(404).json({ success: false, message: "Chat room not found" });
+    }
+
+    // Find all messages in the room to clean up attachment files
+    const messages = await Message.find({ room: roomId });
+
+    messages.forEach((msg) => {
+      if (msg.attachments && Array.isArray(msg.attachments)) {
+        msg.attachments.forEach((att) => {
+          if (att.url && att.url.startsWith("/uploads/")) {
+            const filePath = path.join(__dirname, "..", att.url);
+            if (fs.existsSync(filePath)) {
+              try {
+                fs.unlinkSync(filePath);
+              } catch (e) {}
+            }
+          }
+        });
+      }
+    });
+
+    // Delete all messages in room
+    const deleteResult = await Message.deleteMany({ room: roomId });
+
+    // Delete chat room
+    await ChatRoom.findByIdAndDelete(roomId);
+
+    // Audit log
+    if (adminId) {
+      await AuditLog.create({
+        user: adminId,
+        userRole: req.admin?.role || "SUPER_ADMIN",
+        action: "CHAT_ROOM_DELETED",
+        entityType: "ChatRoom",
+        entityId: roomId,
+        ipAddress: req.ip || "",
+        deviceInfo: req.headers["user-agent"] || "",
+        description: `Admin deleted chat room ${roomId} and ${deleteResult.deletedCount || 0} message(s)`,
+      });
+    }
+
+    // Emit socket event if active
+    try {
+      const io = getIO();
+      if (io) {
+        io.to(`room_${roomId}`).emit("chat_room_deleted", { roomId });
+      }
+    } catch (sErr) {}
+
+    return res.status(200).json({
+      success: true,
+      message: "Full chat room and all messages deleted permanently",
+      data: {
+        roomId,
+        deletedMessagesCount: deleteResult.deletedCount || 0,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
