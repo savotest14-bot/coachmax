@@ -170,7 +170,7 @@ exports.register = async (req, res) => {
         phone,
         dob,
         gender,
-        category,
+        categories,
         programs,
         term,
         preferredTerm,
@@ -185,12 +185,19 @@ exports.register = async (req, res) => {
         allergies,
       } = player;
 
+      // Normalize categories to array
+      const categoryIds = Array.isArray(categories)
+        ? categories
+        : (typeof categories === "string"
+          ? (categories.startsWith("[") ? JSON.parse(categories) : [categories])
+          : (categories ? [categories] : []));
+
       // Required player validation
       if (
         !firstName ||
         !lastName ||
         !dob ||
-        !category ||
+        categoryIds.length === 0 ||
         !programs
       ) {
         throw new Error(
@@ -202,11 +209,13 @@ exports.register = async (req, res) => {
       const programIds = Array.isArray(programs) ? programs : [programs];
 
       // Validate references
-      const categoryData = await Category.findById(category);
-      if (!categoryData) {
-        throw new Error(
-          `Category not found for ${firstName}`
-        );
+      for (const catId of categoryIds) {
+        const categoryData = await Category.findById(catId);
+        if (!categoryData) {
+          throw new Error(
+            `Category not found for ${firstName}`
+          );
+        }
       }
 
       // Validate all programs
@@ -279,8 +288,7 @@ exports.register = async (req, res) => {
 
             paymentStatus: "TRIAL",
 
-            category,
-            categories: Array.isArray(categories) ? categories : (category ? [category] : []),
+            categories: categoryIds,
             programs: programIds,
             term: null,
 
@@ -306,7 +314,7 @@ exports.register = async (req, res) => {
           {
             parent: parentId,
             player: playerId,
-            category,
+            category: categoryIds[0] || null,
             programs: programIds,
             preferredTerm: prefTerm,
             preferredClasses: prefClasses,
@@ -323,7 +331,7 @@ exports.register = async (req, res) => {
       pendingNotifications.push({
         parent: parentId,
         player: playerId,
-        category,
+        category: categoryIds[0] || null,
         programs: programIds,
         preferredTerm: prefTerm,
         preferredClasses: prefClasses,
@@ -772,10 +780,10 @@ exports.requestAddProgram = async (req, res) => {
     const categoryList = Array.isArray(categories)
       ? categories
       : category
-      ? Array.isArray(category)
-        ? category
-        : [category]
-      : [];
+        ? Array.isArray(category)
+          ? category
+          : [category]
+        : [];
     const primaryCategory = categoryList[0] || category;
 
     // Validate Category & Programs

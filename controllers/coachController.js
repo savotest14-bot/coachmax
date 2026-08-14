@@ -278,8 +278,6 @@ exports.getMyAssignedClasses = async (req, res) => {
         classId: cls._id,
         className: cls.name,
         chatRoomId: roomId,
-        broadcastChatRoomId: roomId,
-        broadcastRoomId: roomId,
         dayOfWeek: cls.dayOfWeek,
         startTime: cls.startTime,
         endTime: cls.endTime,
