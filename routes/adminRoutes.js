@@ -50,6 +50,8 @@ const {
   removeClassFromUser,
   transferPlayerClass,
   getPlayerDetails,
+  changeCoachPassword,
+  toggleCoachActiveStatus,
 } = require("../controllers/adminAuthController");
 
 const {
@@ -244,6 +246,8 @@ router.post("/createCoach", auth, isAdmin, createCoach);
 router.get("/getAllCoaches", auth, isAdmin, getAllCoaches);
 router.get("/getCoachById/:id", auth, isAdmin, getCoachById);
 router.put("/updateCoach/:id", auth, isAdmin, updateCoach);
+router.put("/toggleCoachActive/:id", auth, isAdmin, toggleCoachActiveStatus);
+router.put("/changeCoachPassword/:id", auth, isAdmin, changeCoachPassword);
 router.get("/getCoachClassesWithSessions/:coachId", auth, getCoachClassesWithSessions);
 
 // ✅ NEW: Assessments (Admin/Coach)

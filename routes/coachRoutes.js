@@ -39,7 +39,6 @@ const {
   startDirectChat,
   sendClassBroadcast,
   sendMessage,
-  getMyRooms,
   getRoomMessages,
   getClassParents,
   deleteSingleMessage,
@@ -52,6 +51,7 @@ const {
   markAllAdminNotificationsRead,
   saveAdminFcmToken,
 } = require("../controllers/notificationController");
+const { getMyRooms } = require("../controllers/chatController");
 
 const router = express.Router();
 

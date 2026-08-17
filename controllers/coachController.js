@@ -978,6 +978,26 @@ exports.getPlayerDetails = async (req, res) => {
       percentage: overallAttendancePercentage,
     };
 
+    const { isPersonal } = req.query;
+
+    // Fetch coach notes for this player (exclude other coaches' personal notes)
+    const coachNotesQuery = {
+      player: playerId,
+      $or: [
+        { isPersonal: false },
+        { coach: req.admin._id }
+      ]
+    };
+    if (isPersonal !== undefined && isPersonal !== "") {
+      coachNotesQuery.isPersonal = isPersonal === "true";
+    }
+
+    const coachNotes = await CoachNote.find(coachNotesQuery)
+      .populate("coach", "name email")
+      .populate("classId", "name")
+      .sort({ createdAt: -1 })
+      .lean();
+
     return res.status(200).json({
       success: true,
       message: "Player details fetched successfully.",
@@ -986,6 +1006,7 @@ exports.getPlayerDetails = async (req, res) => {
         parent: player.parentId || null,
         perDayAttendance,
         overallAttendance,
+        coachNotes,
       },
     });
   } catch (error) {

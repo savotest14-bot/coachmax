@@ -131,10 +131,41 @@ exports.getMyRooms = async (req, res) => {
       return res.status(401).json({ success: false, message: "Unauthorized access" });
     }
 
-    const rooms = await ChatRoom.find({
+    const { type, search } = req.query;
+    const selectedType = type;
+    const query = {
       "members.user": currentUserId,
       "members.refModel": currentModel,
-    }).populate("members.user", "name fullName email phone");
+    };
+
+    if (selectedType) {
+      query.type = selectedType.toUpperCase();
+    }
+
+    let rooms = await ChatRoom.find(query).populate("members.user", "name fullName email phone");
+
+    if (search) {
+      const searchRegex = new RegExp(search, "i");
+      rooms = rooms.filter((room) => {
+        // Match room name
+        if (room.name && searchRegex.test(room.name)) {
+          return true;
+        }
+        // Match members' details (excluding the current user from matching to make search intuitive)
+        return room.members.some((member) => {
+          if (!member.user || member.user._id.toString() === currentUserId.toString()) {
+            return false;
+          }
+          const user = member.user;
+          return (
+            (user.name && searchRegex.test(user.name)) ||
+            (user.fullName && searchRegex.test(user.fullName)) ||
+            (user.email && searchRegex.test(user.email)) ||
+            (user.phone && searchRegex.test(user.phone))
+          );
+        });
+      });
+    }
 
     res.json({ success: true, data: rooms });
   } catch (err) {

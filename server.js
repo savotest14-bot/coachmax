@@ -48,6 +48,10 @@ const server = http.createServer(app);
 // Initialize Real-Time Socket.IO
 initSocket(server);
 
+// Initialize Cron Jobs
+const { initCronJobs } = require("./services/cronService");
+initCronJobs();
+
 const PORT = process.env.PORT || 4001;
 server.listen(PORT, () => console.log(`🚀 Server with Socket.IO running on port ${PORT}`));
 

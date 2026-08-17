@@ -38,6 +38,10 @@ const coachNoteSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    isPersonal: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );

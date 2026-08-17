@@ -61,6 +61,7 @@ exports.createNote = async (req, res) => {
       classId: classId || null,
       noteType,
       description,
+      isPersonal: req.body.isPersonal !== undefined ? Boolean(req.body.isPersonal) : false,
     });
 
     // Audit log
@@ -72,7 +73,7 @@ exports.createNote = async (req, res) => {
       entityId: note._id,
       ipAddress: req.ip || "",
       deviceInfo: req.headers["user-agent"] || "",
-      newValue: { noteType, description, playerId },
+      newValue: { noteType, description, playerId, isPersonal: note.isPersonal },
       description: `Coach note created for player ${playerId}`,
     });
 
@@ -103,10 +104,10 @@ exports.updateNote = async (req, res) => {
     const { noteId } = req.params;
     const { noteType, description } = req.body;
 
-    if (!noteType && !description) {
+    if (!noteType && !description && req.body.isPersonal === undefined) {
       return res.status(400).json({
         success: false,
-        message: "At least one of noteType or description is required to update",
+        message: "At least one of noteType, description, or isPersonal is required to update",
       });
     }
 
@@ -128,11 +129,13 @@ exports.updateNote = async (req, res) => {
     const oldValue = {
       noteType: note.noteType,
       description: note.description,
+      isPersonal: note.isPersonal,
     };
 
     // Update fields
     if (noteType) note.noteType = noteType;
     if (description) note.description = description;
+    if (req.body.isPersonal !== undefined) note.isPersonal = Boolean(req.body.isPersonal);
     note.isEdited = true;
 
     await note.save();
@@ -147,7 +150,7 @@ exports.updateNote = async (req, res) => {
       ipAddress: req.ip || "",
       deviceInfo: req.headers["user-agent"] || "",
       oldValue,
-      newValue: { noteType: note.noteType, description: note.description },
+      newValue: { noteType: note.noteType, description: note.description, isPersonal: note.isPersonal },
       description: `Coach note updated for player ${note.player}`,
     });
 
@@ -176,7 +179,7 @@ exports.getNotesByPlayer = async (req, res) => {
   try {
     const coachId = req.admin._id;
     const { playerId } = req.params;
-    let { page = 1, limit = 20, noteType } = req.query;
+    let { page = 1, limit = 20, noteType, isPersonal } = req.query;
 
     page = Number(page);
     limit = Number(limit);
@@ -200,8 +203,17 @@ exports.getNotesByPlayer = async (req, res) => {
       }
     }
 
-    const query = { player: playerId };
+    const query = {
+      player: playerId,
+      $or: [
+        { isPersonal: false },
+        { coach: coachId }
+      ]
+    };
     if (noteType) query.noteType = noteType;
+    if (isPersonal !== undefined && isPersonal !== "") {
+      query.isPersonal = isPersonal === "true";
+    }
 
     const total = await CoachNote.countDocuments(query);
 
@@ -233,7 +245,7 @@ exports.getNotesByPlayer = async (req, res) => {
 exports.getMyNotes = async (req, res) => {
   try {
     const coachId = req.admin._id;
-    let { page = 1, limit = 20, noteType, playerId } = req.query;
+    let { page = 1, limit = 20, noteType, playerId, isPersonal } = req.query;
 
     page = Number(page);
     limit = Number(limit);
@@ -242,10 +254,18 @@ exports.getMyNotes = async (req, res) => {
 
     if (req.admin.role === "COACH") {
       query.coach = coachId;
+    } else {
+      query.$or = [
+        { isPersonal: false },
+        { coach: coachId }
+      ];
     }
 
     if (noteType) query.noteType = noteType;
     if (playerId) query.player = playerId;
+    if (isPersonal !== undefined && isPersonal !== "") {
+      query.isPersonal = isPersonal === "true";
+    }
 
     const total = await CoachNote.countDocuments(query);
 

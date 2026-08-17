@@ -47,6 +47,10 @@ exports.adminLogin = async (req, res) => {
       return res.status(404).json({ message: "Admin not found" });
     }
 
+    if (admin.role === "COACH" && admin.isActive === false) {
+      return res.status(403).json({ message: "Coach is inactive and cannot log in" });
+    }
+
     const isMatch = await bcrypt.compare(password, admin.password);
 
     if (!isMatch) {
@@ -565,6 +569,10 @@ exports.assignCoachToClass = async (req, res) => {
     // ✅ Optional: check role
     if (coach.role !== "COACH") {
       throw new Error("User is not a coach");
+    }
+
+    if (coach.isActive === false) {
+      throw new Error("Coach is inactive and cannot be assigned to class");
     }
 
     // ✅ Assign coach (overwrite or prevent duplicate)
@@ -1381,6 +1389,17 @@ exports.createClass = async (req, res) => {
       });
     }
 
+    const coachData = await Admin.findById(coach);
+    if (!coachData) {
+      return res.status(400).json({ message: "Coach not found" });
+    }
+    if (coachData.role !== "COACH") {
+      return res.status(400).json({ message: "Assigned user is not a coach" });
+    }
+    if (coachData.isActive === false) {
+      return res.status(400).json({ message: "Coach is inactive and cannot be assigned to classes" });
+    }
+
     // ✅ Overlapping check
     const overlap = await Class.findOne({
       coach,
@@ -1468,7 +1487,7 @@ exports.deleteClassPermanently = async (req, res) => {
               if (fs.existsSync(filePath)) {
                 try {
                   fs.unlinkSync(filePath);
-                } catch (e) {}
+                } catch (e) { }
               }
             }
           });
@@ -1712,6 +1731,16 @@ exports.updateClass = async (req, res) => {
     if (coach) {
       if (!mongoose.Types.ObjectId.isValid(coach)) {
         return res.status(400).json({ message: "Invalid coach ID" });
+      }
+      const coachData = await Admin.findById(coach);
+      if (!coachData) {
+        return res.status(400).json({ message: "Coach not found" });
+      }
+      if (coachData.role !== "COACH") {
+        return res.status(400).json({ message: "Assigned user is not a coach" });
+      }
+      if (coachData.isActive === false) {
+        return res.status(400).json({ message: "Coach is inactive and cannot be assigned to classes" });
       }
       updatedData.coach = coach;
     }
@@ -2309,6 +2338,78 @@ exports.updateCoach = async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 };
+
+exports.toggleCoachActiveStatus = async (req, res) => {
+  try {
+    const coachId = req.params.id;
+
+    const coach = await Admin.findOne({
+      _id: coachId,
+      role: "COACH",
+    });
+
+    if (!coach) {
+      return res.status(404).json({
+        message: "Coach not found",
+      });
+    }
+
+    // Toggle status: true -> false, false -> true
+    coach.isActive = !coach.isActive;
+
+    await coach.save();
+
+    return res.json({
+      success: true,
+      message: `Coach status updated to ${coach.isActive ? "ACTIVE" : "INACTIVE"
+        }`,
+      data: {
+        _id: coach._id,
+        name: coach.name,
+        email: coach.email,
+        role: coach.role,
+        isActive: coach.isActive,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+exports.changeCoachPassword = async (req, res) => {
+  try {
+    const coachId = req.params.id;
+    const { password } = req.body;
+
+    if (!password) {
+      return res.status(400).json({
+        message: "Password is required",
+      });
+    }
+
+    const coach = await Admin.findOne({ _id: coachId, role: "COACH" });
+    if (!coach) {
+      return res.status(404).json({
+        message: "Coach not found",
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    coach.password = hashedPassword;
+    await coach.save();
+
+    res.json({
+      success: true,
+      message: "Coach password updated successfully",
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 
 
 exports.getClassPlayers = async (req, res) => {

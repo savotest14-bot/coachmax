@@ -38,6 +38,10 @@ const adminSchema = new mongoose.Schema(
             enum: ["SUPER_ADMIN", "COACH"],
             default: "COACH",
         },
+        isActive: {
+            type: Boolean,
+            default: true,
+        },
     },
     { timestamps: true }
 );
