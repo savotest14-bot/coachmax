@@ -11,8 +11,10 @@ const {
   toggleBannerStatus,
   exportUsers,
   createCategory,
+  updateCategory,
   deletecatCategory,
   createProgram,
+  updateProgram,
   deleteProgram,
   assignClassToUser,
   createTerm,
@@ -206,8 +208,10 @@ router.get("/exportClassCSV", auth, exportClassCSV);
 
 // Taxonomies creation & deletion
 router.post("/createCategory", auth, isAdmin, createCategory);
+router.put("/updateCategory/:id", auth, isAdmin, updateCategory);
 router.delete("/deleteCategory/:id", auth, isAdmin, deletecatCategory);
 router.post("/createProgram", auth, isAdmin, createProgram);
+router.put("/updateProgram/:id", auth, isAdmin, updateProgram);
 router.delete("/deleteProgram/:id", auth, isAdmin, deleteProgram);
 router.delete("/program/:id", auth, isAdmin, deleteProgram);
 

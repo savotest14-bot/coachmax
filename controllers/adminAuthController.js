@@ -917,6 +917,63 @@ exports.createCategory = async (req, res) => {
 };
 
 /**
+ * PUT /api/admin/updateCategory/:id
+ * Update category name only.
+ */
+exports.updateCategory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid category ID",
+      });
+    }
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Category name is required",
+      });
+    }
+
+    const category = await Category.findById(id);
+    if (!category) {
+      return res.status(404).json({
+        success: false,
+        message: "Category not found",
+      });
+    }
+
+    // Check for duplicate name (excluding current category)
+    const existing = await Category.findOne({
+      name: name.toUpperCase(),
+      _id: { $ne: id },
+    });
+
+    if (existing) {
+      return res.status(400).json({
+        success: false,
+        message: "A category with this name already exists",
+      });
+    }
+
+    category.name = name.toUpperCase();
+    await category.save();
+
+    res.json({
+      success: true,
+      message: "Category updated successfully",
+      category,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
  * DELETE /api/admin/deleteCategory/:id
  * Delete category if it is not connected to any Class, Program, User, or RegistrationRequest.
  */
@@ -1040,6 +1097,64 @@ exports.createProgram = async (req, res) => {
 
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+};
+
+/**
+ * PUT /api/admin/updateProgram/:id
+ * Update program name only.
+ */
+exports.updateProgram = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid program ID",
+      });
+    }
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Program name is required",
+      });
+    }
+
+    const program = await Program.findById(id);
+    if (!program) {
+      return res.status(404).json({
+        success: false,
+        message: "Program not found",
+      });
+    }
+
+    // Check for duplicate name within the same category
+    const existing = await Program.findOne({
+      name: name,
+      category: program.category,
+      _id: { $ne: id },
+    });
+
+    if (existing) {
+      return res.status(400).json({
+        success: false,
+        message: "A program with this name already exists in this category",
+      });
+    }
+
+    program.name = name;
+    await program.save();
+
+    res.json({
+      success: true,
+      message: "Program updated successfully",
+      program,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 

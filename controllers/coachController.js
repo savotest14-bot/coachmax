@@ -1096,7 +1096,7 @@ exports.getCoachDashboard = async (req, res) => {
       // Recent 5 Notes
       CoachNote.find({ coach: coachId })
         .populate("player", "fullName profileImage")
-        .populate("class", "name")
+        .populate("classId", "name")
         .sort({ createdAt: -1 })
         .limit(5),
 
