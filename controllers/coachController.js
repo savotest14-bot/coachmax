@@ -216,6 +216,26 @@ exports.getMyAssignedClasses = async (req, res) => {
       } else {
         query.term = { $in: activeTerms.map((t) => t._id) };
       }
+
+      // Add weekday filtering to only return classes with sessions in the active date range
+      const weekdaysInRange = [];
+      const tempDate = new Date(sessionStartRange);
+      const limitDate = new Date(sessionStartRange);
+      limitDate.setUTCDate(limitDate.getUTCDate() + 7);
+      const endCheck = sessionEndRange < limitDate ? sessionEndRange : limitDate;
+
+      while (tempDate <= endCheck) {
+        const dayName = weekdays[tempDate.getUTCDay()];
+        if (!weekdaysInRange.includes(dayName)) {
+          weekdaysInRange.push(dayName);
+        }
+        tempDate.setUTCDate(tempDate.getUTCDate() + 1);
+      }
+
+      if (!query.dayOfWeek && weekdaysInRange.length > 0) {
+        const regexes = weekdaysInRange.map((d) => new RegExp(`^${d}$`, "i"));
+        query.dayOfWeek = { $in: regexes };
+      }
     }
 
     const total = await Class.countDocuments(query);
