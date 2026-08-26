@@ -15,7 +15,9 @@ const registrationRequestSchema = new mongoose.Schema(
     category: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Category",
-      required: true,
+      required: function () {
+        return this.requestType !== "TEMPORARY_PLAYER" && this.requestType !== "TEMPORARY";
+      },
     },
     programs: [
       {
