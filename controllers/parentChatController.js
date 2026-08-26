@@ -116,7 +116,7 @@ exports.sendClassBroadcast = async (req, res) => {
     }
 
     const coachId = req.admin._id;
-    const { classId } = req.params;
+    const paramClassId = req.params.classId;
     const { text } = req.body;
 
     if (!text) {
@@ -126,112 +126,185 @@ exports.sendClassBroadcast = async (req, res) => {
       });
     }
 
-    // Get class with players and their parents
-    const classData = await Class.findById(classId)
+    let queryClasses = [];
+
+    // If param is a valid ObjectId, filter by that class only
+    if (paramClassId && mongoose.Types.ObjectId.isValid(paramClassId)) {
+      queryClasses = [paramClassId];
+    } else {
+      // Determine filter criteria from request body and query
+      const filter = { status: "ACTIVE" };
+
+      // Coach can only broadcast to their assigned classes
+      if (req.admin.role === "COACH") {
+        filter.$and = filter.$and || [];
+        filter.$and.push({
+          $or: [
+            { coach: coachId },
+            { assistantCoach: coachId },
+          ]
+        });
+      }
+
+      const bodyClassId = req.body.classId;
+      const bodyTerm = req.body.term;
+      const bodyCategory = req.body.category;
+      const bodyProgram = req.body.program;
+      const bodyDay = req.body.day || req.body.dayOfWeek;
+
+      if (bodyClassId && mongoose.Types.ObjectId.isValid(bodyClassId)) {
+        filter._id = bodyClassId;
+      }
+      if (bodyTerm) {
+        filter.term = bodyTerm;
+      }
+      if (bodyCategory) {
+        filter.category = bodyCategory;
+      }
+      if (bodyProgram) {
+        filter.program = bodyProgram;
+      }
+      if (bodyDay) {
+        filter.$and = filter.$and || [];
+        filter.$and.push({
+          $or: [
+            { dayOfWeek: { $regex: new RegExp(`^${bodyDay}$`, "i") } },
+            { "schedule.dayOfWeek": { $regex: new RegExp(`^${bodyDay}$`, "i") } },
+          ]
+        });
+      }
+
+      const matchedClasses = await Class.find(filter).select("_id");
+      queryClasses = matchedClasses.map(c => c._id);
+    }
+
+    if (queryClasses.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No active classes found matching the criteria",
+      });
+    }
+
+    // Get classes with players and their parents
+    const classesData = await Class.find({ _id: { $in: queryClasses } })
       .populate({
         path: "players",
         select: "parentId fullName",
         populate: { path: "parentId", select: "_id fullName" },
       });
 
-    if (!classData) {
-      return res.status(404).json({ success: false, message: "Class not found" });
+    let successCount = 0;
+    let totalRecipientCount = 0;
+    const broadcastRooms = [];
+    const messages = [];
+
+    const coachName = req.admin.name || req.admin.fullName || "Coach";
+
+    for (const classData of classesData) {
+      // Get unique parent IDs
+      const parentIds = [...new Set(
+        classData.players
+          .filter((p) => p.parentId)
+          .map((p) => p.parentId._id.toString())
+      )];
+
+      if (parentIds.length === 0) {
+        continue;
+      }
+
+      // Find or create broadcast room for this class
+      let broadcastRoom = await ChatRoom.findOne({
+        type: "BROADCAST",
+        classId: classData._id,
+      });
+
+      if (!broadcastRoom) {
+        const members = [
+          { refModel: "Admin", user: coachId },
+          ...parentIds.map((pid) => ({ refModel: "Parent", user: pid })),
+        ];
+
+        broadcastRoom = await ChatRoom.create({
+          type: "BROADCAST",
+          classId: classData._id,
+          name: `${classData.name} - Class Broadcast`,
+          members,
+        });
+      } else {
+        // Update members to include any new parents
+        const existingMemberIds = broadcastRoom.members.map((m) => m.user.toString());
+
+        for (const pid of parentIds) {
+          if (!existingMemberIds.includes(pid)) {
+            broadcastRoom.members.push({ refModel: "Parent", user: pid });
+          }
+        }
+
+        // Ensure coach is in members
+        if (!existingMemberIds.includes(coachId.toString())) {
+          broadcastRoom.members.push({ refModel: "Admin", user: coachId });
+        }
+
+        await broadcastRoom.save();
+      }
+
+      // Create the broadcast message
+      const message = await Message.create({
+        room: broadcastRoom._id,
+        sender: { refModel: "Admin", user: coachId },
+        text,
+        readReceipts: [{ user: coachId, readAt: new Date() }],
+      });
+
+      // Update broadcast room lastMessage
+      broadcastRoom.lastMessage = {
+        text: text || "",
+        sender: coachId,
+        senderModel: "Admin",
+        senderName: coachName,
+        timestamp: new Date(),
+        type: "TEXT",
+      };
+      broadcastRoom.updatedAt = new Date();
+      await broadcastRoom.save();
+
+      // Notify all parents
+      for (const pid of parentIds) {
+        sendNotification({
+          recipientType: "PARENT",
+          parentId: pid,
+          title: "Class Broadcast",
+          message: `Coach ${coachName}: ${text.substring(0, 100)}${text.length > 100 ? "..." : ""}`,
+          type: "CLASS_BROADCAST",
+          data: {
+            roomId: broadcastRoom._id.toString(),
+            classId: classData._id.toString(),
+            messageId: message._id.toString(),
+          },
+        }).catch((e) => console.error("Broadcast push error:", e.message));
+      }
+
+      successCount++;
+      totalRecipientCount += parentIds.length;
+      broadcastRooms.push(broadcastRoom);
+      messages.push(message);
     }
 
-    // Get unique parent IDs
-    const parentIds = [...new Set(
-      classData.players
-        .filter((p) => p.parentId)
-        .map((p) => p.parentId._id.toString())
-    )];
-
-    if (parentIds.length === 0) {
+    if (successCount === 0) {
       return res.status(400).json({
         success: false,
-        message: "No parents found for this class",
+        message: "No parents found for any of the matched classes",
       });
-    }
-
-    // Find or create broadcast room for this class
-    let broadcastRoom = await ChatRoom.findOne({
-      type: "BROADCAST",
-      classId: classId,
-    });
-
-    if (!broadcastRoom) {
-      const members = [
-        { refModel: "Admin", user: coachId },
-        ...parentIds.map((pid) => ({ refModel: "Parent", user: pid })),
-      ];
-
-      broadcastRoom = await ChatRoom.create({
-        type: "BROADCAST",
-        classId: classId,
-        name: `${classData.name} - Class Broadcast`,
-        members,
-      });
-    } else {
-      // Update members to include any new parents
-      const existingMemberIds = broadcastRoom.members.map((m) => m.user.toString());
-
-      for (const pid of parentIds) {
-        if (!existingMemberIds.includes(pid)) {
-          broadcastRoom.members.push({ refModel: "Parent", user: pid });
-        }
-      }
-
-      // Ensure coach is in members
-      if (!existingMemberIds.includes(coachId.toString())) {
-        broadcastRoom.members.push({ refModel: "Admin", user: coachId });
-      }
-
-      await broadcastRoom.save();
-    }
-
-    // Create the broadcast message
-    const message = await Message.create({
-      room: broadcastRoom._id,
-      sender: { refModel: "Admin", user: coachId },
-      text,
-      readReceipts: [{ user: coachId, readAt: new Date() }],
-    });
-
-    // Update broadcast room lastMessage
-    const coachName = req.admin.name || req.admin.fullName || "Coach";
-    broadcastRoom.lastMessage = {
-      text: text || "",
-      sender: coachId,
-      senderModel: "Admin",
-      senderName: coachName,
-      timestamp: new Date(),
-      type: "TEXT",
-    };
-    broadcastRoom.updatedAt = new Date();
-    await broadcastRoom.save();
-
-    // Notify all parents
-    for (const pid of parentIds) {
-      sendNotification({
-        recipientType: "PARENT",
-        parentId: pid,
-        title: "Class Broadcast",
-        message: `Coach ${coachName}: ${text.substring(0, 100)}${text.length > 100 ? "..." : ""}`,
-        type: "CLASS_BROADCAST",
-        data: {
-          roomId: broadcastRoom._id.toString(),
-          classId,
-          messageId: message._id.toString(),
-        },
-      }).catch((e) => console.error("Broadcast push error:", e.message));
     }
 
     res.status(201).json({
       success: true,
-      message: "Broadcast message sent successfully",
+      message: `Broadcast message sent to ${successCount} class(es) successfully`,
       data: {
-        room: broadcastRoom,
-        message,
-        recipientCount: parentIds.length,
+        broadcastRoomsCount: successCount,
+        recipientCount: totalRecipientCount,
+        rooms: broadcastRooms,
+        messages,
       },
     });
   } catch (err) {
@@ -698,7 +771,7 @@ exports.deleteSingleMessage = async (req, res) => {
           if (fs.existsSync(filePath)) {
             try {
               fs.unlinkSync(filePath);
-            } catch (e) {}
+            } catch (e) { }
           }
         }
       });
@@ -748,7 +821,7 @@ exports.deleteSingleMessage = async (req, res) => {
             timestamp: remainingLatestMsg.createdAt,
             type:
               remainingLatestMsg.attachments &&
-              remainingLatestMsg.attachments.length > 0
+                remainingLatestMsg.attachments.length > 0
                 ? "ATTACHMENT"
                 : "TEXT",
           },
@@ -773,7 +846,7 @@ exports.deleteSingleMessage = async (req, res) => {
         if (io) {
           io.to(`room_${roomId}`).emit("message_deleted", { messageId, roomId });
         }
-      } catch (sErr) {}
+      } catch (sErr) { }
     }
 
     return res.status(200).json({
@@ -815,7 +888,7 @@ exports.deleteFullChatRoom = async (req, res) => {
             if (fs.existsSync(filePath)) {
               try {
                 fs.unlinkSync(filePath);
-              } catch (e) {}
+              } catch (e) { }
             }
           }
         });
@@ -848,7 +921,7 @@ exports.deleteFullChatRoom = async (req, res) => {
       if (io) {
         io.to(`room_${roomId}`).emit("chat_room_deleted", { roomId });
       }
-    } catch (sErr) {}
+    } catch (sErr) { }
 
     return res.status(200).json({
       success: true,

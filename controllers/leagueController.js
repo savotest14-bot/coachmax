@@ -5,7 +5,10 @@ const MatchEvent = require("../models/MatchEvent");
 const Standing = require("../models/Standing");
 const PlayerStatistics = require("../models/PlayerStatistics");
 const User = require("../models/User");
+const Admin = require("../models/Admin");
 const mongoose = require("mongoose");
+const fs = require("fs");
+const path = require("path");
 
 // ✅ Create League (Admin only)
 exports.createLeague = async (req, res) => {
@@ -222,22 +225,47 @@ exports.getAllTeams = async (req, res) => {
 exports.assignPlayerToTeam = async (req, res) => {
   try {
     const { teamId } = req.params;
-    const { playerId } = req.body;
+    const { playerId, playerIds } = req.body;
+
+    // Support both playerId (string or array) and playerIds (string or array)
+    const rawIds = playerId || playerIds;
+    if (!rawIds) {
+      return res.status(400).json({ success: false, message: "Player ID(s) required" });
+    }
+
+    const normalizedIds = Array.isArray(rawIds) ? rawIds : [rawIds];
+    
+    // Validate ObjectIds
+    const isValid = normalizedIds.every(id => mongoose.Types.ObjectId.isValid(id));
+    if (!isValid) {
+      return res.status(400).json({ success: false, message: "Invalid player ID format" });
+    }
 
     const team = await Team.findById(teamId);
     if (!team) {
       return res.status(404).json({ success: false, message: "Team not found" });
     }
 
-    const player = await User.findById(playerId);
-    if (!player) {
-      return res.status(404).json({ success: false, message: "Player not found" });
+    // Verify all players exist
+    const uniqueIds = [...new Set(normalizedIds)];
+    const existingPlayersCount = await User.countDocuments({ _id: { $in: uniqueIds } });
+    if (existingPlayersCount !== uniqueIds.length) {
+      return res.status(404).json({ success: false, message: "One or more players not found" });
     }
 
-    if (!team.players.includes(playerId)) {
-      team.players.push(playerId);
-      await team.save();
+    // Limit to 20 players total
+    const currentPlayers = (team.players || []).map(p => p.toString());
+    const unionPlayers = new Set([...currentPlayers, ...uniqueIds]);
+    
+    if (unionPlayers.size > 20) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot assign players. A team cannot exceed 20 players. Currently has ${currentPlayers.length} players.`,
+      });
     }
+
+    team.players = Array.from(unionPlayers);
+    await team.save();
 
     res.json({ success: true, message: "Player assigned to team successfully", data: team });
   } catch (err) {
@@ -247,17 +275,24 @@ exports.assignPlayerToTeam = async (req, res) => {
 
 exports.getAvailablePlayers = async (req, res) => {
   try {
-    // Get all assigned player IDs
-    const teams = await Team.find({}, "players");
+    // Get all assigned player IDs and their associated team details
+    const teams = await Team.find({}, "players teamName");
 
-    const assignedPlayerIds = teams.flatMap(team =>
-      team.players.map(player => player.toString())
-    );
+    const playerTeamMap = {};
+    teams.forEach((team) => {
+      if (team.players && Array.isArray(team.players)) {
+        team.players.forEach((player) => {
+          playerTeamMap[player.toString()] = {
+            _id: team._id,
+            teamName: team.teamName,
+          };
+        });
+      }
+    });
 
-    // Get players not assigned to any team
-    const availablePlayers = await User.find({
+    // Get all unblocked players
+    const allPlayers = await User.find({
       isBlocked: false,
-      _id: { $nin: assignedPlayerIds },
     })
       .populate("category", "name")
       .populate("programs", "name")
@@ -266,10 +301,19 @@ exports.getAvailablePlayers = async (req, res) => {
         "firstName lastName fullName profileImage category programs term phone email"
       );
 
+    // Add isAssigned flag and assignedTeam details
+    const enrichedPlayers = allPlayers.map((player) => {
+      const playerObj = player.toObject();
+      const teamInfo = playerTeamMap[player._id.toString()] || null;
+      playerObj.isAssigned = !!teamInfo;
+      playerObj.assignedTeam = teamInfo;
+      return playerObj;
+    });
+
     return res.status(200).json({
       success: true,
-      count: availablePlayers.length,
-      data: availablePlayers,
+      count: enrichedPlayers.length,
+      data: enrichedPlayers,
     });
   } catch (err) {
     return res.status(500).json({
@@ -737,5 +781,276 @@ exports.getFixtures = async (req, res) => {
     res.json({ success: true, data: fixtures });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ✅ Get Team Details By ID
+exports.getTeamById = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(teamId)) {
+      return res.status(400).json({ success: false, message: "Invalid Team ID format" });
+    }
+
+    const team = await Team.findById(teamId)
+      .populate("coach", "name email mobile profileImage")
+      .populate("assistantCoach", "name email mobile profileImage")
+      .populate("captain", "firstName lastName fullName email profileImage jerseyNumber")
+      .populate("viceCaptain", "firstName lastName fullName email profileImage jerseyNumber")
+      .populate("players", "firstName lastName fullName email phone dob gender profileImage jerseyNumber statistics rating paymentStatus");
+
+    if (!team) {
+      return res.status(404).json({ success: false, message: "Team not found" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Team details fetched successfully",
+      data: team,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+// ✅ Unassign player from Team (Admin only)
+exports.unassignPlayerFromTeam = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    const { playerId, playerIds } = req.body;
+
+    const rawIds = playerId || playerIds;
+    if (!rawIds) {
+      return res.status(400).json({ success: false, message: "Player ID(s) required" });
+    }
+
+    const normalizedIds = (Array.isArray(rawIds) ? rawIds : [rawIds]).map(id => id.toString());
+    
+    // Validate ObjectIds
+    const isValid = normalizedIds.every(id => mongoose.Types.ObjectId.isValid(id));
+    if (!isValid) {
+      return res.status(400).json({ success: false, message: "Invalid player ID format" });
+    }
+
+    const team = await Team.findById(teamId);
+    if (!team) {
+      return res.status(404).json({ success: false, message: "Team not found" });
+    }
+
+    // Clean up captain/viceCaptain if they are being removed
+    if (team.captain && normalizedIds.includes(team.captain.toString())) {
+      team.captain = null;
+    }
+    if (team.viceCaptain && normalizedIds.includes(team.viceCaptain.toString())) {
+      team.viceCaptain = null;
+    }
+
+    // Filter out the players
+    const originalLength = team.players.length;
+    team.players = team.players.filter(p => !normalizedIds.includes(p.toString()));
+
+    await team.save();
+
+    res.json({
+      success: true,
+      message: `${originalLength - team.players.length} player(s) unassigned from team successfully`,
+      data: team,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ✅ Update Team Details (Admin only)
+exports.updateTeam = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    const { teamName, coach, assistantCoach, ageGroup, captain, viceCaptain, players } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(teamId)) {
+      return res.status(400).json({ success: false, message: "Invalid Team ID format" });
+    }
+
+    const team = await Team.findById(teamId);
+    if (!team) {
+      return res.status(404).json({ success: false, message: "Team not found" });
+    }
+
+    // Update Team Name and check duplicate
+    if (teamName !== undefined) {
+      const trimmedName = teamName.trim();
+      if (!trimmedName) {
+        return res.status(400).json({ success: false, message: "Team name cannot be empty" });
+      }
+      
+      const duplicateTeam = await Team.findOne({
+        _id: { $ne: teamId },
+        teamName: { $regex: new RegExp(`^${trimmedName}$`, "i") },
+      });
+      if (duplicateTeam) {
+        return res.status(409).json({ success: false, message: "Another team already exists with this name" });
+      }
+      team.teamName = trimmedName;
+    }
+
+    // Update Logo if a new file is uploaded
+    if (req.file) {
+      // Try to delete old logo from disk if it exists
+      if (team.logo) {
+        const oldPath = path.join(__dirname, "..", team.logo);
+        fs.unlink(oldPath, (err) => {
+          if (err && err.code !== "ENOENT") {
+            console.error("Failed to delete old team logo:", err);
+          }
+        });
+      }
+      team.logo = `uploads/teamlogos/${req.file.filename}`;
+    }
+
+    // Validate and update Coach
+    if (coach !== undefined) {
+      if (coach) {
+        if (!mongoose.Types.ObjectId.isValid(coach)) {
+          return res.status(400).json({ success: false, message: "Invalid Coach ID format" });
+        }
+        const coachDoc = await Admin.findById(coach);
+        if (!coachDoc || coachDoc.role !== "COACH") {
+          return res.status(400).json({ success: false, message: "Coach not found or invalid role" });
+        }
+        team.coach = coach;
+      } else {
+        team.coach = null;
+      }
+    }
+
+    // Validate and update Assistant Coach
+    if (assistantCoach !== undefined) {
+      if (assistantCoach) {
+        if (!mongoose.Types.ObjectId.isValid(assistantCoach)) {
+          return res.status(400).json({ success: false, message: "Invalid Assistant Coach ID format" });
+        }
+        const assistantCoachDoc = await Admin.findById(assistantCoach);
+        if (!assistantCoachDoc || assistantCoachDoc.role !== "COACH") {
+          return res.status(400).json({ success: false, message: "Assistant Coach not found or invalid role" });
+        }
+        team.assistantCoach = assistantCoach;
+      } else {
+        team.assistantCoach = null;
+      }
+    }
+
+    // Update Age Group
+    if (ageGroup !== undefined) {
+      team.ageGroup = ageGroup || "";
+    }
+
+    // Validate and update Captain
+    if (captain !== undefined) {
+      if (captain) {
+        if (!mongoose.Types.ObjectId.isValid(captain)) {
+          return res.status(400).json({ success: false, message: "Invalid Captain ID format" });
+        }
+        const captainDoc = await User.findById(captain);
+        if (!captainDoc) {
+          return res.status(400).json({ success: false, message: "Captain player not found" });
+        }
+        team.captain = captain;
+      } else {
+        team.captain = null;
+      }
+    }
+
+    // Validate and update Vice Captain
+    if (viceCaptain !== undefined) {
+      if (viceCaptain) {
+        if (!mongoose.Types.ObjectId.isValid(viceCaptain)) {
+          return res.status(400).json({ success: false, message: "Invalid Vice Captain ID format" });
+        }
+        const viceCaptainDoc = await User.findById(viceCaptain);
+        if (!viceCaptainDoc) {
+          return res.status(400).json({ success: false, message: "Vice Captain player not found" });
+        }
+        team.viceCaptain = viceCaptain;
+      } else {
+        team.viceCaptain = null;
+      }
+    }
+
+    // Validate and update Players array
+    if (players !== undefined) {
+      const playerIds = Array.isArray(players) ? players : [players];
+      if (playerIds.length > 20) {
+        return res.status(400).json({ success: false, message: "A team cannot have more than 20 players" });
+      }
+      
+      // Validate ObjectIds
+      const isValid = playerIds.every(id => mongoose.Types.ObjectId.isValid(id));
+      if (!isValid) {
+        return res.status(400).json({ success: false, message: "Invalid player ID format inside players array" });
+      }
+
+      // Verify all players exist
+      const existingPlayersCount = await User.countDocuments({ _id: { $in: playerIds } });
+      if (existingPlayersCount !== playerIds.length) {
+        return res.status(400).json({ success: false, message: "One or more players in the array do not exist" });
+      }
+
+      team.players = playerIds;
+    }
+
+    await team.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Team updated successfully",
+      data: team,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
+// ✅ Delete Team Permanently (Admin only)
+exports.deleteTeam = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(teamId)) {
+      return res.status(400).json({ success: false, message: "Invalid Team ID format" });
+    }
+
+    const team = await Team.findById(teamId);
+    if (!team) {
+      return res.status(404).json({ success: false, message: "Team not found" });
+    }
+
+    // Delete team logo from disk
+    if (team.logo) {
+      const logoPath = path.join(__dirname, "..", team.logo);
+      fs.unlink(logoPath, (err) => {
+        if (err && err.code !== "ENOENT") {
+          console.error("Failed to delete team logo on team deletion:", err);
+        }
+      });
+    }
+
+    await Team.findByIdAndDelete(teamId);
+
+    return res.status(200).json({
+      success: true,
+      message: "Team deleted successfully",
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 };

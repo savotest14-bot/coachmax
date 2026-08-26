@@ -11,7 +11,7 @@ const path = require("path");
 
 dotenv.config();
 connectDB().then(async () => {
-  await seedAdmin();
+    await seedAdmin();
 })
 
 const app = express();

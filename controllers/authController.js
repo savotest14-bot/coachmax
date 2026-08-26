@@ -278,14 +278,25 @@ exports.getMyProfile = async (req, res) => {
           if (pId) playerIdsSet.add(pId.toString());
         });
 
-        if (cls.term && cls.term.startDate && cls.term.endDate && cls.dayOfWeek) {
+        if (cls.term && cls.term.startDate && cls.term.endDate) {
           const start = new Date(cls.term.startDate);
           start.setUTCHours(0, 0, 0, 0);
           const end = new Date(cls.term.endDate);
           end.setUTCHours(0, 0, 0, 0);
 
-          const targetDay = dayMap[cls.dayOfWeek.toUpperCase()];
-          if (targetDay !== undefined) {
+          // Determine which days to iterate over
+          const scheduleType = cls.scheduleType || "SINGLE_DAY";
+          const schedule = cls.schedule || [];
+          let daysToCount = [];
+
+          if ((scheduleType === "WEEKDAYS" || scheduleType === "CUSTOM") && schedule.length > 0) {
+            daysToCount = schedule.map((e) => dayMap[(e.dayOfWeek || "").toUpperCase()]).filter((d) => d !== undefined);
+          } else if (cls.dayOfWeek) {
+            const td = dayMap[cls.dayOfWeek.toUpperCase()];
+            if (td !== undefined) daysToCount = [td];
+          }
+
+          for (const targetDay of daysToCount) {
             let current = new Date(start);
             while (current.getUTCDay() !== targetDay) {
               current.setUTCDate(current.getUTCDate() + 1);

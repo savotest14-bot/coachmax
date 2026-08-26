@@ -1444,8 +1444,11 @@ exports.createClass = async (req, res) => {
       coach,
       capacity,
       price,
+      scheduleType: rawScheduleType,
+      schedule: rawSchedule,
     } = req.body;
 
+    // ── Price validation ──
     if (price !== undefined && price !== null) {
       const numPrice = Number(price);
       if (isNaN(numPrice) || numPrice < 0) {
@@ -1455,17 +1458,157 @@ exports.createClass = async (req, res) => {
       }
     }
 
-    if (
-      !term ||
-      !program ||
-      !category ||
-      !dayOfWeek ||
-      !startTime ||
-      !endTime ||
-      !location ||
-      !coach ||
-      !capacity
-    ) {
+    // ── Determine schedule type ──
+    const scheduleType = (rawScheduleType || "SINGLE_DAY").toUpperCase();
+    const validScheduleTypes = ["SINGLE_DAY", "WEEKDAYS", "CUSTOM"];
+    if (!validScheduleTypes.includes(scheduleType)) {
+      return res.status(400).json({
+        message: "Invalid scheduleType. Must be SINGLE_DAY, WEEKDAYS, or CUSTOM",
+      });
+    }
+
+    const validDays = [
+      "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"
+    ];
+
+    const toMinutes = (t) => {
+      const [h, m] = t.split(":").map(Number);
+      return h * 60 + m;
+    };
+
+    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+    // ── Build schedule entries based on scheduleType ──
+    let finalSchedule = [];
+    let rootDayOfWeek;
+    let rootStartTime;
+    let rootEndTime;
+
+    if (scheduleType === "SINGLE_DAY") {
+      // ── SINGLE_DAY: existing behavior ──
+      if (!dayOfWeek || !startTime || !endTime) {
+        return res.status(400).json({
+          message: "Required fields missing (dayOfWeek, startTime, endTime required for SINGLE_DAY)",
+        });
+      }
+
+      const day = dayOfWeek.toUpperCase();
+      if (!validDays.includes(day)) {
+        return res.status(400).json({ message: "Invalid day" });
+      }
+
+      if (!timeRegex.test(startTime) || !timeRegex.test(endTime)) {
+        return res.status(400).json({ message: "Time must be in HH:mm format" });
+      }
+
+      if (toMinutes(startTime) >= toMinutes(endTime)) {
+        return res.status(400).json({
+          message: "Start time must be before end time",
+        });
+      }
+
+      rootDayOfWeek = day;
+      rootStartTime = startTime;
+      rootEndTime = endTime;
+      // No schedule[] for SINGLE_DAY — uses root fields
+
+    } else if (scheduleType === "WEEKDAYS") {
+      // ── WEEKDAYS: auto-generate Mon-Fri with provided startTime/endTime ──
+      if (!startTime || !endTime) {
+        return res.status(400).json({
+          message: "startTime and endTime are required for WEEKDAYS schedule",
+        });
+      }
+
+      if (!timeRegex.test(startTime) || !timeRegex.test(endTime)) {
+        return res.status(400).json({ message: "Time must be in HH:mm format" });
+      }
+
+      if (toMinutes(startTime) >= toMinutes(endTime)) {
+        return res.status(400).json({
+          message: "Start time must be before end time",
+        });
+      }
+
+      const weekdays = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"];
+      finalSchedule = weekdays.map((d) => ({
+        dayOfWeek: d,
+        startTime,
+        endTime,
+      }));
+
+      rootDayOfWeek = "MONDAY";
+      rootStartTime = startTime;
+      rootEndTime = endTime;
+
+    } else if (scheduleType === "CUSTOM") {
+      // ── CUSTOM: admin-provided schedule array ──
+      if (!Array.isArray(rawSchedule) || rawSchedule.length === 0) {
+        return res.status(400).json({
+          message: "schedule array with at least one entry is required for CUSTOM schedule",
+        });
+      }
+
+      // Validate each entry
+      for (let i = 0; i < rawSchedule.length; i++) {
+        const entry = rawSchedule[i];
+        if (!entry.dayOfWeek || !entry.startTime || !entry.endTime) {
+          return res.status(400).json({
+            message: `Schedule entry ${i + 1}: dayOfWeek, startTime, and endTime are required`,
+          });
+        }
+
+        const entryDay = entry.dayOfWeek.toUpperCase();
+        if (!validDays.includes(entryDay)) {
+          return res.status(400).json({
+            message: `Schedule entry ${i + 1}: Invalid day '${entry.dayOfWeek}'`,
+          });
+        }
+
+        if (!timeRegex.test(entry.startTime) || !timeRegex.test(entry.endTime)) {
+          return res.status(400).json({
+            message: `Schedule entry ${i + 1}: Time must be in HH:mm format`,
+          });
+        }
+
+        if (toMinutes(entry.startTime) >= toMinutes(entry.endTime)) {
+          return res.status(400).json({
+            message: `Schedule entry ${i + 1}: Start time must be before end time`,
+          });
+        }
+      }
+
+      // Check for internal conflicts (same day overlapping times)
+      const normalizedEntries = rawSchedule.map((e) => ({
+        dayOfWeek: e.dayOfWeek.toUpperCase(),
+        startTime: e.startTime,
+        endTime: e.endTime,
+      }));
+
+      for (let i = 0; i < normalizedEntries.length; i++) {
+        for (let j = i + 1; j < normalizedEntries.length; j++) {
+          if (normalizedEntries[i].dayOfWeek === normalizedEntries[j].dayOfWeek) {
+            const aStart = toMinutes(normalizedEntries[i].startTime);
+            const aEnd = toMinutes(normalizedEntries[i].endTime);
+            const bStart = toMinutes(normalizedEntries[j].startTime);
+            const bEnd = toMinutes(normalizedEntries[j].endTime);
+            if (aStart < bEnd && bStart < aEnd) {
+              return res.status(400).json({
+                message: `Schedule entries ${i + 1} and ${j + 1} overlap on ${normalizedEntries[i].dayOfWeek}`,
+              });
+            }
+          }
+        }
+      }
+
+      finalSchedule = normalizedEntries;
+      rootDayOfWeek = normalizedEntries[0].dayOfWeek;
+      rootStartTime = normalizedEntries[0].startTime;
+      rootEndTime = normalizedEntries[0].endTime;
+    }
+
+    // ── Common required fields ──
+    if (!term || !program || !category || !location || !coach || !capacity) {
       return res.status(400).json({
         message: "Required fields missing",
       });
@@ -1483,27 +1626,6 @@ exports.createClass = async (req, res) => {
       });
     }
 
-    const validDays = [
-      "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"
-    ];
-
-    const day = dayOfWeek.toUpperCase();
-
-    if (!validDays.includes(day)) {
-      return res.status(400).json({ message: "Invalid day" });
-    }
-
-    const toMinutes = (t) => {
-      const [h, m] = t.split(":").map(Number);
-      return h * 60 + m;
-    };
-
-    if (toMinutes(startTime) >= toMinutes(endTime)) {
-      return res.status(400).json({
-        message: "Start time must be before end time",
-      });
-    }
-
     const coachData = await Admin.findById(coach);
     if (!coachData) {
       return res.status(400).json({ message: "Coach not found" });
@@ -1515,34 +1637,70 @@ exports.createClass = async (req, res) => {
       return res.status(400).json({ message: "Coach is inactive and cannot be assigned to classes" });
     }
 
-    // ✅ Overlapping check
-    const overlap = await Class.findOne({
-      coach,
-      term,
-      dayOfWeek: day,
-      startTime: { $lt: endTime },
-      endTime: { $gt: startTime },
-    });
+    // ── Coach overlap check ──
+    // Build list of day/time entries to check
+    const entriesToCheck = finalSchedule.length > 0
+      ? finalSchedule
+      : [{ dayOfWeek: rootDayOfWeek, startTime: rootStartTime, endTime: rootEndTime }];
 
-    if (overlap) {
-      return res.status(400).json({
-        message: "Coach already has overlapping class",
+    for (const entry of entriesToCheck) {
+      // Check against existing classes with root dayOfWeek (legacy/single-day)
+      const overlapRoot = await Class.findOne({
+        coach,
+        term,
+        dayOfWeek: { $regex: new RegExp(`^${entry.dayOfWeek}$`, "i") },
+        startTime: { $lt: entry.endTime },
+        endTime: { $gt: entry.startTime },
       });
+
+      if (overlapRoot) {
+        return res.status(400).json({
+          message: `Coach already has overlapping class on ${entry.dayOfWeek} (${entry.startTime}-${entry.endTime})`,
+        });
+      }
+
+      // Check against existing multi-day classes (schedule[] entries)
+      const overlapSchedule = await Class.findOne({
+        coach,
+        term,
+        "schedule.dayOfWeek": { $regex: new RegExp(`^${entry.dayOfWeek}$`, "i") },
+        schedule: {
+          $elemMatch: {
+            dayOfWeek: { $regex: new RegExp(`^${entry.dayOfWeek}$`, "i") },
+            startTime: { $lt: entry.endTime },
+            endTime: { $gt: entry.startTime },
+          },
+        },
+      });
+
+      if (overlapSchedule) {
+        return res.status(400).json({
+          message: `Coach already has overlapping class on ${entry.dayOfWeek} (${entry.startTime}-${entry.endTime})`,
+        });
+      }
     }
 
-    const classData = await Class.create({
+    // ── Create the Class ──
+    const createData = {
       name,
       term,
       program,
       category,
-      dayOfWeek: day,
-      startTime,
-      endTime,
+      dayOfWeek: rootDayOfWeek,
+      startTime: rootStartTime,
+      endTime: rootEndTime,
       location,
       coach,
       capacity,
       price: price !== undefined && price !== null ? Number(price) : 0,
-    });
+      scheduleType,
+    };
+
+    if (finalSchedule.length > 0) {
+      createData.schedule = finalSchedule;
+    }
+
+    const classData = await Class.create(createData);
 
     res.json({
       message: "Class created successfully",
@@ -1553,6 +1711,7 @@ exports.createClass = async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 };
+
 
 /**
  * DELETE /api/admin/deleteClass/:id or DELETE /api/admin/class/:id
@@ -1702,7 +1861,11 @@ exports.getAllClasses = async (req, res) => {
 
     if (selectedTerm) filter.term = selectedTerm;
     if (selectedDay) {
-      filter.dayOfWeek = { $regex: new RegExp(`^${selectedDay}$`, "i") };
+      // Match both root dayOfWeek (legacy/single-day) and schedule[].dayOfWeek (multi-day)
+      filter.$or = [
+        { dayOfWeek: { $regex: new RegExp(`^${selectedDay}$`, "i") } },
+        { "schedule.dayOfWeek": { $regex: new RegExp(`^${selectedDay}$`, "i") } },
+      ];
     }
     if (selectedProgram) filter.program = selectedProgram;
     if (selectedCategory) filter.category = selectedCategory;
@@ -1740,7 +1903,12 @@ exports.getAllClassesForAssign = async (req, res) => {
     let filter = {};
 
     if (term) filter.term = term;
-    if (dayOfWeek) filter.dayOfWeek = dayOfWeek;
+    if (dayOfWeek) {
+      filter.$or = [
+        { dayOfWeek: { $regex: new RegExp(`^${dayOfWeek}$`, "i") } },
+        { "schedule.dayOfWeek": { $regex: new RegExp(`^${dayOfWeek}$`, "i") } },
+      ];
+    }
     if (program) filter.program = program;
     if (category) filter.category = category;
 
@@ -1783,6 +1951,8 @@ exports.updateClass = async (req, res) => {
       coach,
       capacity,
       price,
+      scheduleType: rawScheduleType,
+      schedule: rawSchedule,
     } = req.body;
 
     if (price !== undefined && price !== null) {
@@ -1931,6 +2101,48 @@ exports.updateClass = async (req, res) => {
       updatedData.price = Number(price);
     }
 
+    // ✅ Schedule update support
+    if (rawScheduleType) {
+      const validScheduleTypes = ["SINGLE_DAY", "WEEKDAYS", "CUSTOM"];
+      const st = rawScheduleType.toUpperCase();
+      if (!validScheduleTypes.includes(st)) {
+        return res.status(400).json({ message: "Invalid scheduleType" });
+      }
+      updatedData.scheduleType = st;
+
+      if (st === "WEEKDAYS") {
+        const sTime = startTime || updatedData.startTime;
+        const eTime = endTime || updatedData.endTime;
+        if (sTime && eTime) {
+          const weekdays = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"];
+          updatedData.schedule = weekdays.map((d) => ({ dayOfWeek: d, startTime: sTime, endTime: eTime }));
+          updatedData.dayOfWeek = "MONDAY";
+        }
+      } else if (st === "CUSTOM" && Array.isArray(rawSchedule) && rawSchedule.length > 0) {
+        const validDaysArr = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"];
+        const toMin = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
+        const normalized = rawSchedule.map((e) => ({
+          dayOfWeek: (e.dayOfWeek || "").toUpperCase(),
+          startTime: e.startTime,
+          endTime: e.endTime,
+        }));
+        for (const e of normalized) {
+          if (!validDaysArr.includes(e.dayOfWeek) || !e.startTime || !e.endTime) {
+            return res.status(400).json({ message: "Invalid schedule entry" });
+          }
+          if (toMin(e.startTime) >= toMin(e.endTime)) {
+            return res.status(400).json({ message: `Schedule ${e.dayOfWeek}: start must be before end` });
+          }
+        }
+        updatedData.schedule = normalized;
+        updatedData.dayOfWeek = normalized[0].dayOfWeek;
+        updatedData.startTime = normalized[0].startTime;
+        updatedData.endTime = normalized[0].endTime;
+      } else if (st === "SINGLE_DAY") {
+        updatedData.schedule = [];
+      }
+    }
+
     // ✅ Prevent coach conflict (if relevant fields updated)
     if (coach || dayOfWeek || startTime || endTime) {
       const existing = await Class.findOne({
@@ -2017,27 +2229,11 @@ exports.getClassesByTerm = async (req, res) => {
   }
 };
 
-const generateClassSessions = (term, classObj) => {
-  const sessions = [];
-
-  const start = new Date(term.startDate);
-  start.setUTCHours(0, 0, 0, 0);
-
-  const end = new Date(term.endDate);
-  end.setUTCHours(0, 0, 0, 0);
-
-  const dayMap = {
-    SUNDAY: 0,
-    MONDAY: 1,
-    TUESDAY: 2,
-    WEDNESDAY: 3,
-    THURSDAY: 4,
-    FRIDAY: 5,
-    SATURDAY: 6,
-  };
-
-  const targetDay = dayMap[classObj.dayOfWeek];
-
+// ─────────────────────────────────────────────
+// Helper: Generate session dates for a day of the week within term range
+// ─────────────────────────────────────────────
+const _generateDatesForDay = (start, end, targetDay) => {
+  const dates = [];
   let current = new Date(start);
 
   // move to correct weekday (UTC)
@@ -2047,12 +2243,129 @@ const generateClassSessions = (term, classObj) => {
 
   // weekly loop
   while (current <= end) {
-    sessions.push(new Date(current));
-
+    dates.push(new Date(current));
     current.setUTCDate(current.getUTCDate() + 7);
   }
 
+  return dates;
+};
+
+const DAY_MAP = {
+  SUNDAY: 0,
+  MONDAY: 1,
+  TUESDAY: 2,
+  WEDNESDAY: 3,
+  THURSDAY: 4,
+  FRIDAY: 5,
+  SATURDAY: 6,
+};
+
+// ─────────────────────────────────────────────
+// generateClassSessions — supports SINGLE_DAY, WEEKDAYS, CUSTOM
+// Returns array of Date objects (backward compatible).
+// For multi-day classes, sessions are sorted chronologically.
+// ─────────────────────────────────────────────
+const generateClassSessions = (term, classObj) => {
+  const sessions = [];
+  if (!term || !term.startDate || !term.endDate) return sessions;
+
+  const start = new Date(term.startDate);
+  start.setUTCHours(0, 0, 0, 0);
+  const end = new Date(term.endDate);
+  end.setUTCHours(0, 0, 0, 0);
+
+  const scheduleType = classObj.scheduleType || "SINGLE_DAY";
+  const schedule = classObj.schedule || [];
+
+  if ((scheduleType === "WEEKDAYS" || scheduleType === "CUSTOM") && schedule.length > 0) {
+    // Multi-day: generate dates for each schedule entry
+    for (const entry of schedule) {
+      const targetDay = DAY_MAP[(entry.dayOfWeek || "").toUpperCase()];
+      if (targetDay === undefined) continue;
+      const dates = _generateDatesForDay(start, end, targetDay);
+      sessions.push(...dates);
+    }
+    // Sort chronologically
+    sessions.sort((a, b) => a.getTime() - b.getTime());
+  } else {
+    // SINGLE_DAY or legacy: original logic
+    if (!classObj.dayOfWeek) return sessions;
+    const targetDay = DAY_MAP[classObj.dayOfWeek.toUpperCase()];
+    if (targetDay === undefined) return sessions;
+    const dates = _generateDatesForDay(start, end, targetDay);
+    sessions.push(...dates);
+  }
+
   return sessions;
+};
+
+// ─────────────────────────────────────────────
+// generateClassSessionsEnriched — returns { date, dayOfWeek, startTime, endTime }
+// Used when per-day times are needed (multi-day classes have different times per day).
+// ─────────────────────────────────────────────
+const generateClassSessionsEnriched = (term, classObj) => {
+  const sessions = [];
+  if (!term || !term.startDate || !term.endDate) return sessions;
+
+  const start = new Date(term.startDate);
+  start.setUTCHours(0, 0, 0, 0);
+  const end = new Date(term.endDate);
+  end.setUTCHours(0, 0, 0, 0);
+
+  const dayNames = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
+  const scheduleType = classObj.scheduleType || "SINGLE_DAY";
+  const schedule = classObj.schedule || [];
+
+  if ((scheduleType === "WEEKDAYS" || scheduleType === "CUSTOM") && schedule.length > 0) {
+    for (const entry of schedule) {
+      const targetDay = DAY_MAP[(entry.dayOfWeek || "").toUpperCase()];
+      if (targetDay === undefined) continue;
+      const dates = _generateDatesForDay(start, end, targetDay);
+      for (const d of dates) {
+        sessions.push({
+          date: d,
+          dayOfWeek: entry.dayOfWeek.toUpperCase(),
+          startTime: entry.startTime,
+          endTime: entry.endTime,
+        });
+      }
+    }
+    sessions.sort((a, b) => a.date.getTime() - b.date.getTime());
+  } else {
+    if (!classObj.dayOfWeek) return sessions;
+    const targetDay = DAY_MAP[classObj.dayOfWeek.toUpperCase()];
+    if (targetDay === undefined) return sessions;
+    const dates = _generateDatesForDay(start, end, targetDay);
+    for (const d of dates) {
+      sessions.push({
+        date: d,
+        dayOfWeek: classObj.dayOfWeek.toUpperCase(),
+        startTime: classObj.startTime,
+        endTime: classObj.endTime,
+      });
+    }
+  }
+
+  return sessions;
+};
+
+// ─────────────────────────────────────────────
+// Helper: Get startTime/endTime for a specific session date from a class
+// (For multi-day classes, looks up the schedule entry matching the date's weekday)
+// ─────────────────────────────────────────────
+const getSessionTimesForDate = (classObj, sessionDate) => {
+  const dayNames = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
+  const scheduleType = classObj.scheduleType || "SINGLE_DAY";
+  const schedule = classObj.schedule || [];
+
+  if ((scheduleType === "WEEKDAYS" || scheduleType === "CUSTOM") && schedule.length > 0) {
+    const dayName = dayNames[new Date(sessionDate).getUTCDay()];
+    const entry = schedule.find((e) => (e.dayOfWeek || "").toUpperCase() === dayName);
+    if (entry) {
+      return { startTime: entry.startTime, endTime: entry.endTime };
+    }
+  }
+  return { startTime: classObj.startTime, endTime: classObj.endTime };
 };
 
 exports.getClassSessions = async (req, res) => {
@@ -2063,14 +2376,17 @@ exports.getClassSessions = async (req, res) => {
       return res.status(404).json({ message: "Class not found" });
     }
 
-    const sessions = generateClassSessions(classData.term, classData);
+    const enrichedSessions = generateClassSessionsEnriched(classData.term, classData);
 
     // ✅ Convert to UI format
-    const formatted = sessions.map((date) => ({
-      fullDate: date,
-      day: date.getUTCDate(),
-      month: date.getUTCMonth() + 1,
-      year: date.getUTCFullYear(),
+    const formatted = enrichedSessions.map((s) => ({
+      fullDate: s.date,
+      day: s.date.getUTCDate(),
+      month: s.date.getUTCMonth() + 1,
+      year: s.date.getUTCFullYear(),
+      dayOfWeek: s.dayOfWeek,
+      startTime: s.startTime,
+      endTime: s.endTime,
     }));
 
     // ✅ Group by month (VERY IMPORTANT)
@@ -2087,7 +2403,9 @@ exports.getClassSessions = async (req, res) => {
     });
 
     res.json({
-      totalSessions: sessions.length,
+      totalSessions: enrichedSessions.length,
+      scheduleType: classData.scheduleType || "SINGLE_DAY",
+      schedule: classData.schedule || [],
       sessions: formatted,
       groupedByMonth: grouped,
     });
@@ -2096,6 +2414,7 @@ exports.getClassSessions = async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 };
+
 
 exports.markAttendance = async (req, res) => {
   try {
@@ -2643,7 +2962,12 @@ exports.getClassFiltersWithTimeSlots = async (req, res) => {
     const query = {};
     if (categoryId) query.category = categoryId;
     if (programId) query.program = programId;
-    if (day) query.dayOfWeek = day;
+    if (day) {
+      query.$or = [
+        { dayOfWeek: { $regex: new RegExp(`^${day}$`, "i") } },
+        { "schedule.dayOfWeek": { $regex: new RegExp(`^${day}$`, "i") } },
+      ];
+    }
     if (selectedTerm) query.term = selectedTerm;
 
     const classes = await Class.find(query)
@@ -2666,18 +2990,42 @@ exports.getClassFiltersWithTimeSlots = async (req, res) => {
       classes.filter(c => c.term).map(c => [c.term._id.toString(), c.term])
     ).values()];
 
-    // ✅ days
-    const days = [...new Set(classes.map(c => c.dayOfWeek).filter(Boolean))];
+    // ✅ days (include schedule days for multi-day classes)
+    const daysSet = new Set();
+    classes.forEach((c) => {
+      if (c.dayOfWeek) daysSet.add(c.dayOfWeek);
+      if (c.schedule && c.schedule.length > 0) {
+        c.schedule.forEach((s) => { if (s.dayOfWeek) daysSet.add(s.dayOfWeek); });
+      }
+    });
+    const days = [...daysSet];
 
     // ✅ time slots (only if day is selected)
     let timeSlots = [];
 
     if (day) {
-      timeSlots = classes.map((c) => ({
-        classId: c._id,
-        startTime: c.startTime,
-        endTime: c.endTime,
-      }));
+      classes.forEach((c) => {
+        // Check schedule entries first for multi-day classes
+        if (c.schedule && c.schedule.length > 0) {
+          const matchingEntry = c.schedule.find((s) =>
+            (s.dayOfWeek || "").toUpperCase() === day.toUpperCase()
+          );
+          if (matchingEntry) {
+            timeSlots.push({
+              classId: c._id,
+              startTime: matchingEntry.startTime,
+              endTime: matchingEntry.endTime,
+            });
+            return;
+          }
+        }
+        // Fallback to root fields
+        timeSlots.push({
+          classId: c._id,
+          startTime: c.startTime,
+          endTime: c.endTime,
+        });
+      });
     }
 
     res.json({
@@ -3585,3 +3933,204 @@ exports.getAdminDashboardOverview = async (req, res) => {
     });
   }
 };
+
+// ✅ Term-wise Class Earnings / Player Payment Report API (Admin only)
+exports.getTermEarningsReport = async (req, res) => {
+  try {
+    const { termId } = req.params;
+    const { classId, status } = req.query;
+
+    if (!mongoose.Types.ObjectId.isValid(termId)) {
+      return res.status(400).json({ success: false, message: "Invalid Term ID format" });
+    }
+
+    const termDoc = await Term.findById(termId);
+    if (!termDoc) {
+      return res.status(404).json({ success: false, message: "Term not found" });
+    }
+
+    // Find all classes in this term
+    const classFilter = { term: termId };
+    if (classId) {
+      if (!mongoose.Types.ObjectId.isValid(classId)) {
+        return res.status(400).json({ success: false, message: "Invalid Class ID format" });
+      }
+      classFilter._id = classId;
+    }
+
+    const classes = await Class.find(classFilter)
+      .populate("program", "name")
+      .populate("category", "name")
+      .populate("coach", "name email mobile profileImage")
+      .populate("players", "firstName lastName fullName email phone dob gender profileImage jerseyNumber paymentStatus");
+
+    const classIds = classes.map(c => c._id);
+
+    // Fetch all active invoices for these classes
+    const invoices = await Invoice.find({
+      class: { $in: classIds },
+      status: "ACTIVE"
+    });
+
+    // Fetch all payments for these invoices
+    const invoiceIds = invoices.map(inv => inv._id);
+    const payments = await Payment.find({
+      invoice: { $in: invoiceIds }
+    });
+
+    // Build the report
+    let totalEnrolledPlayersSet = new Set();
+    let termExpected = 0;
+    let termPaid = 0;
+    let termPending = 0;
+    let termRefunded = 0;
+
+    const classReports = [];
+
+    for (const classDoc of classes) {
+      const classPlayers = classDoc.players || [];
+      const playerReports = [];
+
+      let classExpected = 0;
+      let classPaid = 0;
+      let classPending = 0;
+      let classRefunded = 0;
+
+      for (const player of classPlayers) {
+        // Find invoice for this player & class
+        const playerInvoices = invoices.filter(inv => 
+          inv.class.toString() === classDoc._id.toString() &&
+          inv.players.some(pId => pId.toString() === player._id.toString())
+        );
+
+        let expectedAmount = 0;
+        let paidAmount = 0;
+        let refundedAmount = 0; // Not explicitly defined in invoice/payment schema, defaults to 0
+        let hasPendingPayment = false;
+        let isInvoiceRejected = false;
+
+        if (playerInvoices.length > 0) {
+          // Aggregate amounts for all active invoices for this player/class
+          expectedAmount = playerInvoices.reduce((sum, inv) => sum + (inv.totalAmount || 0), 0);
+          
+          const playerInvIds = playerInvoices.map(inv => inv._id.toString());
+          const playerPayments = payments.filter(p => playerInvIds.includes(p.invoice.toString()));
+
+          paidAmount = playerPayments
+            .filter(p => p.status === "APPROVED")
+            .reduce((sum, p) => sum + (p.amount || 0), 0);
+
+          hasPendingPayment = playerPayments.some(p => p.status === "PENDING") || 
+                              playerInvoices.some(inv => inv.paymentStatus === "PAYMENT_PENDING");
+          isInvoiceRejected = playerInvoices.some(inv => inv.paymentStatus === "REJECTED");
+        } else {
+          // Fallback to class price if no invoice exists
+          expectedAmount = classDoc.price || 0;
+          paidAmount = 0;
+        }
+
+        const pendingAmount = Math.max(0, expectedAmount - paidAmount);
+
+        // Determine standardized status
+        let paymentStatus = "UNPAID";
+        if (paidAmount >= expectedAmount && expectedAmount > 0) {
+          paymentStatus = "PAID";
+        } else if (paidAmount > 0 && paidAmount < expectedAmount) {
+          paymentStatus = "PARTIAL";
+        } else if (paidAmount === 0) {
+          if (hasPendingPayment) {
+            paymentStatus = "PENDING";
+          } else if (isInvoiceRejected) {
+            paymentStatus = "FAILED";
+          } else {
+            paymentStatus = "UNPAID";
+          }
+        }
+
+        const reportItem = {
+          playerId: player._id,
+          playerName: player.fullName || `${player.firstName || ""} ${player.lastName || ""}`.trim(),
+          playerEmail: player.email || null,
+          class: {
+            id: classDoc._id,
+            name: classDoc.name,
+          },
+          term: {
+            id: termDoc._id,
+            name: termDoc.name,
+          },
+          expectedAmount,
+          paidAmount,
+          pendingAmount,
+          refundedAmount,
+          paymentStatus,
+        };
+
+        // Filter players based on status if query parameter is provided
+        if (!status || paymentStatus.toUpperCase() === status.toUpperCase()) {
+          totalEnrolledPlayersSet.add(player._id.toString());
+          playerReports.push(reportItem);
+          
+          classExpected += expectedAmount;
+          classPaid += paidAmount;
+          classPending += pendingAmount;
+          classRefunded += refundedAmount;
+        }
+      }
+
+      // If status filter is applied, only include class report if there are matching players,
+      // or if no status filter is applied, include all classes.
+      if (!status || playerReports.length > 0) {
+        classReports.push({
+          classId: classDoc._id,
+          className: classDoc.name,
+          program: classDoc.program?.name || null,
+          category: classDoc.category?.name || null,
+          coach: classDoc.coach ? {
+            id: classDoc.coach._id,
+            name: classDoc.coach.name,
+          } : null,
+          price: classDoc.price || 0,
+          totalPlayers: playerReports.length,
+          expectedAmount: classExpected,
+          paidAmount: classPaid,
+          pendingAmount: classPending,
+          refundedAmount: classRefunded,
+          outstandingAmount: classPending,
+          players: playerReports,
+        });
+
+        termExpected += classExpected;
+        termPaid += classPaid;
+        termPending += classPending;
+        termRefunded += classRefunded;
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        term: {
+          id: termDoc._id,
+          name: termDoc.name,
+        },
+        summary: {
+          totalClasses: classReports.length,
+          totalPlayers: totalEnrolledPlayersSet.size,
+          totalExpected: termExpected,
+          totalPaid: termPaid,
+          totalPending: termPending,
+          totalRefunded: termRefunded,
+          totalOutstanding: termPending,
+        },
+        classes: classReports,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+

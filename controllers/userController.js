@@ -880,37 +880,65 @@ exports.registerForHolidayProgram = async (req, res) => {
   return exports.requestAddProgram(req, res);
 };
 
-const generateClassSessions = (term, classObj) => {
-  const sessions = [];
-  const start = new Date(term.startDate);
-  start.setUTCHours(0, 0, 0, 0);
-
-  const end = new Date(term.endDate);
-  end.setUTCHours(0, 0, 0, 0);
-
-  const dayMap = {
-    SUNDAY: 0,
-    MONDAY: 1,
-    TUESDAY: 2,
-    WEDNESDAY: 3,
-    THURSDAY: 4,
-    FRIDAY: 5,
-    SATURDAY: 6,
-  };
-
-  const targetDay = dayMap[classObj.dayOfWeek];
+const _generateDatesForDayUser = (start, end, targetDay) => {
+  const dates = [];
   let current = new Date(start);
-
   while (current.getUTCDay() !== targetDay) {
     current.setUTCDate(current.getUTCDate() + 1);
   }
-
   while (current <= end) {
-    sessions.push(new Date(current));
+    dates.push(new Date(current));
     current.setUTCDate(current.getUTCDate() + 7);
+  }
+  return dates;
+};
+
+const DAY_MAP_USER = {
+  SUNDAY: 0, MONDAY: 1, TUESDAY: 2, WEDNESDAY: 3,
+  THURSDAY: 4, FRIDAY: 5, SATURDAY: 6,
+};
+
+const generateClassSessions = (term, classObj) => {
+  const sessions = [];
+  if (!term || !term.startDate || !term.endDate || !classObj) return sessions;
+
+  const start = new Date(term.startDate);
+  start.setUTCHours(0, 0, 0, 0);
+  const end = new Date(term.endDate);
+  end.setUTCHours(0, 0, 0, 0);
+
+  const scheduleType = classObj.scheduleType || "SINGLE_DAY";
+  const schedule = classObj.schedule || [];
+
+  if ((scheduleType === "WEEKDAYS" || scheduleType === "CUSTOM") && schedule.length > 0) {
+    for (const entry of schedule) {
+      const targetDay = DAY_MAP_USER[(entry.dayOfWeek || "").toUpperCase()];
+      if (targetDay === undefined) continue;
+      sessions.push(..._generateDatesForDayUser(start, end, targetDay));
+    }
+    sessions.sort((a, b) => a.getTime() - b.getTime());
+  } else {
+    if (!classObj.dayOfWeek) return sessions;
+    const targetDay = DAY_MAP_USER[classObj.dayOfWeek.toUpperCase()];
+    if (targetDay === undefined) return sessions;
+    sessions.push(..._generateDatesForDayUser(start, end, targetDay));
   }
 
   return sessions;
+};
+
+// Helper: Get per-day startTime/endTime for a session date
+const getSessionTimesForDateUser = (classObj, sessionDate) => {
+  const dayNames = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
+  const scheduleType = classObj.scheduleType || "SINGLE_DAY";
+  const schedule = classObj.schedule || [];
+
+  if ((scheduleType === "WEEKDAYS" || scheduleType === "CUSTOM") && schedule.length > 0) {
+    const dayName = dayNames[new Date(sessionDate).getUTCDay()];
+    const entry = schedule.find((e) => (e.dayOfWeek || "").toUpperCase() === dayName);
+    if (entry) return { startTime: entry.startTime, endTime: entry.endTime };
+  }
+  return { startTime: classObj.startTime, endTime: classObj.endTime };
 };
 
 // ✅ Fetch Classes with Attendance for Child
@@ -1013,11 +1041,13 @@ exports.getMyClasses = async (req, res) => {
         if (status === "PRESENT") presentCount++;
         else if (status === "ABSENT") missedSessions++;
 
+        const sessionTimes = getSessionTimesForDateUser(cls, normalizedDate);
+
         sessions.push({
           date: normalizedDate.toISOString().split("T")[0],
           day: dayNames[normalizedDate.getUTCDay()],
-          startTime: cls.startTime,
-          endTime: cls.endTime,
+          startTime: sessionTimes.startTime,
+          endTime: sessionTimes.endTime,
           status,
           reason,
           remarks,
@@ -1263,13 +1293,14 @@ exports.getDashboard = async (req, res) => {
       const cls = classes[0];
       const nextSessions = generateClassSessions(cls.term, cls).filter((d) => d >= new Date());
       if (nextSessions.length > 0) {
+        const nextSessionTimes = getSessionTimesForDateUser(cls, nextSessions[0]);
         upcomingTraining = {
           classId: cls._id,
           className: cls.name,
           date: nextSessions[0].toISOString().split("T")[0],
           dayOfWeek: cls.dayOfWeek,
-          startTime: cls.startTime,
-          endTime: cls.endTime,
+          startTime: nextSessionTimes.startTime,
+          endTime: nextSessionTimes.endTime,
           venue: cls.venue || cls.location,
           coach: cls.coach?.name || "N/A",
         };

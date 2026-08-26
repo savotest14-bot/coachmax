@@ -12,11 +12,29 @@ const ChatRoom = require("../models/ChatRoom");
 
 // ─────────────────────────────────────────────
 // Helper: Generate class sessions from term dates
-// (reused from adminAuthController logic)
+// Supports SINGLE_DAY, WEEKDAYS, and CUSTOM scheduleTypes
 // ─────────────────────────────────────────────
+const _generateDatesForDayCoach = (start, end, targetDay) => {
+  const dates = [];
+  let current = new Date(start);
+  while (current.getUTCDay() !== targetDay) {
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
+  while (current <= end) {
+    dates.push(new Date(current));
+    current.setUTCDate(current.getUTCDate() + 7);
+  }
+  return dates;
+};
+
+const DAY_MAP_COACH = {
+  SUNDAY: 0, MONDAY: 1, TUESDAY: 2, WEDNESDAY: 3,
+  THURSDAY: 4, FRIDAY: 5, SATURDAY: 6,
+};
+
 const generateClassSessions = (term, classObj) => {
   const sessions = [];
-  if (!term || !term.startDate || !term.endDate || !classObj || !classObj.dayOfWeek) {
+  if (!term || !term.startDate || !term.endDate || !classObj) {
     return sessions;
   }
 
@@ -25,26 +43,38 @@ const generateClassSessions = (term, classObj) => {
   const end = new Date(term.endDate);
   end.setUTCHours(0, 0, 0, 0);
 
-  const dayMap = {
-    SUNDAY: 0, MONDAY: 1, TUESDAY: 2, WEDNESDAY: 3,
-    THURSDAY: 4, FRIDAY: 5, SATURDAY: 6,
-  };
+  const scheduleType = classObj.scheduleType || "SINGLE_DAY";
+  const schedule = classObj.schedule || [];
 
-  const targetDay = dayMap[classObj.dayOfWeek.toUpperCase()];
-  if (targetDay === undefined) return sessions;
-
-  let current = new Date(start);
-
-  while (current.getUTCDay() !== targetDay) {
-    current.setUTCDate(current.getUTCDate() + 1);
-  }
-
-  while (current <= end) {
-    sessions.push(new Date(current));
-    current.setUTCDate(current.getUTCDate() + 7);
+  if ((scheduleType === "WEEKDAYS" || scheduleType === "CUSTOM") && schedule.length > 0) {
+    for (const entry of schedule) {
+      const targetDay = DAY_MAP_COACH[(entry.dayOfWeek || "").toUpperCase()];
+      if (targetDay === undefined) continue;
+      sessions.push(..._generateDatesForDayCoach(start, end, targetDay));
+    }
+    sessions.sort((a, b) => a.getTime() - b.getTime());
+  } else {
+    if (!classObj.dayOfWeek) return sessions;
+    const targetDay = DAY_MAP_COACH[classObj.dayOfWeek.toUpperCase()];
+    if (targetDay === undefined) return sessions;
+    sessions.push(..._generateDatesForDayCoach(start, end, targetDay));
   }
 
   return sessions;
+};
+
+// Helper: Get per-day startTime/endTime for a session date
+const getSessionTimesForDateCoach = (classObj, sessionDate) => {
+  const dayNames = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
+  const scheduleType = classObj.scheduleType || "SINGLE_DAY";
+  const schedule = classObj.schedule || [];
+
+  if ((scheduleType === "WEEKDAYS" || scheduleType === "CUSTOM") && schedule.length > 0) {
+    const dayName = dayNames[new Date(sessionDate).getUTCDay()];
+    const entry = schedule.find((e) => (e.dayOfWeek || "").toUpperCase() === dayName);
+    if (entry) return { startTime: entry.startTime, endTime: entry.endTime };
+  }
+  return { startTime: classObj.startTime, endTime: classObj.endTime };
 };
 
 // ═══════════════════════════════════════════════
@@ -164,7 +194,11 @@ exports.getMyAssignedClasses = async (req, res) => {
         selectedDayParam &&
         weekdays.includes(selectedDayParam.toUpperCase())
       ) {
-        query.dayOfWeek = { $regex: new RegExp(`^${selectedDayParam}$`, "i") };
+        query.$and = query.$and || [];
+        query.$and.push({ $or: [
+          { dayOfWeek: { $regex: new RegExp(`^${selectedDayParam}$`, "i") } },
+          { "schedule.dayOfWeek": { $regex: new RegExp(`^${selectedDayParam}$`, "i") } },
+        ] });
       }
     } else if (isDayFilter) {
       // Day-wise filtering
@@ -173,7 +207,11 @@ exports.getMyAssignedClasses = async (req, res) => {
         weekdays.includes(selectedDayParam.toUpperCase())
       ) {
         // Filter by weekday name (e.g. MONDAY)
-        query.dayOfWeek = { $regex: new RegExp(`^${selectedDayParam}$`, "i") };
+        query.$and = query.$and || [];
+        query.$and.push({ $or: [
+          { dayOfWeek: { $regex: new RegExp(`^${selectedDayParam}$`, "i") } },
+          { "schedule.dayOfWeek": { $regex: new RegExp(`^${selectedDayParam}$`, "i") } },
+        ] });
       } else {
         // Filter by specific date (e.g. 2026-08-13) or today
         const targetDateStr = date || dayDate || selectedDayParam;
@@ -181,7 +219,11 @@ exports.getMyAssignedClasses = async (req, res) => {
 
         if (!isNaN(targetDate.getTime())) {
           const dayName = weekdays[targetDate.getUTCDay()];
-          query.dayOfWeek = { $regex: new RegExp(`^${dayName}$`, "i") };
+          query.$and = query.$and || [];
+          query.$and.push({ $or: [
+            { dayOfWeek: { $regex: new RegExp(`^${dayName}$`, "i") } },
+            { "schedule.dayOfWeek": { $regex: new RegExp(`^${dayName}$`, "i") } },
+          ] });
 
           sessionStartRange = new Date(targetDate);
           sessionStartRange.setUTCHours(0, 0, 0, 0);
@@ -232,9 +274,13 @@ exports.getMyAssignedClasses = async (req, res) => {
         tempDate.setUTCDate(tempDate.getUTCDate() + 1);
       }
 
-      if (!query.dayOfWeek && weekdaysInRange.length > 0) {
+      if (!query.$and?.some(c => c.$or?.some(o => o.dayOfWeek || o["schedule.dayOfWeek"])) && weekdaysInRange.length > 0) {
         const regexes = weekdaysInRange.map((d) => new RegExp(`^${d}$`, "i"));
-        query.dayOfWeek = { $in: regexes };
+        query.$and = query.$and || [];
+        query.$and.push({ $or: [
+          { dayOfWeek: { $in: regexes } },
+          { "schedule.dayOfWeek": { $in: regexes } },
+        ] });
       }
     }
 
@@ -353,10 +399,33 @@ exports.getClassDropdown = async (req, res) => {
 
     // Coach -> only assigned classes
     if (admin.role === "COACH") {
-      query.$or = [
-        { coach: adminId },
-        { assistantCoach: adminId },
-      ];
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { coach: adminId },
+          { assistantCoach: adminId },
+        ]
+      });
+    }
+
+    const { term, category, program, day } = req.query;
+    if (term) {
+      query.term = term;
+    }
+    if (category) {
+      query.category = category;
+    }
+    if (program) {
+      query.program = program;
+    }
+    if (day) {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { dayOfWeek: { $regex: new RegExp(`^${day}$`, "i") } },
+          { "schedule.dayOfWeek": { $regex: new RegExp(`^${day}$`, "i") } },
+        ]
+      });
     }
 
     // Super Admin -> all active classes
@@ -1187,6 +1256,8 @@ exports.getCoachDashboard = async (req, res) => {
           (att) => att.class.toString() === cls._id.toString()
         );
 
+        const todayTimes = getSessionTimesForDateCoach(cls, today);
+
         todaysClasses.push({
           classId: cls._id,
           className: cls.name,
@@ -1194,8 +1265,8 @@ exports.getCoachDashboard = async (req, res) => {
           broadcastChatRoomId: roomId,
           broadcastRoomId: roomId,
           dayOfWeek: cls.dayOfWeek,
-          startTime: cls.startTime,
-          endTime: cls.endTime,
+          startTime: todayTimes.startTime,
+          endTime: todayTimes.endTime,
           venue: cls.venue || cls.location || "",
           location: cls.location || "",
           program: cls.program,
@@ -1204,6 +1275,8 @@ exports.getCoachDashboard = async (req, res) => {
           sessionDate: today.toISOString().split("T")[0],
           isAttendanceMarked: Boolean(attDoc),
           attendanceId: attDoc ? attDoc._id : null,
+          scheduleType: cls.scheduleType || "SINGLE_DAY",
+          schedule: cls.schedule || [],
         });
       }
 
@@ -1219,6 +1292,8 @@ exports.getCoachDashboard = async (req, res) => {
               sDate.toISOString().split("T")[0]
           );
 
+          const sessionTimes = getSessionTimesForDateCoach(cls, sDate);
+
           upcomingSessions.push({
             classId: cls._id,
             className: cls.name,
@@ -1227,8 +1302,8 @@ exports.getCoachDashboard = async (req, res) => {
             broadcastRoomId: roomId,
             sessionDate: sDate.toISOString().split("T")[0],
             dayOfWeek: cls.dayOfWeek,
-            startTime: cls.startTime,
-            endTime: cls.endTime,
+            startTime: sessionTimes.startTime,
+            endTime: sessionTimes.endTime,
             venue: cls.venue || cls.location || "",
             programName: cls.program ? cls.program.name : "",
             categoryName: cls.category ? cls.category.name : "",

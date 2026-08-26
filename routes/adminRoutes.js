@@ -54,6 +54,7 @@ const {
   getPlayerDetails,
   changeCoachPassword,
   toggleCoachActiveStatus,
+  getTermEarningsReport,
 } = require("../controllers/adminAuthController");
 
 const {
@@ -88,6 +89,10 @@ const {
   getAllLeagues,
   updatePlayerStatistics,
   getAvailablePlayers,
+  getTeamById,
+  unassignPlayerFromTeam,
+  updateTeam,
+  deleteTeam,
 } = require("../controllers/leagueController");
 
 const {
@@ -223,6 +228,7 @@ router.get("/getTermById/:id", auth, isAdmin, getTermById);
 router.put("/updateTerm/:id", auth, isAdmin, updateTerm);
 router.post("/cloneTerm/preview", auth, isAdmin, previewCloneTerm);
 router.post("/cloneTerm", auth, isAdmin, cloneTerm);
+router.get("/term/:termId/earnings", auth, isAdmin, getTermEarningsReport);
 
 // Classes
 router.post("/createClass", auth, isAdmin, createClass);
@@ -272,7 +278,11 @@ router.get(
 
 router.post("/teams", auth, isAdmin, uploads.single("teamLogo"), createTeam);
 router.get("/getAllTeams", auth, isAdmin, getAllTeams)
+router.get("/teams/:teamId", auth, isAdmin, getTeamById);
+router.put("/teams/:teamId", auth, isAdmin, uploads.single("teamLogo"), updateTeam);
+router.delete("/teams/:teamId", auth, isAdmin, deleteTeam);
 router.post("/teams/:teamId/assign", auth, isAdmin, assignPlayerToTeam);
+router.post("/teams/:teamId/unassign", auth, isAdmin, unassignPlayerFromTeam);
 router.get("/available-players", auth, isAdmin, getAvailablePlayers);
 router.post("/fixtures", auth, isAdmin, createFixture);
 router.post("/fixtures/:matchId/events", auth, recordMatchEvent);

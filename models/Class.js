@@ -74,6 +74,20 @@ const classSchema = new mongoose.Schema(
       enum: ["ACTIVE", "INACTIVE"],
       default: "ACTIVE",
     },
+
+    // ── Multi-day scheduling (additive, backward-compatible) ──
+    scheduleType: {
+      type: String,
+      enum: ["SINGLE_DAY", "WEEKDAYS", "CUSTOM"],
+      default: "SINGLE_DAY",
+    },
+    schedule: [
+      {
+        dayOfWeek: { type: String },
+        startTime: { type: String },
+        endTime: { type: String },
+      },
+    ],
   },
   { timestamps: true }
 );
