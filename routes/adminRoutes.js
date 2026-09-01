@@ -93,6 +93,10 @@ const {
   unassignPlayerFromTeam,
   updateTeam,
   deleteTeam,
+  createTeamTemporaryPlayers,
+  getTeamTemporaryPlayers,
+  updateTeamTemporaryPlayer,
+  deleteTeamTemporaryPlayer,
 } = require("../controllers/leagueController");
 
 const {
@@ -283,6 +287,10 @@ router.put("/teams/:teamId", auth, isAdmin, uploads.single("teamLogo"), updateTe
 router.delete("/teams/:teamId", auth, isAdmin, deleteTeam);
 router.post("/teams/:teamId/assign", auth, isAdmin, assignPlayerToTeam);
 router.post("/teams/:teamId/unassign", auth, isAdmin, unassignPlayerFromTeam);
+router.post("/teams/:teamId/temporary-players", auth, isAdmin, uploads.array("profileImages", 20), createTeamTemporaryPlayers);
+router.get("/teams/:teamId/temporary-players", auth, isAdmin, getTeamTemporaryPlayers);
+router.put("/teams/:teamId/temporary-players/:tempPlayerId", auth, isAdmin, uploads.single("profileImage"), updateTeamTemporaryPlayer);
+router.delete("/teams/:teamId/temporary-players/:tempPlayerId", auth, isAdmin, deleteTeamTemporaryPlayer);
 router.get("/available-players", auth, isAdmin, getAvailablePlayers);
 router.post("/fixtures", auth, isAdmin, createFixture);
 router.post("/fixtures/:matchId/events", auth, recordMatchEvent);

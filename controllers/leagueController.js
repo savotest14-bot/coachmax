@@ -6,6 +6,7 @@ const Standing = require("../models/Standing");
 const PlayerStatistics = require("../models/PlayerStatistics");
 const User = require("../models/User");
 const Admin = require("../models/Admin");
+const { generateTeamInvoice } = require("../services/invoiceService");
 const mongoose = require("mongoose");
 const fs = require("fs");
 const path = require("path");
@@ -19,6 +20,8 @@ exports.createLeague = async (req, res) => {
       description,
       startDate,
       endDate,
+      type,
+      leagueType,
     } = req.body;
 
     if (!name || !season || !startDate || !endDate) {
@@ -40,6 +43,10 @@ exports.createLeague = async (req, res) => {
       });
     }
 
+    const rawType = (type || leagueType || "").toUpperCase();
+    const VALID_TYPES = ["INTERNATIONAL", "NATIONAL", "STATE", "LOCAL", "OTHERS"];
+    const parsedType = VALID_TYPES.includes(rawType) ? rawType : "LOCAL";
+
     const logo = req.file
       ? `/uploads/leaguelogos/${req.file.filename}`
       : "";
@@ -51,6 +58,7 @@ exports.createLeague = async (req, res) => {
       description: description || "",
       startDate,
       endDate,
+      type: parsedType,
     });
 
     return res.status(201).json({
@@ -71,6 +79,7 @@ exports.getAllLeagues = async (req, res) => {
     const page = parseInt(req.query.page, 10) || 1;
     const limit = parseInt(req.query.limit, 10) || 10;
     const search = req.query.search?.trim() || "";
+    const type = (req.query.type || req.query.leagueType || "")?.trim().toUpperCase();
 
     const skip = (page - 1) * limit;
 
@@ -91,6 +100,10 @@ exports.getAllLeagues = async (req, res) => {
           },
         },
       ];
+    }
+
+    if (type && ["INTERNATIONAL", "NATIONAL", "STATE", "LOCAL", "OTHERS"].includes(type)) {
+      filter.type = type;
     }
 
     const [leagues, total] = await Promise.all([
@@ -126,7 +139,7 @@ exports.getAllLeagues = async (req, res) => {
 // ✅ Create Team (Admin only)
 exports.createTeam = async (req, res) => {
   try {
-    const { teamName, coach, assistantCoach, ageGroup } = req.body;
+    const { teamName, coach, assistantCoach, ageGroup, teamType, teamFee, fee } = req.body;
 
     if (!teamName) {
       return res.status(400).json({
@@ -146,6 +159,15 @@ exports.createTeam = async (req, res) => {
       });
     }
 
+    const parsedType = teamType && ["INTERNAL", "EXTERNAL"].includes(teamType.toUpperCase())
+      ? teamType.toUpperCase()
+      : "INTERNAL";
+
+    const parsedFee = fee !== undefined ? Number(fee) : teamFee !== undefined ? Number(teamFee) : 0;
+    if (isNaN(parsedFee) || parsedFee < 0) {
+      return res.status(400).json({ success: false, message: "Team fee must be a non-negative number" });
+    }
+
     const logo = req.file ? `uploads/teamlogos/${req.file.filename}` : "";
 
     const team = await Team.create({
@@ -154,6 +176,8 @@ exports.createTeam = async (req, res) => {
       coach: coach || null,
       assistantCoach: assistantCoach || null,
       ageGroup: ageGroup || "",
+      teamType: parsedType,
+      teamFee: parsedFee,
     });
 
     return res.status(201).json({
@@ -184,6 +208,10 @@ exports.getAllTeams = async (req, res) => {
         $regex: search,
         $options: "i",
       };
+    }
+
+    if (req.query.teamType && ["INTERNAL", "EXTERNAL"].includes(req.query.teamType.toUpperCase())) {
+      filter.teamType = req.query.teamType.toUpperCase();
     }
 
     const [teams, total] = await Promise.all([
@@ -234,7 +262,7 @@ exports.assignPlayerToTeam = async (req, res) => {
     }
 
     const normalizedIds = Array.isArray(rawIds) ? rawIds : [rawIds];
-    
+
     // Validate ObjectIds
     const isValid = normalizedIds.every(id => mongoose.Types.ObjectId.isValid(id));
     if (!isValid) {
@@ -256,7 +284,7 @@ exports.assignPlayerToTeam = async (req, res) => {
     // Limit to 20 players total
     const currentPlayers = (team.players || []).map(p => p.toString());
     const unionPlayers = new Set([...currentPlayers, ...uniqueIds]);
-    
+
     if (unionPlayers.size > 20) {
       return res.status(400).json({
         success: false,
@@ -266,6 +294,17 @@ exports.assignPlayerToTeam = async (req, res) => {
 
     team.players = Array.from(unionPlayers);
     await team.save();
+
+    // Automatically generate team fee invoice for assigned players if team fee > 0
+    if (team.teamFee > 0) {
+      for (const pId of uniqueIds) {
+        try {
+          await generateTeamInvoice({ userId: pId, teamId });
+        } catch (invErr) {
+          console.error(`[Team] Failed to generate team invoice for player ${pId}:`, invErr.message);
+        }
+      }
+    }
 
     res.json({ success: true, message: "Player assigned to team successfully", data: team });
   } catch (err) {
@@ -829,7 +868,7 @@ exports.unassignPlayerFromTeam = async (req, res) => {
     }
 
     const normalizedIds = (Array.isArray(rawIds) ? rawIds : [rawIds]).map(id => id.toString());
-    
+
     // Validate ObjectIds
     const isValid = normalizedIds.every(id => mongoose.Types.ObjectId.isValid(id));
     if (!isValid) {
@@ -869,7 +908,7 @@ exports.unassignPlayerFromTeam = async (req, res) => {
 exports.updateTeam = async (req, res) => {
   try {
     const { teamId } = req.params;
-    const { teamName, coach, assistantCoach, ageGroup, captain, viceCaptain, players } = req.body;
+    const { teamName, coach, assistantCoach, ageGroup, captain, viceCaptain, players, teamType, teamFee, fee } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(teamId)) {
       return res.status(400).json({ success: false, message: "Invalid Team ID format" });
@@ -886,7 +925,7 @@ exports.updateTeam = async (req, res) => {
       if (!trimmedName) {
         return res.status(400).json({ success: false, message: "Team name cannot be empty" });
       }
-      
+
       const duplicateTeam = await Team.findOne({
         _id: { $ne: teamId },
         teamName: { $regex: new RegExp(`^${trimmedName}$`, "i") },
@@ -895,6 +934,25 @@ exports.updateTeam = async (req, res) => {
         return res.status(409).json({ success: false, message: "Another team already exists with this name" });
       }
       team.teamName = trimmedName;
+    }
+
+    // Update Team Type
+    if (teamType !== undefined) {
+      const upperType = teamType.toUpperCase();
+      if (!["INTERNAL", "EXTERNAL"].includes(upperType)) {
+        return res.status(400).json({ success: false, message: "Invalid teamType. Must be INTERNAL or EXTERNAL" });
+      }
+      team.teamType = upperType;
+    }
+
+    // Update Team Fee
+    const providedFee = fee !== undefined ? fee : teamFee;
+    if (providedFee !== undefined) {
+      const numFee = Number(providedFee);
+      if (isNaN(numFee) || numFee < 0) {
+        return res.status(400).json({ success: false, message: "Team fee must be a non-negative number" });
+      }
+      team.teamFee = numFee;
     }
 
     // Update Logo if a new file is uploaded
@@ -986,7 +1044,7 @@ exports.updateTeam = async (req, res) => {
       if (playerIds.length > 20) {
         return res.status(400).json({ success: false, message: "A team cannot have more than 20 players" });
       }
-      
+
       // Validate ObjectIds
       const isValid = playerIds.every(id => mongoose.Types.ObjectId.isValid(id));
       if (!isValid) {
@@ -1052,5 +1110,247 @@ exports.deleteTeam = async (req, res) => {
       success: false,
       message: err.message,
     });
+  }
+};
+
+// ✅ Add Team Temporary Player(s) (Single or Bulk)
+exports.createTeamTemporaryPlayers = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    const adminId = req.admin?._id || null;
+
+    if (!mongoose.Types.ObjectId.isValid(teamId)) {
+      return res.status(400).json({ success: false, message: "Invalid Team ID format" });
+    }
+
+    const team = await Team.findById(teamId);
+    if (!team) {
+      return res.status(404).json({ success: false, message: "Team not found" });
+    }
+
+    // Parse req.body or req.body.players if sent as JSON string (common in multipart form-data)
+    let parsedBody = req.body;
+    if (typeof req.body.players === "string") {
+      try {
+        parsedBody = JSON.parse(req.body.players);
+      } catch (e) {
+        // keep as string
+      }
+    } else if (typeof req.body === "string") {
+      try {
+        parsedBody = JSON.parse(req.body);
+      } catch (e) {
+        // keep as string
+      }
+    }
+
+    // Support single object, array in body, or body.players array
+    const rawList = Array.isArray(parsedBody)
+      ? parsedBody
+      : Array.isArray(parsedBody.players)
+        ? parsedBody.players
+        : [parsedBody];
+
+    if (!rawList.length || !rawList[0].name) {
+      return res.status(400).json({ success: false, message: "At least one temporary player object with a 'name' is required" });
+    }
+
+    // Process uploaded files array (req.files) or single file (req.file)
+    const uploadedFiles = Array.isArray(req.files)
+      ? req.files
+      : req.file
+        ? [req.file]
+        : [];
+
+    const newTemporaryPlayers = [];
+
+    rawList.forEach((p, index) => {
+      let imagePath = "";
+      if (uploadedFiles[index]) {
+        imagePath = `uploads/profiles/${uploadedFiles[index].filename}`;
+      } else if (uploadedFiles[0] && rawList.length === 1) {
+        imagePath = `uploads/profiles/${uploadedFiles[0].filename}`;
+      } else {
+        imagePath = (p.profileImage || req.body.profileImage || "").trim();
+      }
+
+      const tempPlayerDoc = {
+        name: (p.name || "").trim(),
+        jerseyNumber: p.jerseyNumber !== undefined ? (Number(p.jerseyNumber) || null) : null,
+        profileImage: imagePath,
+        position: (p.position || req.body.position || "").trim(),
+        statistics: {
+          appearances: Number(p.statistics?.appearances || p.appearances || 0),
+          goals: Number(p.statistics?.goals || p.goals || 0),
+          assists: Number(p.statistics?.assists || p.assists || 0),
+          cleanSheets: Number(p.statistics?.cleanSheets || p.cleanSheets || 0),
+          yellowCards: Number(p.statistics?.yellowCards || p.yellowCards || 0),
+          redCards: Number(p.statistics?.redCards || p.redCards || 0),
+          minutesPlayed: Number(p.statistics?.minutesPlayed || p.minutesPlayed || 0),
+        },
+        createdBy: adminId,
+      };
+
+      team.temporaryPlayers.push(tempPlayerDoc);
+      newTemporaryPlayers.push(team.temporaryPlayers[team.temporaryPlayers.length - 1]);
+    });
+
+    await team.save();
+
+    return res.status(201).json({
+      success: true,
+      message: `${newTemporaryPlayers.length} temporary player(s) added successfully`,
+      data: newTemporaryPlayers,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ✅ Get All Temporary Players for a Team
+exports.getTeamTemporaryPlayers = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(teamId)) {
+      return res.status(400).json({ success: false, message: "Invalid Team ID format" });
+    }
+
+    const team = await Team.findById(teamId).select("temporaryPlayers");
+    if (!team) {
+      return res.status(404).json({ success: false, message: "Team not found" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      count: (team.temporaryPlayers || []).length,
+      data: team.temporaryPlayers || [],
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ✅ Update Team Temporary Player
+exports.updateTeamTemporaryPlayer = async (req, res) => {
+  try {
+    const { teamId, tempPlayerId } = req.params;
+    const { name, jerseyNumber, profileImage, position, statistics } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(teamId) || !mongoose.Types.ObjectId.isValid(tempPlayerId)) {
+      return res.status(400).json({ success: false, message: "Invalid ID format" });
+    }
+
+    const team = await Team.findById(teamId);
+    if (!team) {
+      return res.status(404).json({ success: false, message: "Team not found" });
+    }
+
+    const tempPlayer = team.temporaryPlayers.id(tempPlayerId);
+    if (!tempPlayer) {
+      return res.status(404).json({ success: false, message: "Temporary player not found for this team" });
+    }
+
+    if (name !== undefined) {
+      const trimmed = name.trim();
+      if (!trimmed) {
+        return res.status(400).json({ success: false, message: "Name cannot be empty" });
+      }
+      tempPlayer.name = trimmed;
+    }
+
+    if (jerseyNumber !== undefined) {
+      tempPlayer.jerseyNumber = jerseyNumber !== null ? (Number(jerseyNumber) || null) : null;
+    }
+
+    if (req.file) {
+      if (tempPlayer.profileImage) {
+        const oldPath = path.join(__dirname, "..", tempPlayer.profileImage);
+        fs.unlink(oldPath, (err) => {
+          if (err && err.code !== "ENOENT") {
+            console.error("Failed to delete old temporary player profile image:", err);
+          }
+        });
+      }
+      tempPlayer.profileImage = `uploads/profiles/${req.file.filename}`;
+    } else if (profileImage !== undefined) {
+      const trimmed = profileImage ? profileImage.trim() : "";
+      if (tempPlayer.profileImage && tempPlayer.profileImage !== trimmed) {
+        const oldPath = path.join(__dirname, "..", tempPlayer.profileImage);
+        fs.unlink(oldPath, (err) => {
+          if (err && err.code !== "ENOENT") {
+            console.error("Failed to delete old temporary player profile image:", err);
+          }
+        });
+      }
+      tempPlayer.profileImage = trimmed;
+    }
+
+    if (position !== undefined) {
+      tempPlayer.position = position ? position.trim() : "";
+    }
+
+    if (statistics && typeof statistics === "object") {
+      tempPlayer.statistics = {
+        appearances: statistics.appearances !== undefined ? Number(statistics.appearances) : tempPlayer.statistics.appearances,
+        goals: statistics.goals !== undefined ? Number(statistics.goals) : tempPlayer.statistics.goals,
+        assists: statistics.assists !== undefined ? Number(statistics.assists) : tempPlayer.statistics.assists,
+        cleanSheets: statistics.cleanSheets !== undefined ? Number(statistics.cleanSheets) : tempPlayer.statistics.cleanSheets,
+        yellowCards: statistics.yellowCards !== undefined ? Number(statistics.yellowCards) : tempPlayer.statistics.yellowCards,
+        redCards: statistics.redCards !== undefined ? Number(statistics.redCards) : tempPlayer.statistics.redCards,
+        minutesPlayed: statistics.minutesPlayed !== undefined ? Number(statistics.minutesPlayed) : tempPlayer.statistics.minutesPlayed,
+      };
+    }
+
+    await team.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Temporary player updated successfully",
+      data: tempPlayer,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ✅ Delete Team Temporary Player
+exports.deleteTeamTemporaryPlayer = async (req, res) => {
+  try {
+    const { teamId, tempPlayerId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(teamId) || !mongoose.Types.ObjectId.isValid(tempPlayerId)) {
+      return res.status(400).json({ success: false, message: "Invalid ID format" });
+    }
+
+    const team = await Team.findById(teamId);
+    if (!team) {
+      return res.status(404).json({ success: false, message: "Team not found" });
+    }
+
+    const tempPlayer = team.temporaryPlayers.id(tempPlayerId);
+    if (!tempPlayer) {
+      return res.status(404).json({ success: false, message: "Temporary player not found for this team" });
+    }
+
+    // Unlink image file if exists
+    if (tempPlayer.profileImage) {
+      const oldPath = path.join(__dirname, "..", tempPlayer.profileImage);
+      fs.unlink(oldPath, (err) => {
+        if (err && err.code !== "ENOENT") {
+          console.error("Failed to delete temporary player profile image on deletion:", err);
+        }
+      });
+    }
+
+    team.temporaryPlayers.pull({ _id: tempPlayerId });
+    await team.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Temporary player deleted successfully",
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 };

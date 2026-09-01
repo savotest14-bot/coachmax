@@ -199,7 +199,7 @@ exports.getUsers = async (req, res) => {
 exports.updatePaymentStatus = async (req, res) => {
   try {
     const userId = req.params.userId;
-    const { paymentStatus } = req.body;
+    const { paymentStatus, classId } = req.body;
 
     if (!userId) {
       return res.status(400).json({
@@ -228,6 +228,21 @@ exports.updatePaymentStatus = async (req, res) => {
 
     user.paymentStatus = paymentStatus;
     await user.save();
+
+    // Generate class invoice(s) when status is updated to UNPAID
+    if (paymentStatus === "UNPAID") {
+      try {
+        if (classId) {
+          await generateClassInvoice({ userId: user._id, classId });
+        } else if (user.assignedClasses && user.assignedClasses.length > 0) {
+          for (const cid of user.assignedClasses) {
+            await generateClassInvoice({ userId: user._id, classId: cid });
+          }
+        }
+      } catch (invErr) {
+        console.error("Auto invoice generation error in updatePaymentStatus:", invErr.message);
+      }
+    }
 
     res.status(200).json({
       success: true,
@@ -3998,7 +4013,7 @@ exports.getTermEarningsReport = async (req, res) => {
 
       for (const player of classPlayers) {
         // Find invoice for this player & class
-        const playerInvoices = invoices.filter(inv => 
+        const playerInvoices = invoices.filter(inv =>
           inv.class.toString() === classDoc._id.toString() &&
           inv.players.some(pId => pId.toString() === player._id.toString())
         );
@@ -4012,7 +4027,7 @@ exports.getTermEarningsReport = async (req, res) => {
         if (playerInvoices.length > 0) {
           // Aggregate amounts for all active invoices for this player/class
           expectedAmount = playerInvoices.reduce((sum, inv) => sum + (inv.totalAmount || 0), 0);
-          
+
           const playerInvIds = playerInvoices.map(inv => inv._id.toString());
           const playerPayments = payments.filter(p => playerInvIds.includes(p.invoice.toString()));
 
@@ -4020,8 +4035,8 @@ exports.getTermEarningsReport = async (req, res) => {
             .filter(p => p.status === "APPROVED")
             .reduce((sum, p) => sum + (p.amount || 0), 0);
 
-          hasPendingPayment = playerPayments.some(p => p.status === "PENDING") || 
-                              playerInvoices.some(inv => inv.paymentStatus === "PAYMENT_PENDING");
+          hasPendingPayment = playerPayments.some(p => p.status === "PENDING") ||
+            playerInvoices.some(inv => inv.paymentStatus === "PAYMENT_PENDING");
           isInvoiceRejected = playerInvoices.some(inv => inv.paymentStatus === "REJECTED");
         } else {
           // Fallback to class price if no invoice exists
@@ -4070,7 +4085,7 @@ exports.getTermEarningsReport = async (req, res) => {
         if (!status || paymentStatus.toUpperCase() === status.toUpperCase()) {
           totalEnrolledPlayersSet.add(player._id.toString());
           playerReports.push(reportItem);
-          
+
           classExpected += expectedAmount;
           classPaid += paidAmount;
           classPending += pendingAmount;

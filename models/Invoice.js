@@ -56,13 +56,17 @@ const invoiceSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Class",
     },
+    team: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Team",
+    },
     dueDate: {
       type: Date,
       required: true,
     },
     type: {
       type: String,
-      enum: ["ACADEMY_FEE", "TOURNAMENT_FEE", "CAMP_FEE", "STORE_ORDER", "CUSTOM", "CLASS_FEE"],
+      enum: ["ACADEMY_FEE", "TOURNAMENT_FEE", "CAMP_FEE", "STORE_ORDER", "CUSTOM", "CLASS_FEE", "TEAM_FEE"],
       default: "CUSTOM",
     },
     description: {

@@ -48,6 +48,12 @@ exports.createInvoice = async (req, res) => {
     const {
       parentId,
       players = [],
+      playerId,
+      userId,
+      classId,
+      class: classRef,
+      teamId,
+      team: teamRef,
       items = [],
       dueDate,
       description = "",
@@ -72,10 +78,16 @@ exports.createInvoice = async (req, res) => {
       });
     }
 
+    // Normalize player IDs array from players / playerId / userId
+    const rawPlayerList = (Array.isArray(players) && players.length > 0)
+      ? players
+      : (playerId || userId ? [playerId || userId] : []);
+    const playerArray = Array.isArray(rawPlayerList) ? rawPlayerList : [rawPlayerList];
+
     // Validate players if provided
-    if (Array.isArray(players) && players.length > 0) {
-      const dbPlayers = await User.find({ _id: { $in: players } });
-      if (dbPlayers.length !== players.length) {
+    if (playerArray.length > 0) {
+      const dbPlayers = await User.find({ _id: { $in: playerArray } });
+      if (dbPlayers.length !== playerArray.length) {
         return res.status(400).json({
           success: false,
           message: "One or more player IDs are invalid",
@@ -110,11 +122,15 @@ exports.createInvoice = async (req, res) => {
     }
 
     const invoiceNumber = await generateInvoiceNumber();
+    const assignedClassId = classId || classRef || null;
+    const assignedTeamId = teamId || teamRef || null;
 
     const invoice = await Invoice.create({
       invoiceNumber,
       parent: parentId,
-      players: Array.isArray(players) ? players : [],
+      players: playerArray,
+      class: assignedClassId,
+      team: assignedTeamId,
       items: processedItems,
       subtotal: calculatedSubtotal,
       discount: numDiscount,
@@ -127,6 +143,14 @@ exports.createInvoice = async (req, res) => {
       paymentStatus: "UNPAID",
       status: "ACTIVE",
     });
+
+    // Automatically update player's paymentStatus to UNPAID when invoice is created
+    if (playerArray.length > 0) {
+      await User.updateMany(
+        { _id: { $in: playerArray } },
+        { $set: { paymentStatus: "UNPAID" } }
+      );
+    }
 
     // Create Notification for Parent
     try {
@@ -151,7 +175,8 @@ exports.createInvoice = async (req, res) => {
     const populatedInvoice = await Invoice.findById(invoice._id)
       .populate("parent", "fullName email phone")
       .populate("players", "firstName lastName fullName gender category")
-      .populate("class", "name price dayOfWeek startTime endTime venue location");
+      .populate("class", "name price dayOfWeek startTime endTime venue location")
+      .populate("team", "teamName teamType teamFee logo");
 
     return res.status(201).json({
       success: true,
@@ -229,6 +254,7 @@ exports.getAdminInvoices = async (req, res) => {
         .populate("parent", "fullName email phone emergencyContact")
         .populate("players", "firstName lastName fullName category")
         .populate("class", "name price dayOfWeek startTime endTime venue location")
+        .populate("team", "teamName teamType teamFee logo")
         .populate("verifiedBy", "name email")
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -264,6 +290,7 @@ exports.getAdminInvoiceById = async (req, res) => {
       .populate("parent", "fullName email phone emergencyContact relationship")
       .populate("players", "firstName lastName fullName gender category assignedClasses")
       .populate("class", "name price dayOfWeek startTime endTime venue location")
+      .populate("team", "teamName teamType teamFee logo")
       .populate("verifiedBy", "name email");
 
     if (!invoice) {
@@ -349,7 +376,8 @@ exports.updateInvoice = async (req, res) => {
     const updatedInvoice = await Invoice.findById(id)
       .populate("parent", "fullName email phone")
       .populate("players", "firstName lastName fullName")
-      .populate("class", "name price dayOfWeek startTime endTime venue location");
+      .populate("class", "name price dayOfWeek startTime endTime venue location")
+      .populate("team", "teamName teamType teamFee logo");
 
     return res.status(200).json({
       success: true,
@@ -418,6 +446,7 @@ exports.getParentInvoices = async (req, res) => {
       Invoice.find(query)
         .populate("players", "firstName lastName fullName category assignedClasses")
         .populate("class", "name price dayOfWeek startTime endTime venue location")
+        .populate("team", "teamName teamType teamFee logo")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(pageLimit),
@@ -462,7 +491,8 @@ exports.getParentInvoiceById = async (req, res) => {
 
     const invoice = await Invoice.findOne({ _id: id, parent: parentId })
       .populate("players", "firstName lastName fullName category assignedClasses")
-      .populate("class", "name price dayOfWeek startTime endTime venue location");
+      .populate("class", "name price dayOfWeek startTime endTime venue location")
+      .populate("team", "teamName teamType teamFee logo");
 
     if (!invoice) {
       return res.status(404).json({

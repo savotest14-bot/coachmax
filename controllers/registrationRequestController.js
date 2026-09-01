@@ -529,13 +529,15 @@ exports.assignClassesToPlayer = async (req, res) => {
     playerDoc.programs = updatedProgramIds;
     await playerDoc.save();
 
-    // ✅ Automatic Invoice Generation on Class Assignment
-    try {
-      for (const clsId of classIds) {
-        await generateClassInvoice({ userId: playerId, classId: clsId });
+    // ✅ Automatic Invoice Generation on Class Assignment (Skipped when paymentStatus is TRIAL)
+    if (paymentStatus !== "TRIAL") {
+      try {
+        for (const clsId of classIds) {
+          await generateClassInvoice({ userId: playerId, classId: clsId });
+        }
+      } catch (invErr) {
+        console.error("Auto invoice generation error in assignClassesToPlayer:", invErr.message);
       }
-    } catch (invErr) {
-      console.error("Auto invoice generation error in assignClassesToPlayer:", invErr.message);
     }
 
     // Send Parent Notification

@@ -31,6 +31,11 @@ const leagueSchema = new mongoose.Schema(
       enum: ["UPCOMING", "ACTIVE", "COMPLETED"],
       default: "ACTIVE",
     },
+    type: {
+      type: String,
+      enum: ["INTERNATIONAL", "NATIONAL", "STATE", "LOCAL", "OTHERS"],
+      default: "LOCAL",
+    },
   },
   { timestamps: true }
 );

@@ -212,8 +212,116 @@ const generateTransferInvoice = async ({ userId, fromClass, toClass }) => {
   return { invoice, priceDiff, invoiceGenerated: true };
 };
 
+/**
+ * Automatically generate an invoice for a player assigned to a team.
+ * Ensures duplicate invoices are NOT created if an active/non-cancelled invoice already exists
+ * for the same player and team.
+ *
+ * @param {Object} params
+ * @param {string} params.userId - Player's User ID
+ * @param {string} params.teamId - Assigned Team ID
+ * @returns {Promise<{ invoice: Object|null, isDuplicate: boolean, error?: string }>}
+ */
+const generateTeamInvoice = async ({ userId, teamId }) => {
+  if (!userId || !teamId) {
+    return { invoice: null, isDuplicate: false, error: "userId and teamId are required" };
+  }
+
+  // 1. Fetch Player
+  const player = await User.findById(userId);
+  if (!player) {
+    return { invoice: null, isDuplicate: false, error: "Player not found" };
+  }
+
+  if (!player.parentId) {
+    return { invoice: null, isDuplicate: false, error: "Player has no parent associated" };
+  }
+
+  // 2. Fetch Team
+  const Team = require("../models/Team");
+  const teamDoc = await Team.findById(teamId);
+  if (!teamDoc) {
+    return { invoice: null, isDuplicate: false, error: "Team not found" };
+  }
+
+  const teamFee = Number(teamDoc.teamFee || 0);
+  if (teamFee <= 0) {
+    // No fee configured for this team
+    return { invoice: null, isDuplicate: false };
+  }
+
+  // 3. Duplicate Invoice Check
+  const existingInvoice = await Invoice.findOne({
+    parent: player.parentId,
+    players: userId,
+    team: teamId,
+    type: "TEAM_FEE",
+    status: { $ne: "CANCELLED" },
+  });
+
+  if (existingInvoice) {
+    console.log(`[InvoiceService] Duplicate team invoice prevented for player ${userId} and team ${teamId}. Existing invoice: ${existingInvoice.invoiceNumber}`);
+    return { invoice: existingInvoice, isDuplicate: true };
+  }
+
+  // 4. Generate New Invoice
+  const invoiceNumber = await generateInvoiceNumber();
+
+  // Due date: 30 days from invoice generation
+  const dueDate = new Date();
+  dueDate.setDate(dueDate.getDate() + 30);
+
+  const invoice = await Invoice.create({
+    invoiceNumber,
+    parent: player.parentId,
+    players: [userId],
+    team: teamId,
+    items: [
+      {
+        title: teamDoc.teamName,
+        description: `Team fee for ${teamDoc.teamName} (${teamDoc.teamType || "INTERNAL"})`,
+        amount: teamFee,
+      },
+    ],
+    subtotal: teamFee,
+    discount: 0,
+    totalAmount: teamFee,
+    amount: teamFee,
+    dueDate,
+    type: "TEAM_FEE",
+    description: `Invoice for team assignment: ${teamDoc.teamName}`,
+    notes: "",
+    paymentStatus: "UNPAID",
+    status: "ACTIVE",
+  });
+
+  // 5. Send Notification to Parent
+  try {
+    await sendNotification({
+      recipientType: "PARENT",
+      parentId: player.parentId,
+      title: "New Team Fee Invoice Issued 📄",
+      message: `An invoice #${invoiceNumber} for team "${teamDoc.teamName}" ($${teamFee}) has been generated.`,
+      type: "INVOICE_CREATED",
+      data: {
+        parentId: String(player.parentId),
+        invoiceId: String(invoice._id),
+        invoiceNumber: String(invoiceNumber),
+        teamId: String(teamId),
+        totalAmount: String(teamFee),
+        dueDate: dueDate.toISOString(),
+      },
+    });
+  } catch (notifErr) {
+    console.error("[InvoiceService] Failed to send team invoice notification:", notifErr.message);
+  }
+
+  return { invoice, isDuplicate: false };
+};
+
 module.exports = {
   generateInvoiceNumber,
   generateClassInvoice,
   generateTransferInvoice,
+  generateTeamInvoice,
 };

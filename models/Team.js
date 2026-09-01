@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const teamTemporaryPlayerSchema = require("./TeamTemporaryPlayer");
 
 const teamSchema = new mongoose.Schema(
   {
@@ -36,6 +37,17 @@ const teamSchema = new mongoose.Schema(
         ref: "User",
       },
     ],
+    teamType: {
+      type: String,
+      enum: ["INTERNAL", "EXTERNAL"],
+      default: "INTERNAL",
+    },
+    teamFee: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    temporaryPlayers: [teamTemporaryPlayerSchema],
   },
   { timestamps: true }
 );
