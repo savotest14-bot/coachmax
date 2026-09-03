@@ -82,7 +82,7 @@ exports.getRegistrationRequests = async (req, res) => {
       .populate("parent", "fullName email phone address city")
       .populate(
         "player",
-        "firstName lastName fullName email phone dob gender profileImage rating paymentStatus term assignedClasses prefferedFoot isMedicalCondition medicalConditionDetails hasPendingRequest"
+        "firstName lastName fullName email phone dob gender profileImage rating classPaymentStatuses term assignedClasses prefferedFoot isMedicalCondition medicalConditionDetails hasPendingRequest"
       )
       .populate("category", "name")
       .populate("programs", "name")
@@ -517,7 +517,21 @@ exports.assignClassesToPlayer = async (req, res) => {
       );
     }
     playerDoc.term = derivedTermId;
-    playerDoc.paymentStatus = paymentStatus;
+    playerDoc.classPaymentStatuses = playerDoc.classPaymentStatuses || [];
+    for (const cid of classIds) {
+      const cidStr = cid.toString();
+      const existingEntry = playerDoc.classPaymentStatuses.find(
+        (cps) => cps.class && cps.class.toString() === cidStr
+      );
+      if (existingEntry) {
+        existingEntry.paymentStatus = paymentStatus;
+      } else {
+        playerDoc.classPaymentStatuses.push({
+          class: cid,
+          paymentStatus: paymentStatus,
+        });
+      }
+    }
     playerDoc.category = assignedCategory || playerDoc.category;
     playerDoc.categories = playerDoc.categories || [];
     if (assignedCategory) {

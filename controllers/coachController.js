@@ -1087,14 +1087,150 @@ exports.getPlayerDetails = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
+    // Calculate per-class payment statuses and summary metrics
+    const classPaymentStatuses = player.classPaymentStatuses || [];
+    const assignedClassesPaymentInfo = (player.assignedClasses || []).map((cls) => {
+      const classIdStr = cls._id ? cls._id.toString() : cls.toString();
+      const className = cls.name || "";
+      const paymentEntry = classPaymentStatuses.find((cps) => {
+        const cpsClassId = cps.class
+          ? cps.class._id
+            ? cps.class._id.toString()
+            : cps.class.toString()
+          : null;
+        return cpsClassId === classIdStr;
+      });
+      const status = paymentEntry ? paymentEntry.paymentStatus : "TRIAL";
+      return {
+        classId: cls._id || cls,
+        className,
+        paymentStatus: status,
+      };
+    });
+
+    const paidClasses = assignedClassesPaymentInfo.filter((item) => item.paymentStatus === "PAID");
+    const unpaidClasses = assignedClassesPaymentInfo.filter((item) => item.paymentStatus === "UNPAID");
+    const trialClasses = assignedClassesPaymentInfo.filter((item) => item.paymentStatus === "TRIAL");
+    const overdueClasses = assignedClassesPaymentInfo.filter((item) => item.paymentStatus === "OVER_DUE");
+
+    const classPaymentSummary = {
+      totalAssignedClasses: assignedClassesPaymentInfo.length,
+      paidClassesCount: paidClasses.length,
+      unpaidClassesCount: unpaidClasses.length,
+      trialClassesCount: trialClasses.length,
+      overdueClassesCount: overdueClasses.length,
+      isAllClassesPaid:
+        assignedClassesPaymentInfo.length > 0 &&
+        paidClasses.length === assignedClassesPaymentInfo.length,
+      paidClassNames: paidClasses.map((c) => c.className),
+      unpaidClassNames: unpaidClasses.map((c) => c.className),
+      trialClassNames: trialClasses.map((c) => c.className),
+      overdueClassNames: overdueClasses.map((c) => c.className),
+      assignedClassesWithPaymentStatus: assignedClassesPaymentInfo,
+    };
+
+    // Fetch assigned teams and team payment statuses
+    const assignedTeams = await Team.find({ "players.player": playerId })
+      .select("teamName teamFee logo players ageGroup")
+      .lean();
+
+    const assignedTeamsPaymentInfo = assignedTeams.map((team) => {
+      const pEntry = (team.players || []).find(
+        (p) => p.player && p.player.toString() === playerId.toString()
+      );
+      return {
+        teamId: team._id,
+        teamName: team.teamName,
+        teamFee: team.teamFee || 0,
+        paymentStatus: pEntry ? pEntry.paymentStatus : "UNPAID",
+      };
+    });
+
+    const paidTeams = assignedTeamsPaymentInfo.filter((item) => item.paymentStatus === "PAID");
+    const unpaidTeams = assignedTeamsPaymentInfo.filter((item) => item.paymentStatus === "UNPAID");
+    const trialTeams = assignedTeamsPaymentInfo.filter((item) => item.paymentStatus === "TRIAL");
+    const overdueTeams = assignedTeamsPaymentInfo.filter((item) => item.paymentStatus === "OVER_DUE");
+
+    const teamPaymentSummary = {
+      totalAssignedTeams: assignedTeamsPaymentInfo.length,
+      paidTeamsCount: paidTeams.length,
+      unpaidTeamsCount: unpaidTeams.length,
+      trialTeamsCount: trialTeams.length,
+      overdueTeamsCount: overdueTeams.length,
+      isAllTeamsPaid:
+        assignedTeamsPaymentInfo.length > 0 &&
+        paidTeams.length === assignedTeamsPaymentInfo.length,
+      paidTeamNames: paidTeams.map((t) => t.teamName),
+      unpaidTeamNames: unpaidTeams.map((t) => t.teamName),
+      trialTeamNames: trialTeams.map((t) => t.teamName),
+      overdueTeamNames: overdueTeams.map((t) => t.teamName),
+      assignedTeamsWithPaymentStatus: assignedTeamsPaymentInfo,
+    };
+
+    // Fetch team attendance records for this player
+    const teamAttendanceRecords = await Attendance.find({
+      team: { $exists: true, $ne: null },
+      "records.player": playerId,
+    })
+      .populate("team", "teamName ageGroup startTime endTime")
+      .sort({ sessionDate: -1 })
+      .lean();
+
+    const perDayTeamAttendance = teamAttendanceRecords.map((att) => {
+      const playerRecord = att.records.find(
+        (r) => r.player && r.player.toString() === playerId.toString()
+      );
+      return {
+        attendanceId: att._id,
+        team: att.team,
+        teamName: att.team?.teamName || "",
+        sessionDate: att.sessionDate,
+        status: playerRecord?.status || "NOT_MARKED",
+        comment: playerRecord?.comment || "",
+        remarks: playerRecord?.remarks || "",
+        reason: playerRecord?.reason || "",
+        markedByParent: playerRecord?.markedByParent || false,
+        lateArrival: playerRecord?.lateArrival || false,
+        attendanceType: playerRecord?.attendanceType || "REGULAR",
+      };
+    });
+
+    const totalTeamSessions = perDayTeamAttendance.length;
+    const presentTeamCount = perDayTeamAttendance.filter((a) => a.status === "PRESENT").length;
+    const absentTeamCount = perDayTeamAttendance.filter((a) => a.status === "ABSENT").length;
+    const lateTeamCount = perDayTeamAttendance.filter((a) => a.status === "LATE").length;
+    const trialTeamCount = perDayTeamAttendance.filter((a) => a.status === "TRIAL").length;
+    const attendedTeamCount = presentTeamCount + lateTeamCount;
+
+    const overallTeamAttendancePercentage =
+      totalTeamSessions > 0
+        ? Number(((attendedTeamCount / totalTeamSessions) * 100).toFixed(2))
+        : 0;
+
+    const overallTeamAttendance = {
+      totalSessions: totalTeamSessions,
+      presentCount: presentTeamCount,
+      absentCount: absentTeamCount,
+      lateCount: lateTeamCount,
+      trialCount: trialTeamCount,
+      attendedCount: attendedTeamCount,
+      percentage: overallTeamAttendancePercentage,
+    };
+
     return res.status(200).json({
       success: true,
       message: "Player details fetched successfully.",
       data: {
         player,
         parent: player.parentId || null,
+        assignedClassesPaymentInfo,
+        classPaymentSummary,
+        assignedTeamsPaymentInfo,
+        teamPaymentSummary,
         perDayAttendance,
         overallAttendance,
+        perDayTeamAttendance,
+        overallTeamAttendance,
         coachNotes,
       },
     });

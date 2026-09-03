@@ -401,3 +401,355 @@ exports.getAttendanceHistory = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+
+/**
+ * POST /api/coach/team-attendance/:teamId
+ * Mark attendance for an entire team session.
+ */
+exports.markTeamAttendance = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    const { sessionDate, records } = req.body;
+    const coachId = req.admin ? req.admin._id : null;
+
+    if (!sessionDate || !records || !Array.isArray(records) || records.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "sessionDate and records array are required",
+      });
+    }
+
+    const date = new Date(sessionDate);
+    date.setUTCHours(0, 0, 0, 0);
+
+    let attendance = await Attendance.findOne({
+      team: teamId,
+      sessionDate: date,
+    });
+
+    if (attendance) {
+      for (const newRecord of records) {
+        const existingRecord = attendance.records.find(
+          (r) => r.player.toString() === newRecord.player
+        );
+
+        const previousStatus = existingRecord ? existingRecord.status : "NONE";
+        const previousComment = existingRecord ? (existingRecord.comment || "") : "";
+        const newStatus = newRecord.status || "ABSENT";
+        const newComment = newRecord.comment || "";
+
+        if (previousStatus !== newStatus || previousComment !== newComment) {
+          await AttendanceHistory.create({
+            attendanceId: attendance._id,
+            teamId,
+            sessionDate: date,
+            playerId: newRecord.player,
+            previousStatus,
+            newStatus,
+            previousComment,
+            newComment,
+            modifiedBy: coachId,
+            modificationReason: newRecord.reason || "",
+          });
+        }
+      }
+
+      attendance.records = records.map((r) => ({
+        player: r.player,
+        status: r.status || "ABSENT",
+        comment: r.comment || "",
+        remarks: r.remarks || "",
+        reason: r.reason || "",
+        attendanceType: r.attendanceType || "REGULAR",
+        markedByParent: false,
+        lateArrival: r.status === "LATE",
+      }));
+
+      attendance.markedBy = coachId;
+      await attendance.save();
+
+      if (coachId) {
+        await AuditLog.create({
+          user: coachId,
+          userRole: req.admin ? req.admin.role : "COACH",
+          action: "ATTENDANCE_UPDATED",
+          entityType: "Attendance",
+          entityId: attendance._id,
+          ipAddress: req.ip || "",
+          deviceInfo: req.headers["user-agent"] || "",
+          description: `Team attendance updated for team ${teamId} on ${date.toISOString().split("T")[0]}`,
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: "Team attendance updated successfully",
+        data: attendance,
+      });
+    }
+
+    attendance = await Attendance.create({
+      team: teamId,
+      sessionDate: date,
+      records: records.map((r) => ({
+        player: r.player,
+        status: r.status || "ABSENT",
+        comment: r.comment || "",
+        remarks: r.remarks || "",
+        reason: r.reason || "",
+        attendanceType: r.attendanceType || "REGULAR",
+        markedByParent: false,
+        lateArrival: r.status === "LATE",
+      })),
+      markedBy: coachId,
+    });
+
+    for (const record of records) {
+      await AttendanceHistory.create({
+        attendanceId: attendance._id,
+        teamId,
+        sessionDate: date,
+        playerId: record.player,
+        previousStatus: "NONE",
+        newStatus: record.status || "ABSENT",
+        previousComment: "",
+        newComment: record.comment || "",
+        modifiedBy: coachId,
+      });
+    }
+
+    if (coachId) {
+      await AuditLog.create({
+        user: coachId,
+        userRole: req.admin ? req.admin.role : "COACH",
+        action: "ATTENDANCE_CREATED",
+        entityType: "Attendance",
+        entityId: attendance._id,
+        ipAddress: req.ip || "",
+        deviceInfo: req.headers["user-agent"] || "",
+        description: `Team attendance marked for team ${teamId} on ${date.toISOString().split("T")[0]}`,
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: "Team attendance marked successfully",
+      data: attendance,
+    });
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: "Attendance already exists for this team session",
+      });
+    }
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * POST /api/coach/team-attendance/:teamId/single
+ * Mark or update attendance for a single player on a team.
+ */
+exports.markSingleTeamAttendance = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    const { sessionDate, playerId, status, comment } = req.body;
+    const coachId = req.admin ? req.admin._id : null;
+
+    if (!sessionDate || !playerId || !status) {
+      return res.status(400).json({
+        success: false,
+        message: "sessionDate, playerId, and status are required",
+      });
+    }
+
+    const validStatuses = ["PRESENT", "ABSENT", "LATE", "TRIAL"];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Must be one of: ${validStatuses.join(", ")}`,
+      });
+    }
+
+    const date = new Date(sessionDate);
+    date.setUTCHours(0, 0, 0, 0);
+
+    let attendance = await Attendance.findOne({
+      team: teamId,
+      sessionDate: date,
+    });
+
+    if (!attendance) {
+      attendance = await Attendance.create({
+        team: teamId,
+        sessionDate: date,
+        records: [],
+        markedBy: coachId,
+      });
+    }
+
+    const existingRecord = attendance.records.find(
+      (r) => r.player.toString() === playerId
+    );
+
+    const previousStatus = existingRecord ? existingRecord.status : "NONE";
+    const previousComment = existingRecord ? (existingRecord.comment || "") : "";
+
+    if (previousStatus !== status || previousComment !== (comment || "")) {
+      await AttendanceHistory.create({
+        attendanceId: attendance._id,
+        teamId,
+        sessionDate: date,
+        playerId,
+        previousStatus,
+        newStatus: status,
+        previousComment,
+        newComment: comment || "",
+        modifiedBy: coachId,
+      });
+    }
+
+    if (existingRecord) {
+      existingRecord.status = status;
+      existingRecord.comment = comment || "";
+      existingRecord.lateArrival = status === "LATE";
+    } else {
+      attendance.records.push({
+        player: playerId,
+        status,
+        comment: comment || "",
+        lateArrival: status === "LATE",
+      });
+    }
+
+    attendance.markedBy = coachId;
+    await attendance.save();
+
+    res.json({
+      success: true,
+      message: "Team attendance updated successfully",
+      data: { teamId, sessionDate: date, playerId, status, comment: comment || "" },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * GET /api/coach/team-attendance/:teamId
+ */
+exports.getAttendanceByTeam = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    let { page = 1, limit = 50 } = req.query;
+
+    page = Number(page);
+    limit = Number(limit);
+
+    const total = await Attendance.countDocuments({ team: teamId });
+
+    const data = await Attendance.find({ team: teamId })
+      .select("sessionDate records markedBy createdAt updatedAt")
+      .populate({
+        path: "records.player",
+        select: "fullName profileImage isMedicalCondition",
+      })
+      .populate("markedBy", "name")
+      .sort({ sessionDate: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit);
+
+    res.json({
+      success: true,
+      totalSessions: total,
+      page,
+      limit,
+      data,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * GET /api/coach/team-attendance/:teamId/date
+ */
+exports.getAttendanceByTeamDate = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    const { date } = req.query;
+
+    if (!date) {
+      return res.status(400).json({ success: false, message: "date query parameter is required" });
+    }
+
+    const sessionDate = new Date(date);
+    sessionDate.setUTCHours(0, 0, 0, 0);
+
+    const attendance = await Attendance.findOne({
+      team: teamId,
+      sessionDate,
+    }).populate({
+      path: "records.player",
+      select: "fullName profileImage email phone isMedicalCondition medicalConditionDetails",
+    }).populate("markedBy", "name");
+
+    if (!attendance) {
+      return res.json({
+        success: true,
+        data: null,
+        message: "No attendance record found for this date",
+      });
+    }
+
+    res.json({
+      success: true,
+      data: attendance,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * GET /api/admin/team-attendance-history/:teamId
+ */
+exports.getTeamAttendanceHistory = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    let { page = 1, limit = 50, playerId, sessionDate } = req.query;
+
+    page = Number(page);
+    limit = Number(limit);
+
+    const query = { teamId };
+
+    if (playerId) query.playerId = playerId;
+    if (sessionDate) {
+      const date = new Date(sessionDate);
+      date.setUTCHours(0, 0, 0, 0);
+      query.sessionDate = date;
+    }
+
+    const total = await AttendanceHistory.countDocuments(query);
+
+    const history = await AttendanceHistory.find(query)
+      .populate("playerId", "fullName")
+      .populate("modifiedBy", "name role")
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit);
+
+    res.json({
+      success: true,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      data: history,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};

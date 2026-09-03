@@ -139,7 +139,23 @@ exports.getAllLeagues = async (req, res) => {
 // ✅ Create Team (Admin only)
 exports.createTeam = async (req, res) => {
   try {
-    const { teamName, coach, assistantCoach, ageGroup, teamType, teamFee, fee } = req.body;
+    const {
+      teamName,
+      coach,
+      assistantCoach,
+      ageGroup,
+      teamType,
+      teamFee,
+      fee,
+      term,
+      dayOfWeek,
+      startTime,
+      endTime,
+      venue,
+      location,
+      scheduleType,
+      schedule,
+    } = req.body;
 
     if (!teamName) {
       return res.status(400).json({
@@ -178,6 +194,14 @@ exports.createTeam = async (req, res) => {
       ageGroup: ageGroup || "",
       teamType: parsedType,
       teamFee: parsedFee,
+      term: term || null,
+      dayOfWeek: dayOfWeek || "",
+      startTime: startTime || "",
+      endTime: endTime || "",
+      venue: venue || "",
+      location: location || venue || "",
+      scheduleType: scheduleType || "SINGLE_DAY",
+      schedule: schedule || [],
     });
 
     return res.status(201).json({
@@ -214,13 +238,18 @@ exports.getAllTeams = async (req, res) => {
       filter.teamType = req.query.teamType.toUpperCase();
     }
 
+    if (req.query.termId || req.query.term) {
+      filter.term = req.query.termId || req.query.term;
+    }
+
     const [teams, total] = await Promise.all([
       Team.find(filter)
+        .populate("term", "name year startDate endDate")
         .populate("coach", "name email profileImage")
         .populate("assistantCoach", "name email profileImage")
         .populate("captain", "name email profileImage")
         .populate("viceCaptain", "name email profileImage")
-        .populate("players", "name email profileImage")
+        .populate("players.player", "fullName email profileImage")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit),
@@ -281,18 +310,29 @@ exports.assignPlayerToTeam = async (req, res) => {
       return res.status(404).json({ success: false, message: "One or more players not found" });
     }
 
-    // Limit to 20 players total
-    const currentPlayers = (team.players || []).map(p => p.toString());
-    const unionPlayers = new Set([...currentPlayers, ...uniqueIds]);
+    const existingPlayerMap = new Map();
+    (team.players || []).forEach((p) => {
+      const pid = p.player ? p.player.toString() : p.toString();
+      existingPlayerMap.set(pid, p.paymentStatus || "TRIAL");
+    });
 
-    if (unionPlayers.size > 20) {
+    uniqueIds.forEach((pid) => {
+      if (!existingPlayerMap.has(pid)) {
+        existingPlayerMap.set(pid, "TRIAL");
+      }
+    });
+
+    if (existingPlayerMap.size > 20) {
       return res.status(400).json({
         success: false,
-        message: `Cannot assign players. A team cannot exceed 20 players. Currently has ${currentPlayers.length} players.`,
+        message: `Cannot assign players. A team cannot exceed 20 players. Currently has ${existingPlayerMap.size} players.`,
       });
     }
 
-    team.players = Array.from(unionPlayers);
+    team.players = Array.from(existingPlayerMap.entries()).map(([pId, status]) => ({
+      player: pId,
+      paymentStatus: status,
+    }));
     await team.save();
 
     // Automatically generate team fee invoice for assigned players if team fee > 0
@@ -320,8 +360,9 @@ exports.getAvailablePlayers = async (req, res) => {
     const playerTeamMap = {};
     teams.forEach((team) => {
       if (team.players && Array.isArray(team.players)) {
-        team.players.forEach((player) => {
-          playerTeamMap[player.toString()] = {
+        team.players.forEach((p) => {
+          const pid = p.player ? p.player.toString() : p.toString();
+          playerTeamMap[pid] = {
             _id: team._id,
             teamName: team.teamName,
           };
@@ -837,16 +878,25 @@ exports.getTeamById = async (req, res) => {
       .populate("assistantCoach", "name email mobile profileImage")
       .populate("captain", "firstName lastName fullName email profileImage jerseyNumber")
       .populate("viceCaptain", "firstName lastName fullName email profileImage jerseyNumber")
-      .populate("players", "firstName lastName fullName email phone dob gender profileImage jerseyNumber statistics rating paymentStatus");
+      .populate("players.player", "firstName lastName fullName email phone dob gender profileImage jerseyNumber statistics rating classPaymentStatuses teamPaymentStatuses");
 
     if (!team) {
       return res.status(404).json({ success: false, message: "Team not found" });
     }
 
+    const teamObj = team.toObject ? team.toObject() : { ...team };
+    if (teamObj.players && Array.isArray(teamObj.players)) {
+      teamObj.players = teamObj.players.map((item) => {
+        const pObj = item.player && typeof item.player === "object" ? { ...item.player } : { _id: item.player };
+        pObj.paymentStatus = item.paymentStatus || "TRIAL";
+        return pObj;
+      });
+    }
+
     return res.status(200).json({
       success: true,
       message: "Team details fetched successfully",
-      data: team,
+      data: teamObj,
     });
   } catch (err) {
     return res.status(500).json({
@@ -890,7 +940,10 @@ exports.unassignPlayerFromTeam = async (req, res) => {
 
     // Filter out the players
     const originalLength = team.players.length;
-    team.players = team.players.filter(p => !normalizedIds.includes(p.toString()));
+    team.players = team.players.filter((p) => {
+      const pid = p.player ? p.player.toString() : p.toString();
+      return !normalizedIds.includes(pid);
+    });
 
     await team.save();
 
@@ -908,7 +961,26 @@ exports.unassignPlayerFromTeam = async (req, res) => {
 exports.updateTeam = async (req, res) => {
   try {
     const { teamId } = req.params;
-    const { teamName, coach, assistantCoach, ageGroup, captain, viceCaptain, players, teamType, teamFee, fee } = req.body;
+    const {
+      teamName,
+      coach,
+      assistantCoach,
+      ageGroup,
+      captain,
+      viceCaptain,
+      players,
+      teamType,
+      teamFee,
+      fee,
+      term,
+      dayOfWeek,
+      startTime,
+      endTime,
+      venue,
+      location,
+      scheduleType,
+      schedule,
+    } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(teamId)) {
       return res.status(400).json({ success: false, message: "Invalid Team ID format" });
@@ -918,6 +990,15 @@ exports.updateTeam = async (req, res) => {
     if (!team) {
       return res.status(404).json({ success: false, message: "Team not found" });
     }
+
+    if (term !== undefined) team.term = term || null;
+    if (dayOfWeek !== undefined) team.dayOfWeek = dayOfWeek;
+    if (startTime !== undefined) team.startTime = startTime;
+    if (endTime !== undefined) team.endTime = endTime;
+    if (venue !== undefined) team.venue = venue;
+    if (location !== undefined) team.location = location;
+    if (scheduleType !== undefined) team.scheduleType = scheduleType;
+    if (schedule !== undefined) team.schedule = schedule;
 
     // Update Team Name and check duplicate
     if (teamName !== undefined) {
@@ -1057,7 +1138,16 @@ exports.updateTeam = async (req, res) => {
         return res.status(400).json({ success: false, message: "One or more players in the array do not exist" });
       }
 
-      team.players = playerIds;
+      const existingMap = new Map();
+      (team.players || []).forEach((p) => {
+        const pid = p.player ? p.player.toString() : p.toString();
+        existingMap.set(pid, p.paymentStatus || "TRIAL");
+      });
+
+      team.players = playerIds.map((id) => ({
+        player: id,
+        paymentStatus: existingMap.get(id.toString()) || "TRIAL",
+      }));
     }
 
     await team.save();

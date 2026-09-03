@@ -286,7 +286,7 @@ exports.register = async (req, res) => {
 
             comments,
 
-            paymentStatus: "TRIAL",
+            classPaymentStatuses: [],
 
             categories: categoryIds,
             programs: programIds,
@@ -680,7 +680,7 @@ exports.addChild = async (req, res) => {
       // Player is assigned term by admin after approval
       term: null,
 
-      paymentStatus: "TRIAL",
+      classPaymentStatuses: [],
       rating: 1,
 
       profileImage,
@@ -1476,7 +1476,7 @@ exports.getPlayerProfile = async (req, res) => {
 
         nationality: player.nationality,
 
-        paymentStatus: player.paymentStatus,
+        classPaymentStatuses: player.classPaymentStatuses || [],
         rating: player.rating,
 
         attendancePercentage: player.attendancePercentage,

@@ -5,7 +5,11 @@ const attendanceSchema = new mongoose.Schema(
     class: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Class",
-      required: true,
+    },
+
+    team: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Team",
     },
 
     sessionDate: {
@@ -67,7 +71,8 @@ const attendanceSchema = new mongoose.Schema(
 );
 
 // 🔥 prevent duplicate attendance per session/date
-attendanceSchema.index({ class: 1, sessionDate: 1 }, { unique: true });
+attendanceSchema.index({ class: 1, sessionDate: 1 }, { unique: true, sparse: true });
+attendanceSchema.index({ team: 1, sessionDate: 1 }, { unique: true, sparse: true });
 
 // prevent duplicate attendance per training session
 attendanceSchema.index({ trainingSessionId: 1 }, { unique: true, sparse: true });

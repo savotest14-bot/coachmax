@@ -21,6 +21,10 @@ const {
   markSingleAttendance,
   getAttendanceByClass,
   getAttendanceByDate,
+  markTeamAttendance,
+  markSingleTeamAttendance,
+  getAttendanceByTeam,
+  getAttendanceByTeamDate,
 } = require("../controllers/coachAttendanceController");
 
 const {
@@ -76,6 +80,12 @@ router.post("/attendance/:classId", auth, isCoach, markAttendance);
 router.post("/attendance/:classId/single", auth, isCoach, markSingleAttendance);
 router.get("/attendance/:classId", auth, isCoach, getAttendanceByClass);
 router.get("/attendance/:classId/date", auth, isCoach, getAttendanceByDate);
+
+// ─── Team Attendance ──────────────────────────
+router.post("/team-attendance/:teamId", auth, isCoach, markTeamAttendance);
+router.post("/team-attendance/:teamId/single", auth, isCoach, markSingleTeamAttendance);
+router.get("/team-attendance/:teamId", auth, isCoach, getAttendanceByTeam);
+router.get("/team-attendance/:teamId/date", auth, isCoach, getAttendanceByTeamDate);
 
 // ─── Feature 3 & 7: Player Profile / Quick Access ─
 router.get("/player/:playerId/profile", auth, isCoach, getPlayerProfile);

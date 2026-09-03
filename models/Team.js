@@ -33,8 +33,15 @@ const teamSchema = new mongoose.Schema(
     },
     players: [
       {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "User",
+        player: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+        },
+        paymentStatus: {
+          type: String,
+          enum: ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "EXTRA", "SUBSTITUTE"],
+          default: "UNPAID",
+        },
       },
     ],
     teamType: {
@@ -47,6 +54,29 @@ const teamSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    term: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Term",
+    },
+    dayOfWeek: {
+      type: String,
+    },
+    startTime: String,
+    endTime: String,
+    venue: String,
+    location: String,
+    scheduleType: {
+      type: String,
+      enum: ["SINGLE_DAY", "WEEKDAYS", "CUSTOM"],
+      default: "SINGLE_DAY",
+    },
+    schedule: [
+      {
+        dayOfWeek: { type: String },
+        startTime: { type: String },
+        endTime: { type: String },
+      },
+    ],
     temporaryPlayers: [teamTemporaryPlayerSchema],
   },
   { timestamps: true }

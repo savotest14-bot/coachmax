@@ -39,11 +39,19 @@ const userSchema = new mongoose.Schema(
       type: Number,
       default: null,
     },
-    paymentStatus: {
-      type: String,
-      enum: ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "OTHERS"],
-      default: "TRIAL",
-    },
+    classPaymentStatuses: [
+      {
+        class: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Class",
+        },
+        paymentStatus: {
+          type: String,
+          enum: ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "EXTRA", "SUBSTITUTE"],
+          default: "TRIAL",
+        },
+      },
+    ],
 
     category: {
       type: mongoose.Schema.Types.ObjectId,

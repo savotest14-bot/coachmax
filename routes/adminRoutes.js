@@ -35,6 +35,9 @@ const {
   markAttendance,
   getAttendanceByClass,
   getClassSessions,
+  getTeamSessions,
+  getTeamFullTable,
+  exportTeamCSV,
   createCoach,
   getAllCoaches,
   getCoachById,
@@ -56,6 +59,15 @@ const {
   toggleCoachActiveStatus,
   getTermEarningsReport,
 } = require("../controllers/adminAuthController");
+
+const {
+  getAttendanceHistory,
+  markTeamAttendance,
+  markSingleTeamAttendance,
+  getAttendanceByTeam,
+  getAttendanceByTeamDate,
+  getTeamAttendanceHistory,
+} = require("../controllers/coachAttendanceController");
 
 const {
   getAdminNotifications,
@@ -255,6 +267,15 @@ router.get("/getClassPlayers/:classId", auth, isAdmin, getClassPlayers);
 router.get("/getClassFullTable", auth, getClassFullTable);
 router.get("/getClassFiltersWithTimeSlots", getClassFiltersWithTimeSlots);
 
+// Team roster and attendance rolls
+router.post("/markTeamAttendance/:teamId", auth, markTeamAttendance);
+router.post("/markSingleTeamAttendance/:teamId", auth, markSingleTeamAttendance);
+router.get("/getAttendanceByTeam/:teamId", auth, getAttendanceByTeam);
+router.get("/getAttendanceByTeamDate/:teamId", auth, getAttendanceByTeamDate);
+router.get("/getTeamSessions/:teamId", auth, getTeamSessions);
+router.get("/getTeamFullTable", auth, getTeamFullTable);
+router.get("/exportTeamCSV", exportTeamCSV);
+
 // Coaches CRUD
 router.post("/createCoach", auth, isAdmin, createCoach);
 router.get("/getAllCoaches", auth, isAdmin, getAllCoaches);
@@ -376,9 +397,7 @@ const {
   getTemporaryPlayers: getAdminTemporaryPlayers,
 } = require("../controllers/temporaryPlayerController");
 
-const {
-  getAttendanceHistory,
-} = require("../controllers/coachAttendanceController");
+
 
 const {
   getAuditLogs,
@@ -397,6 +416,7 @@ router.delete("/temporary-players/:id", auth, isAdmin, deleteTemporaryPlayer);
 
 // ✅ Attendance History Audit (Admin only)
 router.get("/attendance-history/:classId", auth, isAdmin, getAttendanceHistory);
+router.get("/team-attendance-history/:teamId", auth, isAdmin, getTeamAttendanceHistory);
 
 // ✅ Audit Logs (Admin only)
 router.get("/audit-logs", auth, isAdmin, getAuditLogs);

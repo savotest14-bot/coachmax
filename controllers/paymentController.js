@@ -602,11 +602,45 @@ exports.approvePayment = async (req, res) => {
 
     // 3. Update Players Payment Status if players exist on invoice
     if (Array.isArray(invoice.players) && invoice.players.length > 0) {
-      await User.updateMany(
-        { _id: { $in: invoice.players } },
-        { paymentStatus: "PAID" },
-        { session }
-      );
+      if (invoice.class) {
+        const invoiceClassIdStr = invoice.class.toString();
+        const playersToUpdate = await User.find({ _id: { $in: invoice.players } }).session(session);
+        for (const p of playersToUpdate) {
+          p.classPaymentStatuses = p.classPaymentStatuses || [];
+          const existingEntry = p.classPaymentStatuses.find(
+            (cps) => cps.class && cps.class.toString() === invoiceClassIdStr
+          );
+          if (existingEntry) {
+            existingEntry.paymentStatus = "PAID";
+          } else {
+            p.classPaymentStatuses.push({
+              class: invoice.class,
+              paymentStatus: "PAID",
+            });
+          }
+          await p.save({ session });
+        }
+      }
+
+      if (invoice.team && Array.isArray(invoice.players) && invoice.players.length > 0) {
+        const Team = require("../models/Team");
+        const teamDoc = await Team.findById(invoice.team).session(session);
+        if (teamDoc && teamDoc.players) {
+          let modified = false;
+          invoice.players.forEach((pId) => {
+            const pidStr = pId.toString();
+            const pEntry = teamDoc.players.find((item) => {
+              const itemPid = item.player ? item.player.toString() : item.toString();
+              return itemPid === pidStr;
+            });
+            if (pEntry) {
+              pEntry.paymentStatus = "PAID";
+              modified = true;
+            }
+          });
+          if (modified) await teamDoc.save({ session });
+        }
+      }
     }
 
     // 4. Update Store Order Payment Status if this is a Store Order invoice

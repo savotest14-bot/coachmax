@@ -178,7 +178,7 @@ exports.createTemporaryPlayer = async (req, res) => {
           hasPendingRequest: true,
           temporaryClass: classId,
           temporarySessionDate: parsedSessionDate,
-          paymentStatus: "TRIAL",
+          classPaymentStatuses: [],
           assignedClasses: [],
         },
       ],
@@ -395,7 +395,7 @@ exports.getTemporaryPlayers = async (req, res) => {
       .populate("parent", "fullName email phone address city")
       .populate(
         "player",
-        "firstName lastName fullName email phone dob gender profileImage rating paymentStatus term assignedClasses prefferedFoot isMedicalCondition medicalConditionDetails hasPendingRequest"
+        "firstName lastName fullName email phone dob gender profileImage rating classPaymentStatuses term assignedClasses prefferedFoot isMedicalCondition medicalConditionDetails hasPendingRequest"
       )
       .populate("category", "name")
       .populate("programs", "name")

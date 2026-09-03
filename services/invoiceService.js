@@ -104,6 +104,21 @@ const generateClassInvoice = async ({ userId, classId }) => {
     status: "ACTIVE",
   });
 
+  // Update player classPaymentStatuses for this class to UNPAID
+  player.classPaymentStatuses = player.classPaymentStatuses || [];
+  const existingCPS = player.classPaymentStatuses.find(
+    (cps) => cps.class && cps.class.toString() === classId.toString()
+  );
+  if (existingCPS) {
+    existingCPS.paymentStatus = "UNPAID";
+  } else {
+    player.classPaymentStatuses.push({
+      class: classId,
+      paymentStatus: "UNPAID",
+    });
+  }
+  await player.save();
+
   // 5. Send Notification to Parent
   try {
     await sendNotification({
@@ -294,6 +309,18 @@ const generateTeamInvoice = async ({ userId, teamId }) => {
     paymentStatus: "UNPAID",
     status: "ACTIVE",
   });
+
+  // Update player paymentStatus on Team schema as well
+  if (teamDoc.players && Array.isArray(teamDoc.players)) {
+    const pEntry = teamDoc.players.find((item) => {
+      const pid = item.player ? item.player.toString() : item.toString();
+      return pid === userId.toString();
+    });
+    if (pEntry) {
+      pEntry.paymentStatus = "UNPAID";
+      await teamDoc.save();
+    }
+  }
 
   // 5. Send Notification to Parent
   try {

@@ -144,12 +144,48 @@ exports.createInvoice = async (req, res) => {
       status: "ACTIVE",
     });
 
-    // Automatically update player's paymentStatus to UNPAID when invoice is created
-    if (playerArray.length > 0) {
-      await User.updateMany(
-        { _id: { $in: playerArray } },
-        { $set: { paymentStatus: "UNPAID" } }
-      );
+    // Automatically update player's classPaymentStatuses to UNPAID when invoice is created
+    if (playerArray.length > 0 && assignedClassId) {
+      const playersToUpdate = await User.find({ _id: { $in: playerArray } });
+      for (const p of playersToUpdate) {
+        p.classPaymentStatuses = p.classPaymentStatuses || [];
+        const existingEntry = p.classPaymentStatuses.find(
+          (cps) => cps.class && cps.class.toString() === assignedClassId.toString()
+        );
+        if (existingEntry) {
+          existingEntry.paymentStatus = "UNPAID";
+        } else {
+          p.classPaymentStatuses.push({
+            class: assignedClassId,
+            paymentStatus: "UNPAID",
+          });
+        }
+        await p.save();
+      }
+    }
+
+    if (assignedTeamId && playerArray.length > 0) {
+      try {
+        const Team = require("../models/Team");
+        const teamDoc = await Team.findById(assignedTeamId);
+        if (teamDoc && teamDoc.players) {
+          let modified = false;
+          playerArray.forEach((pId) => {
+            const pidStr = pId.toString();
+            const pEntry = teamDoc.players.find((item) => {
+              const itemPid = item.player ? item.player.toString() : item.toString();
+              return itemPid === pidStr;
+            });
+            if (pEntry) {
+              pEntry.paymentStatus = "UNPAID";
+              modified = true;
+            }
+          });
+          if (modified) await teamDoc.save();
+        }
+      } catch (err) {
+        console.error("Failed to update team paymentStatus on invoice creation:", err.message);
+      }
     }
 
     // Create Notification for Parent

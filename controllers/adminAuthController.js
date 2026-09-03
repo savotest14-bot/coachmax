@@ -12,6 +12,7 @@ const mongoose = require("mongoose");
 const Program = require("../models/Program");
 const Term = require("../models/Term");
 const Class = require("../models/Class");
+const Team = require("../models/Team");
 const Attendance = require("../models/Attendance");
 const { Parser } = require("json2csv");
 const Parent = require("../models/Parent");
@@ -134,7 +135,7 @@ exports.getUsers = async (req, res) => {
 
     const andConditions = [{ parentId: { $exists: true } }];
 
-    if (paymentStatus) andConditions.push({ paymentStatus });
+    if (paymentStatus) andConditions.push({ "classPaymentStatuses.paymentStatus": paymentStatus });
     if (category) {
       andConditions.push({ $or: [{ category }, { categories: category }] });
     }
@@ -199,7 +200,7 @@ exports.getUsers = async (req, res) => {
 exports.updatePaymentStatus = async (req, res) => {
   try {
     const userId = req.params.userId;
-    const { paymentStatus, classId } = req.body;
+    const { paymentStatus, classId, teamId } = req.body;
 
     if (!userId) {
       return res.status(400).json({
@@ -208,7 +209,7 @@ exports.updatePaymentStatus = async (req, res) => {
       });
     }
 
-    const validStatus = ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "OTHERS"];
+    const validStatus = ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "EXTRA", "SUBSTITUTE"];
 
     if (!paymentStatus || !validStatus.includes(paymentStatus)) {
       return res.status(400).json({
@@ -226,8 +227,42 @@ exports.updatePaymentStatus = async (req, res) => {
       });
     }
 
-    user.paymentStatus = paymentStatus;
-    await user.save();
+    if (teamId) {
+      const TeamModel = require("../models/Team");
+      const teamDoc = await TeamModel.findById(teamId);
+      if (teamDoc && teamDoc.players) {
+        const pEntry = teamDoc.players.find((item) => {
+          const itemPid = item.player ? item.player.toString() : item.toString();
+          return itemPid === userId.toString();
+        });
+        if (pEntry) {
+          pEntry.paymentStatus = paymentStatus;
+          await teamDoc.save();
+        }
+      }
+    } else {
+      user.classPaymentStatuses = user.classPaymentStatuses || [];
+      const targetClassIds = classId
+        ? [classId.toString()]
+        : (user.assignedClasses || []).map((id) => id.toString());
+
+      if (targetClassIds.length > 0) {
+        for (const cidStr of targetClassIds) {
+          const existingEntry = user.classPaymentStatuses.find(
+            (cps) => cps.class && cps.class.toString() === cidStr
+          );
+          if (existingEntry) {
+            existingEntry.paymentStatus = paymentStatus;
+          } else {
+            user.classPaymentStatuses.push({
+              class: cidStr,
+              paymentStatus: paymentStatus,
+            });
+          }
+        }
+      }
+      await user.save();
+    }
 
     // Generate class invoice(s) when status is updated to UNPAID
     if (paymentStatus === "UNPAID") {
@@ -257,6 +292,7 @@ exports.updatePaymentStatus = async (req, res) => {
     });
   }
 };
+
 
 exports.updatePlayerRating = async (req, res) => {
   try {
@@ -801,7 +837,7 @@ exports.exportUsers = async (req, res) => {
 
     // Filters
     if (paymentStatus) {
-      query.paymentStatus = paymentStatus;
+      query["classPaymentStatuses.paymentStatus"] = paymentStatus;
     }
 
     if (search) {
@@ -826,7 +862,7 @@ exports.exportUsers = async (req, res) => {
       Name: u.fullName || "",
       Email: u.email || "",
       Phone: u.phone || "",
-      PaymentStatus: u.paymentStatus || "",
+      PaymentStatus: (u.classPaymentStatuses || []).map((cps) => cps.paymentStatus).join(", ") || "TRIAL",
       SkillLevel: u.skillLevel || "",
       Rating: u.rating || 1,
       Club: u.club || "",
@@ -1695,8 +1731,32 @@ exports.createClass = async (req, res) => {
       }
     }
 
-    // ── Create the Class ──
-    const createData = {
+    // ── Create the Class(es) ──
+    if (finalSchedule.length > 0) {
+      const classesToCreate = finalSchedule.map((entry) => ({
+        name,
+        term,
+        program,
+        category,
+        dayOfWeek: entry.dayOfWeek,
+        startTime: entry.startTime,
+        endTime: entry.endTime,
+        location,
+        coach,
+        capacity,
+        price: price !== undefined && price !== null ? Number(price) : 0,
+        scheduleType: "SINGLE_DAY",
+      }));
+
+      const createdClasses = await Class.insertMany(classesToCreate);
+
+      return res.json({
+        message: `${createdClasses.length} classes created successfully`,
+        data: createdClasses,
+      });
+    }
+
+    const classData = await Class.create({
       name,
       term,
       program,
@@ -1708,16 +1768,10 @@ exports.createClass = async (req, res) => {
       coach,
       capacity,
       price: price !== undefined && price !== null ? Number(price) : 0,
-      scheduleType,
-    };
+      scheduleType: "SINGLE_DAY",
+    });
 
-    if (finalSchedule.length > 0) {
-      createData.schedule = finalSchedule;
-    }
-
-    const classData = await Class.create(createData);
-
-    res.json({
+    return res.json({
       message: "Class created successfully",
       data: classData,
     });
@@ -2883,6 +2937,15 @@ exports.getClassPlayers = async (req, res) => {
       });
     }
 
+    const formattedPlayers = classData.players.map((p) => {
+      const pObj = p.toObject ? p.toObject() : { ...p };
+      const cps = (p.classPaymentStatuses || []).find(
+        (item) => item.class && item.class.toString() === classId.toString()
+      );
+      pObj.paymentStatus = cps ? cps.paymentStatus : "TRIAL";
+      return pObj;
+    });
+
     res.json({
       class: {
         _id: classData._id,
@@ -2894,7 +2957,7 @@ exports.getClassPlayers = async (req, res) => {
         term: classData.term,
       },
       totalPlayers: classData.players.length,
-      players: classData.players,
+      players: formattedPlayers,
     });
 
   } catch (err) {
@@ -3066,7 +3129,7 @@ exports.getClassFullTable = async (req, res) => {
       .populate({
         path: "players",
         select:
-          "fullName email dob phone contactName paymentStatus isMedicalCondition medicalConditionDetails rating prefferedFoot parentId profileImage",
+          "fullName email dob phone contactName classPaymentStatuses isMedicalCondition medicalConditionDetails rating prefferedFoot parentId profileImage",
         populate: {
           path: "parentId",
           select: "fullName email phone profileImage", // choose the fields you need
@@ -3125,7 +3188,7 @@ exports.getClassFullTable = async (req, res) => {
         medicalConditionDetails: player.medicalConditionDetails,
         rating: player.rating,
         prefferedFoot: player.prefferedFoot,
-        paymentStatus: player.paymentStatus,
+        paymentStatus: (player.classPaymentStatuses || []).find((item) => item.class && item.class.toString() === classId.toString())?.paymentStatus || "TRIAL",
         // Parent details
         parent: player.parentId
           ? {
@@ -3169,7 +3232,7 @@ exports.exportClassCSV = async (req, res) => {
     .populate("term")
     .populate(
       "players",
-      "fullName email dob phone contactName paymentStatus"
+      "fullName email dob phone contactName classPaymentStatuses"
     );
 
   if (!cls) {
@@ -3211,7 +3274,7 @@ exports.exportClassCSV = async (req, res) => {
       DOB: player.dob ? new Date(player.dob).toISOString().split("T")[0] : "",
       Phone: player.phone,
       Guardian: player.contactName,
-      paymentStatus: player.paymentStatus
+      paymentStatus: (player.classPaymentStatuses || []).find((item) => item.class && item.class.toString() === classId.toString())?.paymentStatus || "TRIAL"
     };
 
     // Add session columns
@@ -3248,6 +3311,265 @@ exports.exportClassCSV = async (req, res) => {
   res.header("Content-Type", "text/csv");
   res.attachment(`class-${cls.name}-attendance.csv`);
   res.send(csv);
+};
+
+exports.getTeamSessions = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    const { termId } = req.query;
+
+    const teamData = await Team.findById(teamId).populate("term");
+
+    if (!teamData) {
+      return res.status(404).json({ message: "Team not found" });
+    }
+
+    let targetTerm = teamData.term;
+    if (termId) {
+      const termDoc = await Term.findById(termId);
+      if (termDoc) targetTerm = termDoc;
+    }
+
+    const enrichedSessions = generateClassSessionsEnriched(targetTerm, teamData);
+
+    const formatted = enrichedSessions.map((s) => ({
+      fullDate: s.date,
+      day: s.date.getUTCDate(),
+      month: s.date.getUTCMonth() + 1,
+      year: s.date.getUTCFullYear(),
+      dayOfWeek: s.dayOfWeek,
+      startTime: s.startTime,
+      endTime: s.endTime,
+    }));
+
+    const grouped = {};
+    formatted.forEach((s) => {
+      const key = `${s.month}-${s.year}`;
+      if (!grouped[key]) {
+        grouped[key] = [];
+      }
+      grouped[key].push(s.day);
+    });
+
+    res.json({
+      totalSessions: enrichedSessions.length,
+      scheduleType: teamData.scheduleType || "SINGLE_DAY",
+      schedule: teamData.schedule || [],
+      sessions: formatted,
+      groupedByMonth: grouped,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getTeamFullTable = async (req, res) => {
+  try {
+    const { teamId, termId } = req.query;
+
+    const team = await Team.findById(teamId)
+      .populate("term")
+      .populate("coach", "name")
+      .populate({
+        path: "players.player",
+        select:
+          "fullName email dob phone contactName isMedicalCondition medicalConditionDetails rating prefferedFoot parentId profileImage",
+        populate: {
+          path: "parentId",
+          select: "fullName email phone profileImage",
+        },
+      });
+
+    if (!team) {
+      return res.status(404).json({ message: "Team not found" });
+    }
+
+    let targetTerm = team.term;
+    if (termId) {
+      const termDoc = await Term.findById(termId);
+      if (termDoc) targetTerm = termDoc;
+    }
+
+    // 1. Generate sessions from term schedule
+    const generatedSessions = generateClassSessions(targetTerm, team);
+    const sessionDateSet = new Set(
+      generatedSessions.map((d) => new Date(d).toISOString().split("T")[0])
+    );
+
+    // 2. Fetch attendance (filtered by term date range if term is present)
+    const attendanceFilter = { team: teamId };
+    if (targetTerm && targetTerm.startDate && targetTerm.endDate) {
+      const start = new Date(targetTerm.startDate);
+      start.setUTCHours(0, 0, 0, 0);
+      const end = new Date(targetTerm.endDate);
+      end.setUTCHours(23, 59, 59, 999);
+      attendanceFilter.sessionDate = { $gte: start, $lte: end };
+    }
+
+    const attendanceData = await Attendance.find(attendanceFilter).select("sessionDate records");
+
+    // 3. Include any attendance dates in session set & build attendance map
+    const attendanceMap = {};
+    attendanceData.forEach((att) => {
+      const date = new Date(att.sessionDate).toISOString().split("T")[0];
+      sessionDateSet.add(date);
+      attendanceMap[date] = {};
+      att.records.forEach((r) => {
+        attendanceMap[date][r.player.toString()] = r.status;
+      });
+    });
+
+    const sessionDates = Array.from(sessionDateSet).sort();
+
+    // 4. Build player rows
+    const players = (team.players || []).map((item) => {
+      const player = item.player && typeof item.player === "object" ? item.player : { _id: item.player };
+      const attendance = {};
+      sessionDates.forEach((date) => {
+        attendance[date] = attendanceMap[date]?.[player._id?.toString()] || "NOT_MARKED";
+      });
+
+      return {
+        playerId: player._id,
+        name: player.fullName,
+        email: player.email,
+        dob: player.dob,
+        phone: player.phone,
+        profileImage: player.profileImage,
+        guardian: player.contactName,
+        isMedicalCondition: player.isMedicalCondition,
+        medicalConditionDetails: player.medicalConditionDetails,
+        rating: player.rating,
+        prefferedFoot: player.prefferedFoot,
+        paymentStatus: item.paymentStatus || "TRIAL",
+        parent: player.parentId
+          ? {
+            id: player.parentId._id,
+            name: player.parentId.fullName,
+            email: player.parentId.email,
+            phone: player.parentId.phone,
+            profileImage: player.parentId.profileImage,
+          }
+          : null,
+        attendance,
+      };
+    });
+
+    const broadcastRoom = await ChatRoom.findOne({
+      teamId: teamId,
+      type: "BROADCAST",
+    }).select("_id");
+
+    res.json({
+      teamId: team._id,
+      teamName: team.teamName,
+      coach: team.coach ? { _id: team.coach._id, name: team.coach.name } : null,
+      broadcastChatRoomId: broadcastRoom ? broadcastRoom._id : null,
+      broadcastRoomId: broadcastRoom ? broadcastRoom._id : null,
+      term: targetTerm ? { _id: targetTerm._id, name: targetTerm.name, startDate: targetTerm.startDate, endDate: targetTerm.endDate } : null,
+      totalSessions: sessionDates.length,
+      sessions: sessionDates,
+      players,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.exportTeamCSV = async (req, res) => {
+  try {
+    const { teamId, termId } = req.query;
+
+    const team = await Team.findById(teamId)
+      .populate("term")
+      .populate({
+        path: "players.player",
+        select: "fullName email dob phone contactName",
+      });
+
+    if (!team) {
+      return res.status(404).json({ message: "Team not found" });
+    }
+
+    let targetTerm = team.term;
+    if (termId) {
+      const termDoc = await Term.findById(termId);
+      if (termDoc) targetTerm = termDoc;
+    }
+
+    const generatedSessions = generateClassSessions(targetTerm, team);
+    const sessionDateSet = new Set(
+      generatedSessions.map((d) => new Date(d).toISOString().split("T")[0])
+    );
+
+    const attendanceFilter = { team: teamId };
+    if (targetTerm && targetTerm.startDate && targetTerm.endDate) {
+      const start = new Date(targetTerm.startDate);
+      start.setUTCHours(0, 0, 0, 0);
+      const end = new Date(targetTerm.endDate);
+      end.setUTCHours(23, 59, 59, 999);
+      attendanceFilter.sessionDate = { $gte: start, $lte: end };
+    }
+
+    const attendanceData = await Attendance.find(attendanceFilter).select("sessionDate records");
+
+    const attendanceMap = {};
+    attendanceData.forEach((att) => {
+      const date = new Date(att.sessionDate).toISOString().split("T")[0];
+      sessionDateSet.add(date);
+      attendanceMap[date] = {};
+      att.records.forEach((r) => {
+        attendanceMap[date][r.player.toString()] = r.status;
+      });
+    });
+
+    const sessionDates = Array.from(sessionDateSet).sort();
+
+    const rows = (team.players || []).map((item) => {
+      const player = item.player && typeof item.player === "object" ? item.player : { _id: item.player };
+      const row = {
+        Name: player.fullName,
+        Email: player.email,
+        DOB: player.dob ? new Date(player.dob).toISOString().split("T")[0] : "",
+        Phone: player.phone,
+        Guardian: player.contactName,
+        "Payment Status": item.paymentStatus || "TRIAL",
+      };
+
+      sessionDates.forEach((date) => {
+        const rawStatus = attendanceMap[date]?.[player._id?.toString()] || "NOT_MARKED";
+        let symbol = "";
+        if (rawStatus === "PRESENT") symbol = "P";
+        else if (rawStatus === "ABSENT") symbol = "A";
+        else if (rawStatus === "LATE") symbol = "L";
+        else if (rawStatus === "TRIAL") symbol = "T";
+        else symbol = "";
+
+        row[date] = symbol;
+      });
+
+      return row;
+    });
+
+    const fields = [
+      "Name",
+      "Email",
+      "DOB",
+      "Phone",
+      "Guardian",
+      "Payment Status",
+      ...sessionDates,
+    ];
+
+    const parser = new Parser({ fields });
+    const csv = parser.parse(rows);
+
+    res.header("Content-Type", "text/csv");
+    res.attachment(`team-${team.teamName}-attendance.csv`);
+    res.send(csv);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 };
 
 
@@ -3304,7 +3626,8 @@ exports.getPlayerDetails = async (req, res) => {
       .populate("category", "name")
       .populate("programs", "name")
       .populate("term", "name")
-      .populate("assignedClasses", "name")
+      .populate("assignedClasses", "name dayOfWeek startTime endTime")
+      .populate("classPaymentStatuses.class", "name")
       .lean();
 
     if (!player) {
@@ -3340,6 +3663,7 @@ exports.getPlayerDetails = async (req, res) => {
       return {
         attendanceId: att._id,
         class: att.class,
+        className: att.class?.name || "",
         sessionDate: att.sessionDate,
         status: playerRecord?.status || "NOT_MARKED",
         comment: playerRecord?.comment || "",
@@ -3374,6 +3698,136 @@ exports.getPlayerDetails = async (req, res) => {
       percentage: overallAttendancePercentage,
     };
 
+    // Calculate per-class payment statuses and summary metrics
+    const classPaymentStatuses = player.classPaymentStatuses || [];
+    const assignedClassesPaymentInfo = (player.assignedClasses || []).map((cls) => {
+      const classIdStr = cls._id ? cls._id.toString() : cls.toString();
+      const className = cls.name || "";
+      const paymentEntry = classPaymentStatuses.find((cps) => {
+        const cpsClassId = cps.class
+          ? cps.class._id
+            ? cps.class._id.toString()
+            : cps.class.toString()
+          : null;
+        return cpsClassId === classIdStr;
+      });
+      const status = paymentEntry ? paymentEntry.paymentStatus : "TRIAL";
+      return {
+        classId: cls._id || cls,
+        className,
+        paymentStatus: status,
+      };
+    });
+
+    const paidClasses = assignedClassesPaymentInfo.filter((item) => item.paymentStatus === "PAID");
+    const unpaidClasses = assignedClassesPaymentInfo.filter((item) => item.paymentStatus === "UNPAID");
+    const trialClasses = assignedClassesPaymentInfo.filter((item) => item.paymentStatus === "TRIAL");
+    const overdueClasses = assignedClassesPaymentInfo.filter((item) => item.paymentStatus === "OVER_DUE");
+
+    const classPaymentSummary = {
+      totalAssignedClasses: assignedClassesPaymentInfo.length,
+      paidClassesCount: paidClasses.length,
+      unpaidClassesCount: unpaidClasses.length,
+      trialClassesCount: trialClasses.length,
+      overdueClassesCount: overdueClasses.length,
+      isAllClassesPaid:
+        assignedClassesPaymentInfo.length > 0 &&
+        paidClasses.length === assignedClassesPaymentInfo.length,
+      paidClassNames: paidClasses.map((c) => c.className),
+      unpaidClassNames: unpaidClasses.map((c) => c.className),
+      trialClassNames: trialClasses.map((c) => c.className),
+      overdueClassNames: overdueClasses.map((c) => c.className),
+      assignedClassesWithPaymentStatus: assignedClassesPaymentInfo,
+    };
+
+    // Fetch assigned teams and team payment statuses
+    const assignedTeams = await Team.find({ "players.player": playerId })
+      .select("teamName teamFee logo players ageGroup")
+      .lean();
+
+    const assignedTeamsPaymentInfo = assignedTeams.map((team) => {
+      const pEntry = (team.players || []).find(
+        (p) => p.player && p.player.toString() === playerId.toString()
+      );
+      return {
+        teamId: team._id,
+        teamName: team.teamName,
+        teamFee: team.teamFee || 0,
+        paymentStatus: pEntry ? pEntry.paymentStatus : "UNPAID",
+      };
+    });
+
+    const paidTeams = assignedTeamsPaymentInfo.filter((item) => item.paymentStatus === "PAID");
+    const unpaidTeams = assignedTeamsPaymentInfo.filter((item) => item.paymentStatus === "UNPAID");
+    const trialTeams = assignedTeamsPaymentInfo.filter((item) => item.paymentStatus === "TRIAL");
+    const overdueTeams = assignedTeamsPaymentInfo.filter((item) => item.paymentStatus === "OVER_DUE");
+
+    const teamPaymentSummary = {
+      totalAssignedTeams: assignedTeamsPaymentInfo.length,
+      paidTeamsCount: paidTeams.length,
+      unpaidTeamsCount: unpaidTeams.length,
+      trialTeamsCount: trialTeams.length,
+      overdueTeamsCount: overdueTeams.length,
+      isAllTeamsPaid:
+        assignedTeamsPaymentInfo.length > 0 &&
+        paidTeams.length === assignedTeamsPaymentInfo.length,
+      paidTeamNames: paidTeams.map((t) => t.teamName),
+      unpaidTeamNames: unpaidTeams.map((t) => t.teamName),
+      trialTeamNames: trialTeams.map((t) => t.teamName),
+      overdueTeamNames: overdueTeams.map((t) => t.teamName),
+      assignedTeamsWithPaymentStatus: assignedTeamsPaymentInfo,
+    };
+
+    // Fetch team attendance records for this player
+    const teamAttendanceRecords = await Attendance.find({
+      team: { $exists: true, $ne: null },
+      "records.player": playerId,
+    })
+      .populate("team", "teamName ageGroup startTime endTime")
+      .sort({ sessionDate: -1 })
+      .lean();
+
+    const perDayTeamAttendance = teamAttendanceRecords.map((att) => {
+      const playerRecord = att.records.find(
+        (r) => r.player && r.player.toString() === playerId.toString()
+      );
+      return {
+        attendanceId: att._id,
+        team: att.team,
+        teamName: att.team?.teamName || "",
+        sessionDate: att.sessionDate,
+        status: playerRecord?.status || "NOT_MARKED",
+        comment: playerRecord?.comment || "",
+        remarks: playerRecord?.remarks || "",
+        reason: playerRecord?.reason || "",
+        markedByParent: playerRecord?.markedByParent || false,
+        lateArrival: playerRecord?.lateArrival || false,
+        attendanceType: playerRecord?.attendanceType || "REGULAR",
+      };
+    });
+
+    const totalTeamSessions = perDayTeamAttendance.length;
+    const presentTeamCount = perDayTeamAttendance.filter((a) => a.status === "PRESENT").length;
+    const absentTeamCount = perDayTeamAttendance.filter((a) => a.status === "ABSENT").length;
+    const lateTeamCount = perDayTeamAttendance.filter((a) => a.status === "LATE").length;
+    const trialTeamCount = perDayTeamAttendance.filter((a) => a.status === "TRIAL").length;
+    const attendedTeamCount = presentTeamCount + lateTeamCount;
+
+    const overallTeamAttendancePercentage =
+      totalTeamSessions > 0
+        ? Number(((attendedTeamCount / totalTeamSessions) * 100).toFixed(2))
+        : 0;
+
+    const overallTeamAttendance = {
+      totalSessions: totalTeamSessions,
+      presentCount: presentTeamCount,
+      absentCount: absentTeamCount,
+      lateCount: lateTeamCount,
+      trialCount: trialTeamCount,
+      attendedCount: attendedTeamCount,
+      percentage: overallTeamAttendancePercentage,
+    };
+
     return res.status(200).json({
       success: true,
       message: "Player details fetched successfully.",
@@ -3381,8 +3835,14 @@ exports.getPlayerDetails = async (req, res) => {
         player,
         parent: player.parentId || null,
         otherPlayers,
+        assignedClassesPaymentInfo,
+        classPaymentSummary,
+        assignedTeamsPaymentInfo,
+        teamPaymentSummary,
         perDayAttendance,
         overallAttendance,
+        perDayTeamAttendance,
+        overallTeamAttendance,
       },
     });
   } catch (error) {
@@ -3755,11 +4215,11 @@ exports.getAdminDashboardOverview = async (req, res) => {
           { _id: { $in: pendingRequestPlayerIds } },
         ],
       }),
-      User.countDocuments({ parentId: { $exists: true }, paymentStatus: "TRIAL" }),
-      User.countDocuments({ parentId: { $exists: true }, paymentStatus: "UNPAID" }),
-      User.countDocuments({ parentId: { $exists: true }, paymentStatus: "PAID" }),
-      User.countDocuments({ parentId: { $exists: true }, paymentStatus: "OVER_DUE" }),
-      User.countDocuments({ parentId: { $exists: true }, paymentStatus: "OTHERS" }),
+      User.countDocuments({ parentId: { $exists: true }, "classPaymentStatuses.paymentStatus": "TRIAL" }),
+      User.countDocuments({ parentId: { $exists: true }, "classPaymentStatuses.paymentStatus": "UNPAID" }),
+      User.countDocuments({ parentId: { $exists: true }, "classPaymentStatuses.paymentStatus": "PAID" }),
+      User.countDocuments({ parentId: { $exists: true }, "classPaymentStatuses.paymentStatus": "OVER_DUE" }),
+      User.countDocuments({ parentId: { $exists: true }, "classPaymentStatuses.paymentStatus": "OTHERS" }),
 
       // 2. Parents
       Parent.countDocuments({}),
