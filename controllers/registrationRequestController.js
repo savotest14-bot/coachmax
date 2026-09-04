@@ -387,7 +387,7 @@ exports.assignClassesToPlayer = async (req, res) => {
     }
 
     // Validate paymentStatus
-    const validPaymentStatuses = ["TRIAL", "UNPAID", "PAID", "OVER_DUE"];
+    const validPaymentStatuses = ["TRIAL", "UNPAID", "PAID", "EXTRA", "SUBSTITUTE", "TBC", "HANDSHAKE"];
     if (!validPaymentStatuses.includes(paymentStatus)) {
       return res.status(400).json({
         success: false,
@@ -544,7 +544,7 @@ exports.assignClassesToPlayer = async (req, res) => {
     await playerDoc.save();
 
     // ✅ Automatic Invoice Generation on Class Assignment (Skipped when paymentStatus is TRIAL)
-    if (paymentStatus !== "TRIAL") {
+    if (paymentStatus == "UNPAID") {
       try {
         for (const clsId of classIds) {
           await generateClassInvoice({ userId: playerId, classId: clsId });

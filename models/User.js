@@ -47,7 +47,7 @@ const userSchema = new mongoose.Schema(
         },
         paymentStatus: {
           type: String,
-          enum: ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "EXTRA", "SUBSTITUTE"],
+          enum: ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "EXTRA", "SUBSTITUTE", "TBC", "HANDSHAKE"],
           default: "TRIAL",
         },
       },

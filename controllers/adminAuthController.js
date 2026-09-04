@@ -209,7 +209,7 @@ exports.updatePaymentStatus = async (req, res) => {
       });
     }
 
-    const validStatus = ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "EXTRA", "SUBSTITUTE"];
+    const validStatus = ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "EXTRA", "SUBSTITUTE", "TBC", "HANDSHAKE"];
 
     if (!paymentStatus || !validStatus.includes(paymentStatus)) {
       return res.status(400).json({
