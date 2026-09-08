@@ -54,7 +54,6 @@ const ALLOWED_MIME_TYPES = new Set([
   "image/webp",
   "image/gif",
   "image/avif",
-  "application/octet-stream",
   "image/svg+xml",
   "text/csv",
   "application/vnd.ms-excel",

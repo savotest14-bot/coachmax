@@ -42,7 +42,6 @@ const generateInvoiceNumber = async () => {
   return `${prefix}${paddedSequence}`;
 };
 
-// ✅ Create Invoice (Admin only)
 exports.createInvoice = async (req, res) => {
   try {
     const {
@@ -78,13 +77,11 @@ exports.createInvoice = async (req, res) => {
       });
     }
 
-    // Normalize player IDs array from players / playerId / userId
     const rawPlayerList = (Array.isArray(players) && players.length > 0)
       ? players
       : (playerId || userId ? [playerId || userId] : []);
     const playerArray = Array.isArray(rawPlayerList) ? rawPlayerList : [rawPlayerList];
 
-    // Validate players if provided
     if (playerArray.length > 0) {
       const dbPlayers = await User.find({ _id: { $in: playerArray } });
       if (dbPlayers.length !== playerArray.length) {
@@ -103,7 +100,6 @@ exports.createInvoice = async (req, res) => {
       }
     }
 
-    // Process items & subtotal
     const processedItems = (Array.isArray(items) ? items : []).map((item) => ({
       title: item.title || item.description || "Invoice Item",
       description: item.description || "",
@@ -144,7 +140,6 @@ exports.createInvoice = async (req, res) => {
       status: "ACTIVE",
     });
 
-    // Automatically update player's classPaymentStatuses to UNPAID when invoice is created
     if (playerArray.length > 0 && assignedClassId) {
       const playersToUpdate = await User.find({ _id: { $in: playerArray } });
       for (const p of playersToUpdate) {
@@ -188,7 +183,6 @@ exports.createInvoice = async (req, res) => {
       }
     }
 
-    // Create Notification for Parent
     try {
       await sendNotification({
         recipientType: "PARENT",
@@ -227,7 +221,6 @@ exports.createInvoice = async (req, res) => {
   }
 };
 
-// ✅ Get All Invoices (Admin only with search & filters)
 exports.getAdminInvoices = async (req, res) => {
   try {
     const {
@@ -317,7 +310,6 @@ exports.getAdminInvoices = async (req, res) => {
   }
 };
 
-// ✅ Get Admin Invoice By ID
 exports.getAdminInvoiceById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -348,7 +340,6 @@ exports.getAdminInvoiceById = async (req, res) => {
   }
 };
 
-// ✅ Update Invoice (Admin only)
 exports.updateInvoice = async (req, res) => {
   try {
     const { id } = req.params;
@@ -428,7 +419,6 @@ exports.updateInvoice = async (req, res) => {
   }
 };
 
-// ✅ Delete / Cancel Invoice (Admin only)
 exports.deleteInvoice = async (req, res) => {
   try {
     const { id } = req.params;
@@ -464,7 +454,6 @@ exports.deleteInvoice = async (req, res) => {
   }
 };
 
-// ✅ Get Parent's Invoices (Parent only)
 exports.getParentInvoices = async (req, res) => {
   try {
     const parentId = req.parent._id;
@@ -519,7 +508,6 @@ exports.getParentInvoices = async (req, res) => {
   }
 };
 
-// ✅ Get Parent Single Invoice Details
 exports.getParentInvoiceById = async (req, res) => {
   try {
     const parentId = req.parent._id;

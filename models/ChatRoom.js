@@ -23,7 +23,7 @@ const chatRoomSchema = new mongoose.Schema(
     ],
     name: {
       type: String,
-      default: "", // Name for group chat
+      default: "",
     },
     classId: {
       type: mongoose.Schema.Types.ObjectId,

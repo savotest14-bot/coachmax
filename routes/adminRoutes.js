@@ -285,14 +285,14 @@ router.put("/toggleCoachActive/:id", auth, isAdmin, toggleCoachActiveStatus);
 router.put("/changeCoachPassword/:id", auth, isAdmin, changeCoachPassword);
 router.get("/getCoachClassesWithSessions/:coachId", auth, getCoachClassesWithSessions);
 
-// ✅ NEW: Assessments (Admin/Coach)
+// Assessments (Admin/Coach)
 router.post("/assessments", auth, createAssessment);
 
-// ✅ NEW: Training Session publishing (Admin/Coach)
+// Training Session publishing (Admin/Coach)
 router.post("/training", auth, uploads.array("attachments", 5), createTrainingSession);
 router.put("/training/:sessionId", auth, uploads.array("attachments", 5), updateTrainingSession);
 
-// ✅ NEW: League Tournament configurations (Admin only)
+// League Tournament configurations (Admin only)
 router.post("/leagues", auth, isAdmin, uploads.single("leagueLogo"), createLeague);
 router.get(
   "/leagues",
@@ -323,7 +323,7 @@ router.put(
   updatePlayerStatistics
 );
 
-// ✅ NEW: Store setups (Admin only)
+// Store setups (Admin only)
 router.post("/store/categories", auth, isAdmin, createStoreCategory);
 router.get("/store/categories", auth, isAdmin, getStoreCategories);
 router.put("/store/categories/:id", auth, isAdmin, updateStoreCategory);
@@ -338,7 +338,7 @@ router.get("/store/orders/:id", auth, isAdmin, getOrderById);
 router.patch("/store/orders/:id", auth, isAdmin, updateOrderStatus);
 
 
-// ✅ NEW: News setups (Admin only)
+// News setups (Admin only)
 router.post("/news", auth, isAdmin, uploads.array("images", 5), createNews);
 router.get("/news/categories", auth, isAdmin, getNewsCategories);
 router.get("/news", auth, isAdmin, getAllNews);
@@ -346,11 +346,11 @@ router.get("/news/:id", auth, isAdmin, getNewsById);
 router.put("/news/:id", auth, isAdmin, uploads.array("images", 5), updateNews);
 router.delete("/news/:id", auth, isAdmin, deleteNews);
 
-// ✅ Bank Details Management (Admin only)
+// Bank Details Management (Admin only)
 router.post("/bank-details", auth, isAdmin, uploads.single("qrCodeImage"), upsertBankDetails);
 router.get("/bank-details", auth, isAdmin, getAllBankDetails);
 
-// ✅ Invoicing (Admin only)
+//Invoicing (Admin only)
 router.post("/invoices", auth, isAdmin, createInvoice);
 router.get("/invoices", auth, isAdmin, getAdminInvoices);
 router.get("/invoices/:id", auth, isAdmin, getAdminInvoiceById);
@@ -359,7 +359,7 @@ router.put("/invoices/:id", auth, isAdmin, updateInvoice);
 router.delete("/invoices/:id", auth, isAdmin, deleteInvoice);
 
 
-// ✅ Payment Management & Controls (Admin only)
+//Payment Management & Controls (Admin only)
 router.get("/payments/settings", auth, isAdmin, getPaymentSettings);
 router.put("/payments/settings", auth, isAdmin, updatePaymentSettings);
 router.get("/payments", auth, isAdmin, getAdminPayments);
@@ -369,7 +369,7 @@ router.post("/payments/:id/approve", auth, isAdmin, approvePayment);
 router.patch("/payments/:id/reject", auth, isAdmin, rejectPayment);
 router.post("/payments/:id/reject", auth, isAdmin, rejectPayment);
 
-// ✅ Admin Dashboard / Statistics
+// Admin Dashboard / Statistics
 router.get("/dashboard", auth, isAdmin, getAdminDashboardOverview);
 router.get("/dashboard/payments", auth, isAdmin, getPaymentDashboardStats);
 
@@ -380,15 +380,12 @@ router.get(
   getPlayerDetails
 );
 
-// ✅ Notifications & FCM Push Tokens (Admin)
+// Notifications & FCM Push Tokens (Admin)
 router.get("/notifications", auth, isAdmin, getAdminNotifications);
 router.patch("/notifications/read-all", auth, isAdmin, markAllAdminNotificationsRead);
 router.patch("/notifications/:notificationId/read", auth, isAdmin, markAdminNotificationRead);
 router.post("/send-notification", auth, isAdmin, sendAdminCustomNotification);
 
-// ═══════════════════════════════════════════════
-// Coach Mobile App — Admin Oversight Endpoints
-// ═══════════════════════════════════════════════
 
 const {
   approveTemporaryPlayer,
@@ -408,24 +405,24 @@ const {
   getAllConversations,
 } = require("../controllers/parentChatController");
 
-// ✅ Temporary Player Management (Admin only)
+// Temporary Player Management (Admin only)
 router.get("/temporary-players", auth, isAdmin, getAdminTemporaryPlayers);
 router.patch("/temporary-players/:id/approve", auth, isAdmin, approveTemporaryPlayer);
 router.patch("/temporary-players/:id/reject", auth, isAdmin, rejectTemporaryPlayer);
 router.delete("/temporary-players/:id", auth, isAdmin, deleteTemporaryPlayer);
 
-// ✅ Attendance History Audit (Admin only)
+// Attendance History Audit (Admin only)
 router.get("/attendance-history/:classId", auth, isAdmin, getAttendanceHistory);
 router.get("/team-attendance-history/:teamId", auth, isAdmin, getTeamAttendanceHistory);
 
-// ✅ Audit Logs (Admin only)
+// Audit Logs (Admin only)
 router.get("/audit-logs", auth, isAdmin, getAuditLogs);
 router.get("/audit-logs/:entityType/:entityId", auth, isAdmin, getEntityAuditLogs);
 
-// ✅ Coach-Parent Conversations (Admin safeguarding)
+//  Coach-Parent Conversations (Admin safeguarding)
 router.get("/chat/conversations", auth, isAdmin, getAllConversations);
 
-// ✅ Chat Deletion (Admin only)
+//  Chat Deletion (Admin only)
 
 router.delete("/deleteMessage/:messageId", auth, isAdmin, deleteSingleMessage);
 router.delete("/deleteChatRoom/:roomId", auth, isAdmin, deleteFullChatRoom);

@@ -5,9 +5,6 @@ const Admin = require("../models/Admin");
 const fs = require("fs");
 const path = require("path");
 
-// -------------------------------------------------------------
-// Initialize Firebase Admin SDK (Push Notification Setup)
-// -------------------------------------------------------------
 let isFirebaseInitialized = false;
 
 try {
@@ -21,21 +18,21 @@ try {
       credential: admin.credential.cert(serviceAccount),
     });
     isFirebaseInitialized = true;
-    console.log("🔥 Firebase Admin initialized from environment JSON");
+    console.log(" Firebase Admin initialized from environment JSON");
   } else if (fs.existsSync(serviceAccountPath)) {
     const serviceAccount = require(serviceAccountPath);
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
     });
     isFirebaseInitialized = true;
-    console.log("🔥 Firebase Admin initialized from serviceAccountKey.json");
+    console.log(" Firebase Admin initialized from serviceAccountKey.json");
   } else {
     console.warn(
-      "⚠️ Push Notification Warning: No Firebase Service Account key found. DB Notifications will be created, but FCM Push Notifications will be skipped until credentials are provided."
+      " Push Notification Warning: No Firebase Service Account key found. DB Notifications will be created, but FCM Push Notifications will be skipped until credentials are provided."
     );
   }
 } catch (err) {
-  console.error("⚠️ Firebase Admin Initialization Error:", err.message);
+  console.error(" Firebase Admin Initialization Error:", err.message);
 }
 
 /**
@@ -194,7 +191,7 @@ const sendNotification = async ({
 
     return notifDoc;
   } catch (err) {
-    console.error("❌ Failed to create notification:", err.message);
+    console.error("Failed to create notification:", err.message);
     throw err;
   }
 };

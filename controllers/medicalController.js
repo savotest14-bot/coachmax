@@ -1,12 +1,10 @@
 const MedicalProfile = require("../models/MedicalProfile");
 const User = require("../models/User");
 
-// ✅ Get child's medical profile (Parent or Admin)
 exports.getMedicalProfile = async (req, res) => {
   try {
     const { playerId } = req.params;
 
-    // If Parent, verify ownership
     if (req.role === "PARENT") {
       const child = await User.findOne({ _id: playerId, parentId: req.parent._id });
       if (!child) {
@@ -16,7 +14,6 @@ exports.getMedicalProfile = async (req, res) => {
 
     let profile = await MedicalProfile.findOne({ player: playerId });
     if (!profile) {
-      // Create a default profile if not exists
       profile = await MedicalProfile.create({ player: playerId });
     }
 
@@ -26,13 +23,11 @@ exports.getMedicalProfile = async (req, res) => {
   }
 };
 
-// ✅ Update child's medical profile (Parent or Admin)
 exports.updateMedicalProfile = async (req, res) => {
   try {
     const { playerId } = req.params;
     const { injuries, allergies, medications, medicalConditions, doctorName, emergencyContact, insuranceDetails, notes } = req.body;
 
-    // If Parent, verify ownership
     if (req.role === "PARENT") {
       const child = await User.findOne({ _id: playerId, parentId: req.parent._id });
       if (!child) {

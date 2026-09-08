@@ -20,7 +20,6 @@ const generateToken = require("../utils/generateToken");
 const mongoose = require("mongoose");
 const { sendNotification } = require("../services/notificationService");
 
-// Helper function to create admin notifications for enrollment requests
 const createAdminNotificationForRequest = async ({
   parent,
   player,
@@ -69,7 +68,6 @@ Preferred Classes: ${classNames || "None"}`;
   }
 };
 
-// ✅ Parent registration with child
 exports.register = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -90,12 +88,10 @@ exports.register = async (req, res) => {
       fcmToken,
     } = req.body;
 
-    // Parse players if sent as string in multipart/form-data
     if (typeof players === "string") {
       players = JSON.parse(players);
     }
 
-    // Parent validation
     if (
       !fullName ||
       !email ||
@@ -113,7 +109,6 @@ exports.register = async (req, res) => {
       });
     }
 
-    // Check existing parent
     const existingParent = await Parent.findOne({
       $or: [
         { email: email.toLowerCase() },
@@ -128,10 +123,8 @@ exports.register = async (req, res) => {
       });
     }
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Create Parent
     const parent = await Parent.create(
       [
         {
@@ -185,14 +178,12 @@ exports.register = async (req, res) => {
         allergies,
       } = player;
 
-      // Normalize categories to array
       const categoryIds = Array.isArray(categories)
         ? categories
         : (typeof categories === "string"
           ? (categories.startsWith("[") ? JSON.parse(categories) : [categories])
           : (categories ? [categories] : []));
 
-      // Required player validation
       if (
         !firstName ||
         !lastName ||
@@ -205,10 +196,8 @@ exports.register = async (req, res) => {
         );
       }
 
-      // Normalize programs to array
       const programIds = Array.isArray(programs) ? programs : [programs];
 
-      // Validate references
       for (const catId of categoryIds) {
         const categoryData = await Category.findById(catId);
         if (!categoryData) {
@@ -218,7 +207,6 @@ exports.register = async (req, res) => {
         }
       }
 
-      // Validate all programs
       for (const progId of programIds) {
         const programData = await Program.findById(progId);
         if (!programData) {
@@ -238,7 +226,6 @@ exports.register = async (req, res) => {
         }
       }
 
-      // Parse DOB
       let parsedDob = null;
 
       if (dob) {
@@ -253,14 +240,12 @@ exports.register = async (req, res) => {
         }
       }
 
-      // Profile image
       let profileImage = null;
 
       if (uploadedFiles[i]) {
         profileImage = `uploads/profiles/${uploadedFiles[i].filename}`;
       }
 
-      // Create Player (term = null until admin class assignment)
       const playerDoc = await User.create(
         [
           {
@@ -306,7 +291,6 @@ exports.register = async (req, res) => {
 
       const playerId = playerDoc[0]._id;
 
-      // Create RegistrationRequest
       const prefClasses = Array.isArray(preferredClasses) ? preferredClasses : [];
 
       await RegistrationRequest.create(
@@ -342,12 +326,10 @@ exports.register = async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
-    // Trigger admin notifications for enrollment requests (non-blocking)
     pendingNotifications.forEach((notifData) => {
       createAdminNotificationForRequest(notifData);
     });
 
-    // Send Emails (non-blocking)
     sendEmail(
       email,
       "Welcome to CoachMax 🎉",
@@ -385,7 +367,6 @@ exports.register = async (req, res) => {
   }
 };
 
-// ✅ Parent Login
 exports.login = async (req, res) => {
   try {
     const { email, phone, password, fcmToken } = req.body;
@@ -420,7 +401,6 @@ exports.login = async (req, res) => {
     parent.tokens = parent.tokens || [];
     parent.tokens.push(token);
 
-    // Push fcmToken uniquely if provided
     if (fcmToken) {
       parent.fcmTokens = parent.fcmTokens || [];
       if (!parent.fcmTokens.includes(fcmToken)) {
@@ -430,7 +410,6 @@ exports.login = async (req, res) => {
 
     await parent.save();
 
-    // Fetch parent's children
     const children = await User.find({ parentId: parent._id })
       .populate("category", "name")
       .populate("programs", "name")
@@ -452,7 +431,6 @@ exports.login = async (req, res) => {
   }
 };
 
-// ✅ Parent Logout
 exports.logout = async (req, res) => {
   try {
     const token = req.token;
@@ -470,7 +448,6 @@ exports.logout = async (req, res) => {
   }
 };
 
-// ✅ Retrieve Banners
 exports.getActiveBanners = async (req, res) => {
   try {
     const banners = await Banner.find({ isActive: true })
@@ -487,7 +464,6 @@ exports.getActiveBanners = async (req, res) => {
   }
 };
 
-// ✅ Retrieve Categories
 exports.getCategories = async (req, res) => {
   try {
     const { isEvent } = req.query;
@@ -497,10 +473,8 @@ exports.getCategories = async (req, res) => {
     if (isEvent === "true") {
       filter.isEvent = true;
     } else if (isEvent === "false" || isEvent === undefined) {
-      // Default: only regular categories
       filter.isEvent = false;
     }
-    // If isEvent === "all", don't apply any filter
 
     const categories = await Category.find(filter).sort({ displayOrder: 1 });
 
@@ -530,7 +504,7 @@ exports.getAllPrograms = async (req, res) => {
     });
   }
 };
-// ✅ Retrieve Programs by Category
+
 exports.getProgramsByCategory = async (req, res) => {
   try {
     const { categoryId } = req.params;
@@ -541,7 +515,7 @@ exports.getProgramsByCategory = async (req, res) => {
   }
 };
 
-// ✅ Retrieve Parent's Children
+
 exports.getChildren = async (req, res) => {
   try {
     const children = await User.find({ parentId: req.parent._id })
@@ -555,7 +529,6 @@ exports.getChildren = async (req, res) => {
   }
 };
 
-// ✅ Add Child Profile under Parent
 exports.addChild = async (req, res) => {
   try {
     const {
@@ -578,7 +551,6 @@ exports.addChild = async (req, res) => {
       allergies,
     } = req.body;
 
-    // Required fields
     if (
       !firstName ||
       !lastName ||
@@ -592,12 +564,10 @@ exports.addChild = async (req, res) => {
       });
     }
 
-    // Normalize programs to array
     const programIds = Array.isArray(programs)
       ? programs
       : [programs];
 
-    // Validate category
     const categoryData = await Category.findById(category);
     if (!categoryData) {
       return res.status(404).json({
@@ -606,7 +576,6 @@ exports.addChild = async (req, res) => {
       });
     }
 
-    // Validate programs
     for (const programId of programIds) {
       const programData = await Program.findById(programId);
 
@@ -618,7 +587,6 @@ exports.addChild = async (req, res) => {
       }
     }
 
-    // Validate preferred term
     const prefTerm = preferredTerm || term || null;
 
     if (prefTerm) {
@@ -632,7 +600,6 @@ exports.addChild = async (req, res) => {
       }
     }
 
-    // Parse DOB
     let parsedDob = null;
 
     if (dob) {
@@ -647,14 +614,12 @@ exports.addChild = async (req, res) => {
       }
     }
 
-    // Profile image
     let profileImage = null;
 
     if (req.file) {
       profileImage = `uploads/profiles/${req.file.filename}`;
     }
 
-    // Create Player
     const player = await User.create({
       firstName,
       lastName,
@@ -677,7 +642,6 @@ exports.addChild = async (req, res) => {
       categories: Array.isArray(categories) ? categories : (category ? [category] : []),
       programs: programIds,
 
-      // Player is assigned term by admin after approval
       term: null,
 
       classPaymentStatuses: [],
@@ -689,12 +653,10 @@ exports.addChild = async (req, res) => {
       attendancePercentage: 0,
     });
 
-    // Normalize preferred classes
     const prefClasses = Array.isArray(preferredClasses)
       ? preferredClasses
       : [];
 
-    // Create Registration Request
     const registrationRequest =
       await RegistrationRequest.create({
         parent: req.parent._id,
@@ -708,7 +670,6 @@ exports.addChild = async (req, res) => {
         createdBy: req.parent._id,
       });
 
-    // Create Medical Profile
     await MedicalProfile.create({
       player: player._id,
       medicalConditions: "",
@@ -719,7 +680,6 @@ exports.addChild = async (req, res) => {
           : [],
     });
 
-    // Notify Admin (Non-blocking)
     createAdminNotificationForRequest({
       parent: req.parent._id,
       player: player._id,
@@ -747,7 +707,6 @@ exports.addChild = async (req, res) => {
   }
 };
 
-// ✅ Request Additional Program or Holiday Program for Existing Player (Parent)
 exports.requestAddProgram = async (req, res) => {
   try {
     const { playerId, category, categories, programs, preferredTerm, preferredClasses, requestType } = req.body;
@@ -767,7 +726,6 @@ exports.requestAddProgram = async (req, res) => {
       });
     }
 
-    // Verify parent ownership
     if (player.parentId.toString() !== req.parent._id.toString()) {
       return res.status(403).json({
         success: false,
@@ -786,7 +744,6 @@ exports.requestAddProgram = async (req, res) => {
         : [];
     const primaryCategory = categoryList[0] || category;
 
-    // Validate Category & Programs
     if (primaryCategory) {
       const categoryDoc = await Category.findById(primaryCategory);
       if (!categoryDoc) {
@@ -821,7 +778,6 @@ exports.requestAddProgram = async (req, res) => {
     const prefClasses = Array.isArray(preferredClasses) ? preferredClasses : [];
     const reqType = requestType || "ADD_PROGRAM";
 
-    // Create RegistrationRequest
     const registrationRequest = await RegistrationRequest.create({
       parent: req.parent._id,
       player: player._id,
@@ -834,7 +790,6 @@ exports.requestAddProgram = async (req, res) => {
       createdBy: req.parent._id,
     });
 
-    // Update categories on player
     player.categories = player.categories || [];
     for (const catId of categoryList) {
       const catStr = catId.toString();
@@ -846,11 +801,9 @@ exports.requestAddProgram = async (req, res) => {
       player.category = primaryCategory;
     }
 
-    // Set hasPendingRequest flag on player so they appear in unallocated list
     player.hasPendingRequest = true;
     await player.save();
 
-    // Create Admin Notification (non-blocking)
     createAdminNotificationForRequest({
       parent: req.parent._id,
       player: player._id,
@@ -874,7 +827,6 @@ exports.requestAddProgram = async (req, res) => {
   }
 };
 
-// ✅ Register specifically for a Holiday Program
 exports.registerForHolidayProgram = async (req, res) => {
   req.body.requestType = "HOLIDAY_PROGRAM";
   return exports.requestAddProgram(req, res);
@@ -927,7 +879,6 @@ const generateClassSessions = (term, classObj) => {
   return sessions;
 };
 
-// Helper: Get per-day startTime/endTime for a session date
 const getSessionTimesForDateUser = (classObj, sessionDate) => {
   const dayNames = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
   const scheduleType = classObj.scheduleType || "SINGLE_DAY";
@@ -941,10 +892,8 @@ const getSessionTimesForDateUser = (classObj, sessionDate) => {
   return { startTime: classObj.startTime, endTime: classObj.endTime };
 };
 
-// ✅ Fetch Classes with Attendance for Child
 exports.getMyClasses = async (req, res) => {
   try {
-    // Determine player ID (path param, query param, or default to parent's first child)
     let playerId = req.params.playerId || req.query.playerId;
     if (!playerId) {
       const firstChild = await User.findOne({ parentId: req.parent._id });
@@ -959,7 +908,6 @@ exports.getMyClasses = async (req, res) => {
       }
       playerId = firstChild._id;
     } else {
-      // Validate child ownership
       const child = await User.findOne({ _id: playerId, parentId: req.parent._id });
       if (!child) {
         return res.status(403).json({ success: false, message: "Unauthorized child profile" });
@@ -1076,9 +1024,6 @@ exports.getMyClasses = async (req, res) => {
       });
     }
 
-    // ---------------------------------------------------
-    // 1. Overall Attendance Percentage
-    // ---------------------------------------------------
     let grandTotalSessions = 0;
     let grandTotalPresent = 0;
 
@@ -1092,9 +1037,6 @@ exports.getMyClasses = async (req, res) => {
         ? Number(((grandTotalPresent / grandTotalSessions) * 100).toFixed(1))
         : 0;
 
-    // ---------------------------------------------------
-    // 2. Current Month Calendar (All classes data in target/current month)
-    // ---------------------------------------------------
     const now = new Date();
     const targetYear = req.query.year ? Number(req.query.year) : now.getUTCFullYear();
     const targetMonth = req.query.month ? Number(req.query.month) : now.getUTCMonth() + 1;
@@ -1149,7 +1091,6 @@ exports.getMyClasses = async (req, res) => {
         ? Number(((currentMonthPresentCount / totalCurrentMonthSessions) * 100).toFixed(1))
         : 0;
 
-    // Group current month events by date
     const daysMap = {};
     currentMonthEvents.forEach((evt) => {
       if (!daysMap[evt.date]) {
@@ -1198,7 +1139,6 @@ exports.getMyClasses = async (req, res) => {
   }
 };
 
-// ✅ Fetch Attendance for Child by Class ID
 exports.getMyAttendanceByClass = async (req, res) => {
   try {
     let playerId = req.query.playerId;
@@ -1273,23 +1213,19 @@ exports.getMyAttendanceByClass = async (req, res) => {
   }
 };
 
-// ✅ Parent Dashboard Overview
 exports.getDashboard = async (req, res) => {
   try {
     const parentId = req.parent._id;
 
-    // 1. Fetch children
     const children = await User.find({ parentId }).select("_id fullName assignedClasses goals assists appearances");
     const childIds = children.map((c) => c._id);
 
-    // 2. Upcoming training session (first child's next weekly class)
     let upcomingTraining = null;
     const classes = await Class.find({ players: { $in: childIds } })
       .populate("term", "startDate endDate")
       .populate("coach", "name email");
 
     if (classes.length > 0) {
-      // Pick first class
       const cls = classes[0];
       const nextSessions = generateClassSessions(cls.term, cls).filter((d) => d >= new Date());
       if (nextSessions.length > 0) {
@@ -1307,7 +1243,6 @@ exports.getDashboard = async (req, res) => {
       }
     }
 
-    // 3. Next match (Fixtures involving teams where our children belong)
     const teams = await mongoose.model("Team").find({ players: { $in: childIds } }).select("_id");
     const teamIds = teams.map((t) => t._id);
     const nextMatchDoc = await Fixture.findOne({
@@ -1329,7 +1264,6 @@ exports.getDashboard = async (req, res) => {
       };
     }
 
-    // 4. Combined Stats
     let totalGoals = 0;
     let totalAssists = 0;
     let totalAppearances = 0;
@@ -1339,11 +1273,9 @@ exports.getDashboard = async (req, res) => {
       totalAppearances += c.appearances || 0;
     });
 
-    // 5. Outstanding Payments (Invoices pending)
     const unpaidInvoices = await Invoice.find({ parent: parentId, status: { $in: ["PENDING", "OVERDUE"] } });
     const outstandingPayments = unpaidInvoices.reduce((sum, inv) => sum + inv.amount, 0);
 
-    // 6. Latest News (Featured news)
     const latestNews = await News.find()
       .sort({ publishedAt: -1 })
       .limit(3)
@@ -1373,16 +1305,11 @@ exports.getAllTerms = async (req, res) => {
     const { isEvent, year } = req.query;
 
     const filter = {};
-
-    // Event filter
     if (isEvent === "true") {
       filter.isEvent = true;
     } else if (isEvent === "false" || isEvent === undefined) {
       filter.isEvent = false;
     }
-    // If isEvent === "all", don't apply event filter
-
-    // Year filter
     if (year) {
       filter.year = Number(year);
     }
@@ -1427,7 +1354,6 @@ exports.getPlayerProfile = async (req, res) => {
       player: player._id,
     });
 
-    // Calculate age
     let age = null;
 
     if (player.dob) {
@@ -1534,7 +1460,6 @@ exports.getClasses = async (req, res) => {
   }
 };
 
-// ✅ Parent Mark Player Absent for Class Session
 exports.markPlayerAbsent = async (req, res) => {
   try {
     const parentId = req.parent._id;
@@ -1554,7 +1479,6 @@ exports.markPlayerAbsent = async (req, res) => {
       });
     }
 
-    // 1. Validate Parent ownership of Child Profile
     const childDoc = await User.findOne({ _id: playerId, parentId });
     if (!childDoc) {
       return res.status(403).json({
@@ -1563,7 +1487,6 @@ exports.markPlayerAbsent = async (req, res) => {
       });
     }
 
-    // 2. Validate Class & Enrollment
     const classDoc = await Class.findById(classId).populate("term");
     if (!classDoc) {
       return res.status(404).json({
@@ -1581,8 +1504,6 @@ exports.markPlayerAbsent = async (req, res) => {
         message: "Player is not enrolled in this class",
       });
     }
-
-    // 3. Date & Session Timing Validation (Today or Future sessions only)
     const targetDate = new Date(sessionDate);
     if (isNaN(targetDate.getTime())) {
       return res.status(400).json({
@@ -1604,7 +1525,6 @@ exports.markPlayerAbsent = async (req, res) => {
       });
     }
 
-    // Check if session date falls within Term range and matches day of week
     if (classDoc.term) {
       const termStart = new Date(classDoc.term.startDate);
       termStart.setUTCHours(0, 0, 0, 0);
@@ -1638,7 +1558,6 @@ exports.markPlayerAbsent = async (req, res) => {
       }
     }
 
-    // 4. Find or Create Attendance Document
     let attendanceDoc = await Attendance.findOne({
       class: classId,
       sessionDate: targetDate,
@@ -1652,7 +1571,6 @@ exports.markPlayerAbsent = async (req, res) => {
       });
     }
 
-    // Check if record for this player already exists
     const recordIndex = attendanceDoc.records.findIndex(
       (r) => r.player.toString() === playerId.toString()
     );
@@ -1674,7 +1592,6 @@ exports.markPlayerAbsent = async (req, res) => {
 
     await attendanceDoc.save();
 
-    // 5. Send Notification to Admin & Assigned Coach
     try {
       const formattedDateStr = targetDate.toISOString().split("T")[0];
       const notifData = {
@@ -1688,7 +1605,7 @@ exports.markPlayerAbsent = async (req, res) => {
       await sendNotification({
         recipientType: "ADMIN",
         adminId: null,
-        title: "Player Absence Notice 😷",
+        title: "Player Absence Notice",
         message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for class "${classDoc.name}" on ${formattedDateStr}. Reason: ${reason.trim()}`,
         type: "ATTENDANCE_ALERT",
         data: notifData,
@@ -1698,7 +1615,7 @@ exports.markPlayerAbsent = async (req, res) => {
         await sendNotification({
           recipientType: "COACH",
           coachId: classDoc.coach,
-          title: "Player Absence Notice 😷",
+          title: "Player Absence Notice",
           message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for class "${classDoc.name}" on ${formattedDateStr}. Reason: ${reason.trim()}`,
           type: "ATTENDANCE_ALERT",
           data: notifData,
@@ -1727,7 +1644,6 @@ exports.markPlayerAbsent = async (req, res) => {
   }
 };
 
-// ✅ Get all programs & registrations for a parent's player(s)
 exports.getPlayerPrograms = async (req, res) => {
   try {
     const parentId = req.parent ? req.parent._id : req.user ? req.user._id : null;
@@ -1764,7 +1680,6 @@ exports.getPlayerPrograms = async (req, res) => {
 
     const playerIds = players.map((p) => p._id);
 
-    // Fetch full player data with populated programs & classes
     const fullPlayers = await User.find({ _id: { $in: playerIds } })
       .populate({
         path: "programs",
@@ -1781,8 +1696,6 @@ exports.getPlayerPrograms = async (req, res) => {
           { path: "coach", select: "fullName email phone" },
         ],
       });
-
-    // Fetch all RegistrationRequests for these players
     const registrationRequests = await RegistrationRequest.find({
       player: { $in: playerIds },
     })
@@ -1792,7 +1705,6 @@ exports.getPlayerPrograms = async (req, res) => {
       .populate("preferredClasses", "name dayOfWeek startTime endTime venue location")
       .sort({ createdAt: -1 });
 
-    // Fetch EventRegistrations for these players
     const eventRegistrations = await EventRegistration.find({
       user: { $in: playerIds },
       status: "REGISTERED",
@@ -1800,7 +1712,6 @@ exports.getPlayerPrograms = async (req, res) => {
       .populate("event")
       .sort({ createdAt: -1 });
 
-    // Format output
     const results = fullPlayers.map((player) => {
       const pIdStr = player._id.toString();
 

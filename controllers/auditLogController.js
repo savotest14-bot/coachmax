@@ -1,13 +1,5 @@
 const AuditLog = require("../models/AuditLog");
 
-// ═══════════════════════════════════════════════
-// Audit Log Controller — Super Admin
-// ═══════════════════════════════════════════════
-
-/**
- * GET /api/admin/audit-logs
- * Super Admin views all audit logs with filtering.
- */
 exports.getAuditLogs = async (req, res) => {
   try {
     let {
@@ -56,10 +48,6 @@ exports.getAuditLogs = async (req, res) => {
   }
 };
 
-/**
- * GET /api/admin/audit-logs/:entityType/:entityId
- * Get audit history for a specific entity.
- */
 exports.getEntityAuditLogs = async (req, res) => {
   try {
     const { entityType, entityId } = req.params;

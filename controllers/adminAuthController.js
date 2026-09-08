@@ -42,7 +42,7 @@ exports.adminLogin = async (req, res) => {
 
     const admin = await Admin.findOne({
       $or: [{ email }, { mobile }],
-    }).select("+password"); // ✅ important
+    }).select("+password");
 
     if (!admin) {
       return res.status(404).json({ message: "Admin not found" });
@@ -64,7 +64,6 @@ exports.adminLogin = async (req, res) => {
     admin.tokens.push(token);
     admin.tokens = admin.tokens.slice(-5);
 
-    // Push fcmToken uniquely if provided
     if (fcmToken) {
       admin.fcmTokens = admin.fcmTokens || [];
       if (!admin.fcmTokens.includes(fcmToken)) {
@@ -74,7 +73,6 @@ exports.adminLogin = async (req, res) => {
 
     await admin.save();
 
-    // remove sensitive fields
     const adminObj = admin.toObject();
     delete adminObj.password;
     delete adminObj.tokens;
@@ -264,7 +262,6 @@ exports.updatePaymentStatus = async (req, res) => {
       await user.save();
     }
 
-    // Generate class invoice(s) when status is updated to UNPAID
     if (paymentStatus === "UNPAID") {
       try {
         if (classId) {
@@ -339,7 +336,6 @@ exports.assignClassToUser = async (req, res) => {
     if (!user) throw new Error("User not found");
     if (!classData) throw new Error("Class not found");
 
-    // ✅ Validate program & category
     const userProgramIds = (user.programs || []).map(p => p.toString());
     if (
       !userProgramIds.includes(classData.program.toString()) ||
@@ -348,7 +344,6 @@ exports.assignClassToUser = async (req, res) => {
       throw new Error("User not eligible for this class");
     }
 
-    // ✅ Prevent duplicate
     const alreadyAssigned = classData.players.some(
       (id) => id.toString() === userId
     );
@@ -357,7 +352,6 @@ exports.assignClassToUser = async (req, res) => {
       throw new Error("User already assigned");
     }
 
-    // ✅ Capacity safe update
     const updatedClass = await Class.findOneAndUpdate(
       {
         _id: classId,
@@ -375,7 +369,6 @@ exports.assignClassToUser = async (req, res) => {
       throw new Error("Class is full");
     }
 
-    // ✅ Update user
     if (!user.assignedClasses.some(id => id.toString() === classId)) {
       user.assignedClasses.push(classId);
     }
@@ -393,7 +386,6 @@ exports.assignClassToUser = async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
-    // ✅ Automatic Invoice Generation on Class Assignment
     try {
       await generateClassInvoice({ userId, classId });
     } catch (invErr) {
@@ -428,18 +420,15 @@ exports.removeClassFromUser = async (req, res) => {
     if (!user) throw new Error("Player not found");
     if (!classData) throw new Error("Class not found");
 
-    // Remove classId from user.assignedClasses
     user.assignedClasses = (user.assignedClasses || []).filter(
       (c) => c.toString() !== classId.toString()
     );
 
-    // Add classId to user.removedClasses for attendance history tracking
     user.removedClasses = user.removedClasses || [];
     if (!user.removedClasses.some((c) => c.toString() === classId.toString())) {
       user.removedClasses.push(classId);
     }
 
-    // Remove userId from classData.players
     classData.players = (classData.players || []).filter(
       (p) => p.toString() !== userId.toString()
     );
@@ -471,7 +460,6 @@ exports.removeClassFromUser = async (req, res) => {
   }
 };
 
-// ✅ Transfer Player from One Class to Another Class (Admin)
 exports.transferPlayerClass = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -508,7 +496,6 @@ exports.transferPlayerClass = async (req, res) => {
       return res.status(404).json({ success: false, message: "Target class (toClass) not found" });
     }
 
-    // Check if player is currently in fromClass
     const isAssigned = (user.assignedClasses || []).some(
       (c) => c.toString() === fromClassId.toString()
     );
@@ -520,7 +507,6 @@ exports.transferPlayerClass = async (req, res) => {
       });
     }
 
-    // Check capacity for toClass if capacity is defined
     if (toClass.capacity && toClass.players.length >= toClass.capacity) {
       return res.status(400).json({
         success: false,
@@ -528,33 +514,27 @@ exports.transferPlayerClass = async (req, res) => {
       });
     }
 
-    // 1. Remove fromClassId from user.assignedClasses
     user.assignedClasses = (user.assignedClasses || []).filter(
       (c) => c.toString() !== fromClassId.toString()
     );
 
-    // 2. Add fromClassId to user.removedClasses
     user.removedClasses = user.removedClasses || [];
     if (!user.removedClasses.some((c) => c.toString() === fromClassId.toString())) {
       user.removedClasses.push(fromClassId);
     }
 
-    // 3. Add toClassId to user.assignedClasses
     if (!user.assignedClasses.some((c) => c.toString() === toClassId.toString())) {
       user.assignedClasses.push(toClassId);
     }
 
-    // 4. Remove toClassId from user.removedClasses if previously removed
     user.removedClasses = user.removedClasses.filter(
       (c) => c.toString() !== toClassId.toString()
     );
 
-    // 5. Remove userId from fromClass.players roster
     fromClass.players = (fromClass.players || []).filter(
       (p) => p.toString() !== userId.toString()
     );
 
-    // 6. Add userId to toClass.players roster
     if (!toClass.players.some((p) => p.toString() === userId.toString())) {
       toClass.players.push(userId);
     }
@@ -566,7 +546,6 @@ exports.transferPlayerClass = async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
-    // 7. Auto Invoice Generation if new class price > previous class price
     let transferInvoiceResult = { invoice: null, priceDiff: 0, invoiceGenerated: false };
     try {
       transferInvoiceResult = await generateTransferInvoice({
@@ -617,7 +596,6 @@ exports.assignCoachToClass = async (req, res) => {
     if (!classData) throw new Error("Class not found");
     if (!coach) throw new Error("Coach not found");
 
-    // ✅ Optional: check role
     if (coach.role !== "COACH") {
       throw new Error("User is not a coach");
     }
@@ -626,7 +604,6 @@ exports.assignCoachToClass = async (req, res) => {
       throw new Error("Coach is inactive and cannot be assigned to class");
     }
 
-    // ✅ Assign coach (overwrite or prevent duplicate)
     classData.coach = coachId;
 
     await classData.save({ session });
@@ -679,7 +656,6 @@ exports.createBanner = async (req, res) => {
   }
 };
 
-// UPDATE
 exports.updateBanner = async (req, res) => {
   try {
     const { id } = req.params;
@@ -692,7 +668,6 @@ exports.updateBanner = async (req, res) => {
       });
     }
 
-    // delete old image if new one uploaded
     if (req.file && banner.image) {
       const oldPath = path.join(__dirname, "..", banner.image);
 
@@ -726,7 +701,6 @@ exports.updateBanner = async (req, res) => {
   }
 };
 
-// DELETE
 exports.deleteBanner = async (req, res) => {
   try {
     const { id } = req.params;
@@ -739,7 +713,6 @@ exports.deleteBanner = async (req, res) => {
       });
     }
 
-    // delete image safely
     if (banner.image) {
       const filePath = path.join(__dirname, "..", banner.image);
 
@@ -765,7 +738,6 @@ exports.deleteBanner = async (req, res) => {
   }
 };
 
-// GET ALL
 exports.getAllBanners = async (req, res) => {
   try {
     const { page = 1, limit = 10, isActive } = req.query;
@@ -793,7 +765,6 @@ exports.getAllBanners = async (req, res) => {
   }
 };
 
-// TOGGLE ACTIVE
 exports.toggleBannerStatus = async (req, res) => {
   try {
     const { id } = req.params;
@@ -822,7 +793,6 @@ exports.exportUsers = async (req, res) => {
       userIds = [],
     } = req.body;
 
-    // Validate paymentStatus
     const validPaymentStatus = ["TRIAL", "UNPAID", "PAID", "OVER_DUE"];
     if (paymentStatus && !validPaymentStatus.includes(paymentStatus)) {
       return res.status(400).json({ message: "Invalid paymentStatus" });
@@ -830,12 +800,10 @@ exports.exportUsers = async (req, res) => {
 
     const query = {};
 
-    // Selected users (single or multiple)
     if (userIds && userIds.length > 0) {
       query._id = { $in: userIds };
     }
 
-    // Filters
     if (paymentStatus) {
       query["classPaymentStatuses.paymentStatus"] = paymentStatus;
     }
@@ -848,7 +816,6 @@ exports.exportUsers = async (req, res) => {
       ];
     }
 
-    // Fetch Users
     const users = await User.find(query)
       .select("-password -tokens")
       .sort({ createdAt: -1 });
@@ -857,7 +824,6 @@ exports.exportUsers = async (req, res) => {
       return res.status(404).json({ message: "No users found" });
     }
 
-    // Format Data
     const data = users.map((u) => ({
       Name: u.fullName || "",
       Email: u.email || "",
@@ -872,7 +838,6 @@ exports.exportUsers = async (req, res) => {
       CreatedAt: new Date(u.createdAt).toLocaleString(),
     }));
 
-    // ================= CSV =================
     if (format === "csv") {
       const csv = [
         Object.keys(data[0]).join(","),
@@ -888,7 +853,6 @@ exports.exportUsers = async (req, res) => {
       return res.send(csv);
     }
 
-    // ================= EXCEL =================
     if (format === "excel") {
       const workbook = new ExcelJS.Workbook();
       const worksheet = workbook.addWorksheet("Users");
@@ -915,7 +879,6 @@ exports.exportUsers = async (req, res) => {
       return res.end();
     }
 
-    // ❌ Invalid format
     return res.status(400).json({
       message: "Invalid format (csv/excel)",
     });
@@ -967,10 +930,7 @@ exports.createCategory = async (req, res) => {
   }
 };
 
-/**
- * PUT /api/admin/updateCategory/:id
- * Update category name only.
- */
+
 exports.updateCategory = async (req, res) => {
   try {
     const { id } = req.params;
@@ -998,7 +958,6 @@ exports.updateCategory = async (req, res) => {
       });
     }
 
-    // Check for duplicate name (excluding current category)
     const existing = await Category.findOne({
       name: name.toUpperCase(),
       _id: { $ne: id },
@@ -1024,10 +983,6 @@ exports.updateCategory = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/admin/deleteCategory/:id
- * Delete category if it is not connected to any Class, Program, User, or RegistrationRequest.
- */
 exports.deletecatCategory = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1047,7 +1002,6 @@ exports.deletecatCategory = async (req, res) => {
       });
     }
 
-    // Check references across connected entities in parallel
     const [
       classCount,
       programCount,
@@ -1151,10 +1105,6 @@ exports.createProgram = async (req, res) => {
   }
 };
 
-/**
- * PUT /api/admin/updateProgram/:id
- * Update program name only.
- */
 exports.updateProgram = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1182,7 +1132,6 @@ exports.updateProgram = async (req, res) => {
       });
     }
 
-    // Check for duplicate name within the same category
     const existing = await Program.findOne({
       name: name,
       category: program.category,
@@ -1209,10 +1158,6 @@ exports.updateProgram = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/admin/deleteProgram/:id
- * Delete program if it is not connected to any Class, User, or RegistrationRequest.
- */
 exports.deleteProgram = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1232,7 +1177,6 @@ exports.deleteProgram = async (req, res) => {
       });
     }
 
-    // Check references across connected entities in parallel
     const [
       classCount,
       userCount,
@@ -1293,7 +1237,6 @@ exports.createTerm = async (req, res) => {
       endDate: parseDate(endDate),
     };
 
-    // Only set if provided, otherwise schema default (false) will be used
     if (isEvent === true) {
       termData.isEvent = true;
     }
@@ -1309,10 +1252,6 @@ exports.createTerm = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/admin/deleteTerm/:id
- * Delete a Term only if it is NOT connected to any Class, User, or RegistrationRequest.
- */
 exports.deleteTerm = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1332,7 +1271,6 @@ exports.deleteTerm = async (req, res) => {
       });
     }
 
-    // Check references across connected entities in parallel
     const [
       classCount,
       userCount,
@@ -1383,15 +1321,12 @@ exports.getAllTerms = async (req, res) => {
 
     const filter = {};
 
-    // Event filter
     if (isEvent === "true") {
       filter.isEvent = true;
     } else if (isEvent === "false" || isEvent === undefined) {
       filter.isEvent = false;
     }
-    // If isEvent === "all", don't apply event filter
 
-    // Year filter
     if (year) {
       filter.year = Number(year);
     }
@@ -1432,13 +1367,11 @@ exports.updateTerm = async (req, res) => {
     const parseDate = (dateStr) => {
       if (!dateStr) return undefined;
 
-      // Handle dd/mm/yyyy
       if (dateStr.includes("/")) {
         const [day, month, year] = dateStr.split("/").map(Number);
         return new Date(year, month - 1, day);
       }
 
-      // Handle ISO format
       return new Date(dateStr);
     };
 
@@ -1450,7 +1383,6 @@ exports.updateTerm = async (req, res) => {
     if (startDate) updatedData.startDate = parseDate(startDate);
     if (endDate) updatedData.endDate = parseDate(endDate);
 
-    // ✅ Validate dates
     if (
       updatedData.startDate &&
       updatedData.endDate &&
@@ -1499,7 +1431,6 @@ exports.createClass = async (req, res) => {
       schedule: rawSchedule,
     } = req.body;
 
-    // ── Price validation ──
     if (price !== undefined && price !== null) {
       const numPrice = Number(price);
       if (isNaN(numPrice) || numPrice < 0) {
@@ -1509,7 +1440,6 @@ exports.createClass = async (req, res) => {
       }
     }
 
-    // ── Determine schedule type ──
     const scheduleType = (rawScheduleType || "SINGLE_DAY").toUpperCase();
     const validScheduleTypes = ["SINGLE_DAY", "WEEKDAYS", "CUSTOM"];
     if (!validScheduleTypes.includes(scheduleType)) {
@@ -1529,14 +1459,12 @@ exports.createClass = async (req, res) => {
 
     const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
-    // ── Build schedule entries based on scheduleType ──
     let finalSchedule = [];
     let rootDayOfWeek;
     let rootStartTime;
     let rootEndTime;
 
     if (scheduleType === "SINGLE_DAY") {
-      // ── SINGLE_DAY: existing behavior ──
       if (!dayOfWeek || !startTime || !endTime) {
         return res.status(400).json({
           message: "Required fields missing (dayOfWeek, startTime, endTime required for SINGLE_DAY)",
@@ -1561,10 +1489,8 @@ exports.createClass = async (req, res) => {
       rootDayOfWeek = day;
       rootStartTime = startTime;
       rootEndTime = endTime;
-      // No schedule[] for SINGLE_DAY — uses root fields
 
     } else if (scheduleType === "WEEKDAYS") {
-      // ── WEEKDAYS: auto-generate Mon-Fri with provided startTime/endTime ──
       if (!startTime || !endTime) {
         return res.status(400).json({
           message: "startTime and endTime are required for WEEKDAYS schedule",
@@ -1593,14 +1519,12 @@ exports.createClass = async (req, res) => {
       rootEndTime = endTime;
 
     } else if (scheduleType === "CUSTOM") {
-      // ── CUSTOM: admin-provided schedule array ──
       if (!Array.isArray(rawSchedule) || rawSchedule.length === 0) {
         return res.status(400).json({
           message: "schedule array with at least one entry is required for CUSTOM schedule",
         });
       }
 
-      // Validate each entry
       for (let i = 0; i < rawSchedule.length; i++) {
         const entry = rawSchedule[i];
         if (!entry.dayOfWeek || !entry.startTime || !entry.endTime) {
@@ -1629,7 +1553,6 @@ exports.createClass = async (req, res) => {
         }
       }
 
-      // Check for internal conflicts (same day overlapping times)
       const normalizedEntries = rawSchedule.map((e) => ({
         dayOfWeek: e.dayOfWeek.toUpperCase(),
         startTime: e.startTime,
@@ -1658,7 +1581,6 @@ exports.createClass = async (req, res) => {
       rootEndTime = normalizedEntries[0].endTime;
     }
 
-    // ── Common required fields ──
     if (!term || !program || !category || !location || !coach || !capacity) {
       return res.status(400).json({
         message: "Required fields missing",
@@ -1688,14 +1610,11 @@ exports.createClass = async (req, res) => {
       return res.status(400).json({ message: "Coach is inactive and cannot be assigned to classes" });
     }
 
-    // ── Coach overlap check ──
-    // Build list of day/time entries to check
     const entriesToCheck = finalSchedule.length > 0
       ? finalSchedule
       : [{ dayOfWeek: rootDayOfWeek, startTime: rootStartTime, endTime: rootEndTime }];
 
     for (const entry of entriesToCheck) {
-      // Check against existing classes with root dayOfWeek (legacy/single-day)
       const overlapRoot = await Class.findOne({
         coach,
         term,
@@ -1710,7 +1629,6 @@ exports.createClass = async (req, res) => {
         });
       }
 
-      // Check against existing multi-day classes (schedule[] entries)
       const overlapSchedule = await Class.findOne({
         coach,
         term,
@@ -1731,7 +1649,6 @@ exports.createClass = async (req, res) => {
       }
     }
 
-    // ── Create the Class(es) ──
     if (finalSchedule.length > 0) {
       const classesToCreate = finalSchedule.map((entry) => ({
         name,
@@ -1781,21 +1698,6 @@ exports.createClass = async (req, res) => {
   }
 };
 
-
-/**
- * DELETE /api/admin/deleteClass/:id or DELETE /api/admin/class/:id
- * Permanently deletes a Class and cascades deletion across all related models:
- * - Unassigns and removes classId from all users (assignedClasses, removedClasses, temporaryClass)
- * - Deletes all Attendance records for this class
- * - Deletes all AttendanceHistory records for this class
- * - Deletes all CoachNotes for this class
- * - Deletes all TrainingSessions for this class
- * - Deletes all associated ChatRooms and their Messages (including attachment files on disk)
- * - Removes classId from RegistrationRequests' preferredClasses
- * - Preserves Invoices for billing/financial history
- * - Deletes the Class document itself
- * - Logs AuditLog for admin action tracking
- */
 exports.deleteClassPermanently = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1816,7 +1718,6 @@ exports.deleteClassPermanently = async (req, res) => {
       });
     }
 
-    // 1. Find all ChatRooms for this class to clean up messages and attachments
     const chatRooms = await ChatRoom.find({ classId: id });
     const chatRoomIds = chatRooms.map((r) => r._id);
 
@@ -1841,7 +1742,6 @@ exports.deleteClassPermanently = async (req, res) => {
       await ChatRoom.deleteMany({ classId: id });
     }
 
-    // 2. Clean up references in User (Player) documents
     await User.updateMany(
       { $or: [{ assignedClasses: id }, { removedClasses: id }, { temporaryClass: id }] },
       {
@@ -1850,28 +1750,22 @@ exports.deleteClassPermanently = async (req, res) => {
       }
     );
 
-    // 3. Clean up references in RegistrationRequest documents
     await RegistrationRequest.updateMany(
       { preferredClasses: id },
       { $pull: { preferredClasses: id } }
     );
 
-    // 4. Delete Attendance & AttendanceHistory
     const attendanceDeleteResult = await Attendance.deleteMany({ class: id });
     const attendanceHistoryDeleteResult = await AttendanceHistory.deleteMany({ classId: id });
 
-    // 5. Delete CoachNotes
     const coachNotesDeleteResult = await CoachNote.deleteMany({ classId: id });
 
-    // 6. Delete TrainingSessions
     const trainingSessionsDeleteResult = await TrainingSession.deleteMany({
       $or: [{ class: id }, { classId: id }],
     });
 
-    // 7. Delete the Class document itself (Invoices are preserved for billing history)
     await Class.findByIdAndDelete(id);
 
-    // 8. Audit log
     if (adminId) {
       await AuditLog.create({
         user: adminId,
@@ -1930,7 +1824,6 @@ exports.getAllClasses = async (req, res) => {
 
     if (selectedTerm) filter.term = selectedTerm;
     if (selectedDay) {
-      // Match both root dayOfWeek (legacy/single-day) and schedule[].dayOfWeek (multi-day)
       filter.$or = [
         { dayOfWeek: { $regex: new RegExp(`^${selectedDay}$`, "i") } },
         { "schedule.dayOfWeek": { $regex: new RegExp(`^${selectedDay}$`, "i") } },
@@ -1982,7 +1875,7 @@ exports.getAllClassesForAssign = async (req, res) => {
     if (category) filter.category = category;
 
     const classes = await Class.find(filter)
-      .select("-players") // ✅ EXCLUDE players field
+      .select("-players")
       .sort({ dayOfWeek: 1, startTime: 1 });
 
     res.json({ data: classes });
@@ -2035,11 +1928,9 @@ exports.updateClass = async (req, res) => {
 
     const updatedData = {};
 
-    // ✅ Assign only provided fields
     if (name) updatedData.name = name;
     if (location) updatedData.location = location;
 
-    // ✅ Validate ObjectIds (only if provided)
     if (term) {
       if (!mongoose.Types.ObjectId.isValid(term)) {
         return res.status(400).json({ message: "Invalid term ID" });
@@ -2061,7 +1952,6 @@ exports.updateClass = async (req, res) => {
       }
       updatedData.program = program;
 
-      // If category also provided, validate relation
       if (category) {
         if (programData.category.toString() !== category) {
           return res.status(400).json({
@@ -2099,7 +1989,6 @@ exports.updateClass = async (req, res) => {
       updatedData.coach = coach;
     }
 
-    // ✅ Day validation
     if (dayOfWeek) {
       const validDays = [
         "MONDAY",
@@ -2120,7 +2009,6 @@ exports.updateClass = async (req, res) => {
       updatedData.dayOfWeek = dayOfWeek;
     }
 
-    // ✅ Time validation
     const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
     if (startTime) {
@@ -2141,7 +2029,6 @@ exports.updateClass = async (req, res) => {
       updatedData.endTime = endTime;
     }
 
-    // ✅ Validate time logic if both present
     if (startTime && endTime) {
       const toMinutes = (t) => {
         const [h, m] = t.split(":").map(Number);
@@ -2155,7 +2042,6 @@ exports.updateClass = async (req, res) => {
       }
     }
 
-    // ✅ Capacity validation
     if (capacity !== undefined) {
       if (capacity < 1 || capacity > 200) {
         return res.status(400).json({
@@ -2165,12 +2051,10 @@ exports.updateClass = async (req, res) => {
       updatedData.capacity = capacity;
     }
 
-    // ✅ Price validation
     if (price !== undefined && price !== null) {
       updatedData.price = Number(price);
     }
 
-    // ✅ Schedule update support
     if (rawScheduleType) {
       const validScheduleTypes = ["SINGLE_DAY", "WEEKDAYS", "CUSTOM"];
       const st = rawScheduleType.toUpperCase();
@@ -2212,7 +2096,6 @@ exports.updateClass = async (req, res) => {
       }
     }
 
-    // ✅ Prevent coach conflict (if relevant fields updated)
     if (coach || dayOfWeek || startTime || endTime) {
       const existing = await Class.findOne({
         _id: { $ne: req.params.id },
@@ -2270,12 +2153,10 @@ exports.getClassesByTerm = async (req, res) => {
   try {
     const { termId } = req.params;
 
-    // ✅ Validate ID
     if (!mongoose.Types.ObjectId.isValid(termId)) {
       return res.status(400).json({ message: "Invalid term ID" });
     }
 
-    // ✅ Check term exists
     const term = await Term.findById(termId);
     if (!term) {
       return res.status(404).json({ message: "Term not found" });
@@ -2298,19 +2179,14 @@ exports.getClassesByTerm = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────
-// Helper: Generate session dates for a day of the week within term range
-// ─────────────────────────────────────────────
 const _generateDatesForDay = (start, end, targetDay) => {
   const dates = [];
   let current = new Date(start);
 
-  // move to correct weekday (UTC)
   while (current.getUTCDay() !== targetDay) {
     current.setUTCDate(current.getUTCDate() + 1);
   }
 
-  // weekly loop
   while (current <= end) {
     dates.push(new Date(current));
     current.setUTCDate(current.getUTCDate() + 7);
@@ -2329,11 +2205,6 @@ const DAY_MAP = {
   SATURDAY: 6,
 };
 
-// ─────────────────────────────────────────────
-// generateClassSessions — supports SINGLE_DAY, WEEKDAYS, CUSTOM
-// Returns array of Date objects (backward compatible).
-// For multi-day classes, sessions are sorted chronologically.
-// ─────────────────────────────────────────────
 const generateClassSessions = (term, classObj) => {
   const sessions = [];
   if (!term || !term.startDate || !term.endDate) return sessions;
@@ -2347,17 +2218,16 @@ const generateClassSessions = (term, classObj) => {
   const schedule = classObj.schedule || [];
 
   if ((scheduleType === "WEEKDAYS" || scheduleType === "CUSTOM") && schedule.length > 0) {
-    // Multi-day: generate dates for each schedule entry
+
     for (const entry of schedule) {
       const targetDay = DAY_MAP[(entry.dayOfWeek || "").toUpperCase()];
       if (targetDay === undefined) continue;
       const dates = _generateDatesForDay(start, end, targetDay);
       sessions.push(...dates);
     }
-    // Sort chronologically
+
     sessions.sort((a, b) => a.getTime() - b.getTime());
   } else {
-    // SINGLE_DAY or legacy: original logic
     if (!classObj.dayOfWeek) return sessions;
     const targetDay = DAY_MAP[classObj.dayOfWeek.toUpperCase()];
     if (targetDay === undefined) return sessions;
@@ -2368,10 +2238,6 @@ const generateClassSessions = (term, classObj) => {
   return sessions;
 };
 
-// ─────────────────────────────────────────────
-// generateClassSessionsEnriched — returns { date, dayOfWeek, startTime, endTime }
-// Used when per-day times are needed (multi-day classes have different times per day).
-// ─────────────────────────────────────────────
 const generateClassSessionsEnriched = (term, classObj) => {
   const sessions = [];
   if (!term || !term.startDate || !term.endDate) return sessions;
@@ -2418,10 +2284,6 @@ const generateClassSessionsEnriched = (term, classObj) => {
   return sessions;
 };
 
-// ─────────────────────────────────────────────
-// Helper: Get startTime/endTime for a specific session date from a class
-// (For multi-day classes, looks up the schedule entry matching the date's weekday)
-// ─────────────────────────────────────────────
 const getSessionTimesForDate = (classObj, sessionDate) => {
   const dayNames = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
   const scheduleType = classObj.scheduleType || "SINGLE_DAY";
@@ -2447,7 +2309,6 @@ exports.getClassSessions = async (req, res) => {
 
     const enrichedSessions = generateClassSessionsEnriched(classData.term, classData);
 
-    // ✅ Convert to UI format
     const formatted = enrichedSessions.map((s) => ({
       fullDate: s.date,
       day: s.date.getUTCDate(),
@@ -2458,7 +2319,6 @@ exports.getClassSessions = async (req, res) => {
       endTime: s.endTime,
     }));
 
-    // ✅ Group by month (VERY IMPORTANT)
     const grouped = {};
 
     formatted.forEach((s) => {
@@ -2496,7 +2356,6 @@ exports.markAttendance = async (req, res) => {
       });
     }
 
-    // ✅ normalize date (important)
     const date = new Date(sessionDate);
     date.setUTCHours(0, 0, 0, 0);
 
@@ -2551,17 +2410,14 @@ exports.markSingleAttendance = async (req, res) => {
       });
     }
 
-    // ✅ normalize date (VERY IMPORTANT)
     const date = new Date(sessionDate);
     date.setUTCHours(0, 0, 0, 0);
 
-    // ✅ find existing attendance for that session
     let attendance = await Attendance.findOne({
       class: classId,
       sessionDate: date,
     });
 
-    // ✅ if not exists → create
     if (!attendance) {
       attendance = await Attendance.create({
         class: classId,
@@ -2571,16 +2427,13 @@ exports.markSingleAttendance = async (req, res) => {
       });
     }
 
-    // ✅ find player record
     const existingRecord = attendance.records.find(
       (r) => r.player.toString() === playerId
     );
 
     if (existingRecord) {
-      // 🔁 update existing
       existingRecord.status = status;
     } else {
-      // ➕ add new
       attendance.records.push({
         player: playerId,
         status,
@@ -2670,7 +2523,6 @@ exports.getAttendanceByDate = async (req, res) => {
       select: "fullName profile email phone",
     });
 
-    // ✅ If no attendance → return empty structure
     if (!attendance) {
       return res.json({
         sessionDate,
@@ -2679,7 +2531,6 @@ exports.getAttendanceByDate = async (req, res) => {
       });
     }
 
-    // ✅ Transform data for UI
     const attendanceMap = {};
 
     attendance.records.forEach((r) => {
@@ -2857,7 +2708,6 @@ exports.toggleCoachActiveStatus = async (req, res) => {
       });
     }
 
-    // Toggle status: true -> false, false -> true
     coach.isActive = !coach.isActive;
 
     await coach.save();
@@ -2967,10 +2817,8 @@ exports.getClassPlayers = async (req, res) => {
 
 exports.getCoachClassesWithSessions = async (req, res) => {
   try {
-    // const coachId = req.user._id;
     const coachId = req.params.coachId;
 
-    // ✅ fetch classes assigned to coach
     const classes = await Class.find({ coach: coachId })
       .populate("term", "name startDate endDate")
       .populate("program", "name")
@@ -2981,15 +2829,12 @@ exports.getCoachClassesWithSessions = async (req, res) => {
     const result = [];
 
     for (const cls of classes) {
-      // ✅ generate sessions
       const sessions = generateClassSessions(cls.term, cls);
-
-      // ✅ format sessions for UI
       const formattedSessions = sessions.map((date) => {
         const d = new Date(date);
 
         return {
-          date: d.toISOString().split("T")[0], // ✅ consistent
+          date: d.toISOString().split("T")[0],
           day: d.getUTCDate(),
           month: d.getUTCMonth() + 1,
           year: d.getUTCFullYear(),
@@ -3036,7 +2881,6 @@ exports.getClassFiltersWithTimeSlots = async (req, res) => {
     const { categoryId, programId, day, termId, term } = req.query;
     const selectedTerm = termId || term;
 
-    // ✅ base query
     const query = {};
     if (categoryId) query.category = categoryId;
     if (programId) query.program = programId;
@@ -3053,22 +2897,18 @@ exports.getClassFiltersWithTimeSlots = async (req, res) => {
       .populate("program", "name")
       .populate("term", "name year startDate endDate");
 
-    // ✅ categories
     const categories = [...new Map(
       classes.filter(c => c.category).map(c => [c.category._id.toString(), c.category])
     ).values()];
 
-    // ✅ programs
     const programs = [...new Map(
       classes.filter(c => c.program).map(c => [c.program._id.toString(), c.program])
     ).values()];
 
-    // ✅ terms
     const terms = [...new Map(
       classes.filter(c => c.term).map(c => [c.term._id.toString(), c.term])
     ).values()];
 
-    // ✅ days (include schedule days for multi-day classes)
     const daysSet = new Set();
     classes.forEach((c) => {
       if (c.dayOfWeek) daysSet.add(c.dayOfWeek);
@@ -3078,12 +2918,10 @@ exports.getClassFiltersWithTimeSlots = async (req, res) => {
     });
     const days = [...daysSet];
 
-    // ✅ time slots (only if day is selected)
     let timeSlots = [];
 
     if (day) {
       classes.forEach((c) => {
-        // Check schedule entries first for multi-day classes
         if (c.schedule && c.schedule.length > 0) {
           const matchingEntry = c.schedule.find((s) =>
             (s.dayOfWeek || "").toUpperCase() === day.toUpperCase()
@@ -3097,7 +2935,6 @@ exports.getClassFiltersWithTimeSlots = async (req, res) => {
             return;
           }
         }
-        // Fallback to root fields
         timeSlots.push({
           classId: c._id,
           startTime: c.startTime,
@@ -3111,7 +2948,7 @@ exports.getClassFiltersWithTimeSlots = async (req, res) => {
       categories,
       programs,
       days,
-      timeSlots, // 👈 added here
+      timeSlots,
     });
 
   } catch (err) {
@@ -3132,7 +2969,7 @@ exports.getClassFullTable = async (req, res) => {
           "fullName email dob phone contactName classPaymentStatuses isMedicalCondition medicalConditionDetails rating prefferedFoot parentId profileImage",
         populate: {
           path: "parentId",
-          select: "fullName email phone profileImage", // choose the fields you need
+          select: "fullName email phone profileImage",
         },
       });
 
@@ -3140,19 +2977,16 @@ exports.getClassFullTable = async (req, res) => {
       return res.status(404).json({ message: "Class not found" });
     }
 
-    // ✅ 1. Generate sessions
     const allSessions = generateClassSessions(cls.term, cls);
 
     const sessionDates = allSessions.map((d) =>
       new Date(d).toISOString().split("T")[0]
     );
 
-    // ✅ 2. Fetch attendance
     const attendanceData = await Attendance.find({
       class: classId,
     }).select("sessionDate records");
 
-    // ✅ 3. Convert attendance to map
     const attendanceMap = {};
 
     attendanceData.forEach((att) => {
@@ -3167,7 +3001,6 @@ exports.getClassFullTable = async (req, res) => {
       });
     });
 
-    // ✅ 4. Build player rows
     const players = cls.players.map((player) => {
       const attendance = {};
 
@@ -3189,7 +3022,6 @@ exports.getClassFullTable = async (req, res) => {
         rating: player.rating,
         prefferedFoot: player.prefferedFoot,
         paymentStatus: (player.classPaymentStatuses || []).find((item) => item.class && item.class.toString() === classId.toString())?.paymentStatus || "TRIAL",
-        // Parent details
         parent: player.parentId
           ? {
             id: player.parentId._id,
@@ -3203,7 +3035,6 @@ exports.getClassFullTable = async (req, res) => {
       };
     });
 
-    // ✅ 5. Check if broadcast chatroom is present
     const broadcastRoom = await ChatRoom.findOne({
       classId: classId,
       type: "BROADCAST",
@@ -3239,19 +3070,16 @@ exports.exportClassCSV = async (req, res) => {
     return res.status(404).json({ message: "Class not found" });
   }
 
-  // ✅ 1. Generate sessions
   const allSessions = generateClassSessions(cls.term, cls);
 
   const sessionDates = allSessions.map(
     (d) => new Date(d).toISOString().split("T")[0]
   );
 
-  // ✅ 2. Fetch attendance
   const attendanceData = await Attendance.find({
     class: classId,
   }).select("sessionDate records");
 
-  // ✅ 3. Build attendance map
   const attendanceMap = {};
 
   attendanceData.forEach((att) => {
@@ -3266,7 +3094,6 @@ exports.exportClassCSV = async (req, res) => {
     });
   });
 
-  // ✅ 4. Prepare CSV rows
   const rows = cls.players.map((player) => {
     const row = {
       Name: player.fullName,
@@ -3277,7 +3104,6 @@ exports.exportClassCSV = async (req, res) => {
       paymentStatus: (player.classPaymentStatuses || []).find((item) => item.class && item.class.toString() === classId.toString())?.paymentStatus || "TRIAL"
     };
 
-    // Add session columns
     sessionDates.forEach((date) => {
       const status =
         attendanceMap[date]?.[player._id] || "NOT_MARKED";
@@ -3293,7 +3119,6 @@ exports.exportClassCSV = async (req, res) => {
     return row;
   });
 
-  // ✅ 5. CSV fields (order matters)
   const fields = [
     "Name",
     "Email",
@@ -3307,7 +3132,6 @@ exports.exportClassCSV = async (req, res) => {
   const parser = new Parser({ fields });
   const csv = parser.parse(rows);
 
-  // ✅ 6. Send as downloadable file
   res.header("Content-Type", "text/csv");
   res.attachment(`class-${cls.name}-attendance.csv`);
   res.send(csv);
@@ -3390,13 +3214,11 @@ exports.getTeamFullTable = async (req, res) => {
       if (termDoc) targetTerm = termDoc;
     }
 
-    // 1. Generate sessions from term schedule
     const generatedSessions = generateClassSessions(targetTerm, team);
     const sessionDateSet = new Set(
       generatedSessions.map((d) => new Date(d).toISOString().split("T")[0])
     );
 
-    // 2. Fetch attendance (filtered by term date range if term is present)
     const attendanceFilter = { team: teamId };
     if (targetTerm && targetTerm.startDate && targetTerm.endDate) {
       const start = new Date(targetTerm.startDate);
@@ -3408,7 +3230,6 @@ exports.getTeamFullTable = async (req, res) => {
 
     const attendanceData = await Attendance.find(attendanceFilter).select("sessionDate records");
 
-    // 3. Include any attendance dates in session set & build attendance map
     const attendanceMap = {};
     attendanceData.forEach((att) => {
       const date = new Date(att.sessionDate).toISOString().split("T")[0];
@@ -3421,7 +3242,6 @@ exports.getTeamFullTable = async (req, res) => {
 
     const sessionDates = Array.from(sessionDateSet).sort();
 
-    // 4. Build player rows
     const players = (team.players || []).map((item) => {
       const player = item.player && typeof item.player === "object" ? item.player : { _id: item.player };
       const attendance = {};
@@ -3575,17 +3395,15 @@ exports.exportTeamCSV = async (req, res) => {
 
 exports.getMyRole = async (req, res) => {
   try {
-    // Admin or Coach
     if (req.admin) {
       return res.status(200).json({
         success: true,
         data: {
-          role: req.admin.role, // SUPER_ADMIN or COACH
+          role: req.admin.role,
         },
       });
     }
 
-    // Parent
     if (req.parent) {
       return res.status(200).json({
         success: true,
@@ -3647,7 +3465,6 @@ exports.getPlayerDetails = async (req, res) => {
         .lean()
       : [];
 
-    // Fetch per-day attendance records for this player
     const attendanceRecords = await Attendance.find({
       "records.player": playerId,
     })
@@ -3655,7 +3472,6 @@ exports.getPlayerDetails = async (req, res) => {
       .sort({ sessionDate: -1 })
       .lean();
 
-    // Map to per-day attendance format
     const perDayAttendance = attendanceRecords.map((att) => {
       const playerRecord = att.records.find(
         (r) => r.player && r.player.toString() === playerId.toString()
@@ -3675,7 +3491,6 @@ exports.getPlayerDetails = async (req, res) => {
       };
     });
 
-    // Calculate overall attendance metrics
     const totalSessions = perDayAttendance.length;
     const presentCount = perDayAttendance.filter((a) => a.status === "PRESENT").length;
     const absentCount = perDayAttendance.filter((a) => a.status === "ABSENT").length;
@@ -3698,7 +3513,6 @@ exports.getPlayerDetails = async (req, res) => {
       percentage: overallAttendancePercentage,
     };
 
-    // Calculate per-class payment statuses and summary metrics
     const classPaymentStatuses = player.classPaymentStatuses || [];
     const assignedClassesPaymentInfo = (player.assignedClasses || []).map((cls) => {
       const classIdStr = cls._id ? cls._id.toString() : cls.toString();
@@ -3740,7 +3554,6 @@ exports.getPlayerDetails = async (req, res) => {
       assignedClassesWithPaymentStatus: assignedClassesPaymentInfo,
     };
 
-    // Fetch assigned teams and team payment statuses
     const assignedTeams = await Team.find({ "players.player": playerId })
       .select("teamName teamFee logo players ageGroup")
       .lean();
@@ -3778,7 +3591,6 @@ exports.getPlayerDetails = async (req, res) => {
       assignedTeamsWithPaymentStatus: assignedTeamsPaymentInfo,
     };
 
-    // Fetch team attendance records for this player
     const teamAttendanceRecords = await Attendance.find({
       team: { $exists: true, $ne: null },
       "records.player": playerId,
@@ -3853,11 +3665,6 @@ exports.getPlayerDetails = async (req, res) => {
   }
 };
 
-/**
- * @desc Preview Clone Term - Fetch classes and players to clone, check duplicate class existence
- * @route POST /api/admin/cloneTerm/preview
- * @access Private/Admin
- */
 exports.previewCloneTerm = async (req, res) => {
   try {
     const { sourceTermId, targetTermId } = req.body;
@@ -3899,18 +3706,15 @@ exports.previewCloneTerm = async (req, res) => {
       });
     }
 
-    // Fetch source classes with populated category, program, coach, players
     const sourceClasses = await Class.find({ term: sourceTermId })
       .populate("category", "name")
       .populate("program", "name")
       .populate("coach", "fullName name")
       .populate("players", "firstName lastName fullName");
 
-    // Fetch existing target classes to check for duplicate class existence
     const targetClasses = await Class.find({ term: targetTermId });
 
     const classesPreview = sourceClasses.map((cls) => {
-      // Check if duplicate class exists in target term
       const alreadyExists = targetClasses.some((tCls) => {
         const sameName = tCls.name === cls.name;
         const sameCategory = String(tCls.category) === String(cls.category?._id || cls.category);
@@ -3964,11 +3768,6 @@ exports.previewCloneTerm = async (req, res) => {
   }
 };
 
-/**
- * @desc Clone Term - Perform selective clone of classes and players within a transaction
- * @route POST /api/admin/cloneTerm
- * @access Private/Admin
- */
 exports.cloneTerm = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -4046,7 +3845,6 @@ exports.cloneTerm = async (req, res) => {
         continue;
       }
 
-      // Check duplicate in target term
       const existingClass = await Class.findOne({
         term: targetTermId,
         name: sourceClass.name,
@@ -4061,12 +3859,10 @@ exports.cloneTerm = async (req, res) => {
         continue;
       }
 
-      // Filter player IDs to ensure they belonged to the original class
       const validPlayerIds = playerList.filter((pId) =>
         sourceClass.players.some((spId) => String(spId) === String(pId))
       );
 
-      // Create new class document copying fields, ignoring _id, createdAt, updatedAt, attendance
       const classObject = sourceClass.toObject();
       delete classObject._id;
       delete classObject.createdAt;
@@ -4079,7 +3875,6 @@ exports.cloneTerm = async (req, res) => {
       classesCloned++;
       playersCopied += validPlayerIds.length;
 
-      // Update users / players
       for (const playerId of validPlayerIds) {
         const user = await User.findById(playerId).session(session);
         if (user) {
@@ -4121,7 +3916,6 @@ exports.cloneTerm = async (req, res) => {
   }
 };
 
-// ✅ Comprehensive Admin Dashboard Overview API
 exports.getAdminDashboardOverview = async (req, res) => {
   try {
     const startOfToday = new Date();
@@ -4131,10 +3925,8 @@ exports.getAdminDashboardOverview = async (req, res) => {
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
 
-    // Get pending registration request player IDs for unallocated calculation
     const pendingRequestPlayerIds = await RegistrationRequest.find({ status: "PENDING" }).distinct("player");
 
-    // Execute queries in parallel using Promise.all for maximum performance
     const [
       totalPlayers,
       activePlayers,
@@ -4199,7 +3991,6 @@ exports.getAdminDashboardOverview = async (req, res) => {
       recentPlayers,
       recentTemporaryPlayers,
     ] = await Promise.all([
-      // 1. Players
       User.countDocuments({ parentId: { $exists: true } }),
       User.countDocuments({ parentId: { $exists: true }, playerStatus: "ACTIVE" }),
       User.countDocuments({ parentId: { $exists: true }, playerStatus: "PENDING_APPROVAL" }),
@@ -4221,18 +4012,15 @@ exports.getAdminDashboardOverview = async (req, res) => {
       User.countDocuments({ parentId: { $exists: true }, "classPaymentStatuses.paymentStatus": "OVER_DUE" }),
       User.countDocuments({ parentId: { $exists: true }, "classPaymentStatuses.paymentStatus": "OTHERS" }),
 
-      // 2. Parents
       Parent.countDocuments({}),
       Parent.countDocuments({ status: "APPROVED" }),
       Parent.countDocuments({ status: "PENDING" }),
       Parent.countDocuments({ isBlocked: true }),
 
-      // 3. Coaches & Admins
       Admin.countDocuments({ role: "COACH" }),
       Admin.countDocuments({ role: "COACH", status: "ACTIVE" }),
       Admin.countDocuments({ role: "SUPER_ADMIN" }),
 
-      // 4. Classes, Programs & Terms
       Class.countDocuments({}),
       Class.aggregate([{ $group: { _id: null, total: { $sum: "$capacity" } } }]),
       Class.aggregate([{ $project: { count: { $size: { $ifNull: ["$players", []] } } } }, { $group: { _id: null, total: { $sum: "$count" } } }]),
@@ -4241,20 +4029,17 @@ exports.getAdminDashboardOverview = async (req, res) => {
       Term.countDocuments({}),
       Term.countDocuments({ startDate: { $lte: new Date() }, endDate: { $gte: new Date() } }),
 
-      // 5. Registration Requests
       RegistrationRequest.countDocuments({}),
       RegistrationRequest.countDocuments({ status: "PENDING" }),
       RegistrationRequest.countDocuments({ status: "COMPLETED" }),
       RegistrationRequest.aggregate([{ $group: { _id: "$requestType", count: { $sum: 1 } } }]),
 
-      // 6. Events & Registrations
       Event.countDocuments({}),
       Event.countDocuments({ status: "UPCOMING" }),
       Event.countDocuments({ status: "ONGOING" }),
       Event.countDocuments({ status: "COMPLETED" }),
       EventRegistration.countDocuments({ status: "REGISTERED" }),
 
-      // 7. Financials, Invoices & Payments
       Invoice.countDocuments({ status: "ACTIVE" }),
       Invoice.countDocuments({ status: "ACTIVE", paymentStatus: "PAID" }),
       Invoice.countDocuments({ status: "ACTIVE", paymentStatus: { $ne: "PAID" } }),
@@ -4265,18 +4050,15 @@ exports.getAdminDashboardOverview = async (req, res) => {
       Payment.aggregate([{ $match: { status: "APPROVED" } }, { $group: { _id: null, total: { $sum: "$amount" } } }]),
       Invoice.aggregate([{ $match: { status: "ACTIVE", paymentStatus: { $ne: "PAID" } } }, { $group: { _id: null, total: { $sum: { $cond: [{ $gt: ["$totalAmount", 0] }, "$totalAmount", { $ifNull: ["$amount", 0] }] } } } }]),
 
-      // 8. Store & Merchandise
       Product.countDocuments({}),
       Order.countDocuments({}),
       Order.aggregate([{ $group: { _id: "$orderStatus", count: { $sum: 1 } } }]),
       Order.aggregate([{ $match: { orderStatus: "COMPLETED" } }, { $group: { _id: null, total: { $sum: "$totalAmount" } } }]),
 
-      // 9. Announcements / News
       News.countDocuments({}),
       News.countDocuments({ featured: true }),
       News.distinct("category"),
 
-      // 10. Recent Activity Lists (Limit 5 each)
       RegistrationRequest.find({ status: "PENDING" })
         .populate("parent", "fullName email phone")
         .populate("player", "fullName email phone paymentStatus")
@@ -4306,13 +4088,11 @@ exports.getAdminDashboardOverview = async (req, res) => {
         .limit(5),
     ]);
 
-    // Format request types breakdown map
     const requestTypesBreakdown = {};
     (requestTypesAggregate || []).forEach((item) => {
       if (item._id) requestTypesBreakdown[item._id] = item.count;
     });
 
-    // Format order status breakdown map
     const orderStatusBreakdown = {};
     (ordersByStatusAgg || []).forEach((item) => {
       if (item._id) orderStatusBreakdown[item._id] = item.count;
@@ -4409,7 +4189,6 @@ exports.getAdminDashboardOverview = async (req, res) => {
   }
 };
 
-// ✅ Term-wise Class Earnings / Player Payment Report API (Admin only)
 exports.getTermEarningsReport = async (req, res) => {
   try {
     const { termId } = req.params;
@@ -4424,7 +4203,6 @@ exports.getTermEarningsReport = async (req, res) => {
       return res.status(404).json({ success: false, message: "Term not found" });
     }
 
-    // Find all classes in this term
     const classFilter = { term: termId };
     if (classId) {
       if (!mongoose.Types.ObjectId.isValid(classId)) {
@@ -4441,19 +4219,16 @@ exports.getTermEarningsReport = async (req, res) => {
 
     const classIds = classes.map(c => c._id);
 
-    // Fetch all active invoices for these classes
     const invoices = await Invoice.find({
       class: { $in: classIds },
       status: "ACTIVE"
     });
 
-    // Fetch all payments for these invoices
     const invoiceIds = invoices.map(inv => inv._id);
     const payments = await Payment.find({
       invoice: { $in: invoiceIds }
     });
 
-    // Build the report
     let totalEnrolledPlayersSet = new Set();
     let termExpected = 0;
     let termPaid = 0;
@@ -4472,7 +4247,6 @@ exports.getTermEarningsReport = async (req, res) => {
       let classRefunded = 0;
 
       for (const player of classPlayers) {
-        // Find invoice for this player & class
         const playerInvoices = invoices.filter(inv =>
           inv.class.toString() === classDoc._id.toString() &&
           inv.players.some(pId => pId.toString() === player._id.toString())
@@ -4480,12 +4254,11 @@ exports.getTermEarningsReport = async (req, res) => {
 
         let expectedAmount = 0;
         let paidAmount = 0;
-        let refundedAmount = 0; // Not explicitly defined in invoice/payment schema, defaults to 0
+        let refundedAmount = 0; 
         let hasPendingPayment = false;
         let isInvoiceRejected = false;
 
         if (playerInvoices.length > 0) {
-          // Aggregate amounts for all active invoices for this player/class
           expectedAmount = playerInvoices.reduce((sum, inv) => sum + (inv.totalAmount || 0), 0);
 
           const playerInvIds = playerInvoices.map(inv => inv._id.toString());
@@ -4499,14 +4272,12 @@ exports.getTermEarningsReport = async (req, res) => {
             playerInvoices.some(inv => inv.paymentStatus === "PAYMENT_PENDING");
           isInvoiceRejected = playerInvoices.some(inv => inv.paymentStatus === "REJECTED");
         } else {
-          // Fallback to class price if no invoice exists
           expectedAmount = classDoc.price || 0;
           paidAmount = 0;
         }
 
         const pendingAmount = Math.max(0, expectedAmount - paidAmount);
 
-        // Determine standardized status
         let paymentStatus = "UNPAID";
         if (paidAmount >= expectedAmount && expectedAmount > 0) {
           paymentStatus = "PAID";
@@ -4541,7 +4312,6 @@ exports.getTermEarningsReport = async (req, res) => {
           paymentStatus,
         };
 
-        // Filter players based on status if query parameter is provided
         if (!status || paymentStatus.toUpperCase() === status.toUpperCase()) {
           totalEnrolledPlayersSet.add(player._id.toString());
           playerReports.push(reportItem);
@@ -4553,8 +4323,6 @@ exports.getTermEarningsReport = async (req, res) => {
         }
       }
 
-      // If status filter is applied, only include class report if there are matching players,
-      // or if no status filter is applied, include all classes.
       if (!status || playerReports.length > 0) {
         classReports.push({
           classId: classDoc._id,

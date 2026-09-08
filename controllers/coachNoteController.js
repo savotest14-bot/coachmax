@@ -3,14 +3,6 @@ const AuditLog = require("../models/AuditLog");
 const Class = require("../models/Class");
 const mongoose = require("mongoose");
 
-// ═══════════════════════════════════════════════
-// FEATURE 5 — Coach Notes (Player Notes)
-// ═══════════════════════════════════════════════
-
-/**
- * POST /api/coach/notes
- * Coach creates a note for a player.
- */
 exports.createNote = async (req, res) => {
   try {
     const coachId = req.admin._id;
@@ -40,7 +32,6 @@ exports.createNote = async (req, res) => {
       });
     }
 
-    // Verify coach has access to this player (for COACH role)
     if (req.admin.role === "COACH") {
       const assignedClasses = await Class.find({
         $or: [{ coach: coachId }, { assistantCoach: coachId }],
@@ -64,7 +55,6 @@ exports.createNote = async (req, res) => {
       isPersonal: req.body.isPersonal !== undefined ? Boolean(req.body.isPersonal) : false,
     });
 
-    // Audit log
     await AuditLog.create({
       user: coachId,
       userRole: req.admin.role,
@@ -77,7 +67,6 @@ exports.createNote = async (req, res) => {
       description: `Coach note created for player ${playerId}`,
     });
 
-    // Populate for response
     const populatedNote = await CoachNote.findById(note._id)
       .populate("coach", "name")
       .populate("player", "fullName")
@@ -93,11 +82,6 @@ exports.createNote = async (req, res) => {
   }
 };
 
-/**
- * PUT /api/coach/notes/:noteId
- * Coach edits an existing note. Creates audit record of old vs new values.
- * Only the original coach or Super Admin can edit.
- */
 exports.updateNote = async (req, res) => {
   try {
     const coachId = req.admin._id;
@@ -117,7 +101,6 @@ exports.updateNote = async (req, res) => {
       return res.status(404).json({ success: false, message: "Note not found" });
     }
 
-    // Only original coach or Super Admin can edit
     if (req.admin.role === "COACH" && note.coach.toString() !== coachId.toString()) {
       return res.status(403).json({
         success: false,
@@ -125,14 +108,12 @@ exports.updateNote = async (req, res) => {
       });
     }
 
-    // Store old values for audit
     const oldValue = {
       noteType: note.noteType,
       description: note.description,
       isPersonal: note.isPersonal,
     };
 
-    // Update fields
     if (noteType) note.noteType = noteType;
     if (description) note.description = description;
     if (req.body.isPersonal !== undefined) note.isPersonal = Boolean(req.body.isPersonal);
@@ -140,7 +121,6 @@ exports.updateNote = async (req, res) => {
 
     await note.save();
 
-    // Audit log — track old vs new
     await AuditLog.create({
       user: coachId,
       userRole: req.admin.role,
@@ -169,12 +149,6 @@ exports.updateNote = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/notes/player/:playerId
- * Get all notes for a specific player.
- * Coaches see notes only from their assigned classes.
- * Super Admin sees all.
- */
 exports.getNotesByPlayer = async (req, res) => {
   try {
     const coachId = req.admin._id;
@@ -188,7 +162,6 @@ exports.getNotesByPlayer = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid player ID" });
     }
 
-    // Verify coach has access to this player
     if (req.admin.role === "COACH") {
       const assignedClasses = await Class.find({
         $or: [{ coach: coachId }, { assistantCoach: coachId }],
@@ -237,11 +210,6 @@ exports.getNotesByPlayer = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/notes
- * Get all notes created by the authenticated coach.
- * Super Admin gets all notes.
- */
 exports.getMyNotes = async (req, res) => {
   try {
     const coachId = req.admin._id;
@@ -290,10 +258,6 @@ exports.getMyNotes = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/notes/:noteId/audit
- * Get audit history for a specific note.
- */
 exports.getNoteAuditHistory = async (req, res) => {
   try {
     const { noteId } = req.params;

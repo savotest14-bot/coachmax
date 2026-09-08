@@ -27,22 +27,13 @@ const generateInvoiceNumber = async () => {
   return `${prefix}${paddedSequence}`;
 };
 
-/**
- * Automatically generate an invoice for a player assigned to a class.
- * Ensures duplicate invoices are NOT created if an active/non-cancelled invoice already exists
- * for the same player and class.
- *
- * @param {Object} params
- * @param {string} params.userId - Player's User ID
- * @param {string} params.classId - Assigned Class ID
- * @returns {Promise<{ invoice: Object, isDuplicate: boolean }>}
- */
+
 const generateClassInvoice = async ({ userId, classId }) => {
   if (!userId || !classId) {
     return { invoice: null, isDuplicate: false, error: "userId and classId are required" };
   }
 
-  // 1. Fetch Player
+  //  Fetch Player
   const player = await User.findById(userId);
   if (!player) {
     return { invoice: null, isDuplicate: false, error: "Player not found" };
@@ -52,13 +43,13 @@ const generateClassInvoice = async ({ userId, classId }) => {
     return { invoice: null, isDuplicate: false, error: "Player has no parent associated" };
   }
 
-  // 2. Fetch Class
+  //  Fetch Class
   const classDoc = await Class.findById(classId);
   if (!classDoc) {
     return { invoice: null, isDuplicate: false, error: "Class not found" };
   }
 
-  // 3. Duplicate Invoice Check
+  //  Duplicate Invoice Check
   // Check if an active / non-cancelled invoice already exists for this player & class assignment
   const existingInvoice = await Invoice.findOne({
     parent: player.parentId,
@@ -72,7 +63,7 @@ const generateClassInvoice = async ({ userId, classId }) => {
     return { invoice: existingInvoice, isDuplicate: true };
   }
 
-  // 4. Generate New Invoice
+  //  Generate New Invoice
   const price = Number(classDoc.price || 0);
   const invoiceNumber = await generateInvoiceNumber();
 
@@ -119,7 +110,7 @@ const generateClassInvoice = async ({ userId, classId }) => {
   }
   await player.save();
 
-  // 5. Send Notification to Parent
+  //  Send Notification to Parent
   try {
     await sendNotification({
       recipientType: "PARENT",
@@ -143,17 +134,6 @@ const generateClassInvoice = async ({ userId, classId }) => {
   return { invoice, isDuplicate: false };
 };
 
-/**
- * Automatically generate an invoice for the price difference when transferring a player from one class to another.
- * If new class price > old class price, an invoice for the difference is generated.
- * If new class price <= old class price, no invoice is generated.
- *
- * @param {Object} params
- * @param {string} params.userId - Player's User ID
- * @param {Object} params.fromClass - Previous Class document
- * @param {Object} params.toClass - New Class document
- * @returns {Promise<{ invoice: Object|null, priceDiff: number, invoiceGenerated: boolean }>}
- */
 const generateTransferInvoice = async ({ userId, fromClass, toClass }) => {
   if (!userId || !fromClass || !toClass) {
     return { invoice: null, priceDiff: 0, invoiceGenerated: false, error: "userId, fromClass, and toClass are required" };
@@ -227,22 +207,12 @@ const generateTransferInvoice = async ({ userId, fromClass, toClass }) => {
   return { invoice, priceDiff, invoiceGenerated: true };
 };
 
-/**
- * Automatically generate an invoice for a player assigned to a team.
- * Ensures duplicate invoices are NOT created if an active/non-cancelled invoice already exists
- * for the same player and team.
- *
- * @param {Object} params
- * @param {string} params.userId - Player's User ID
- * @param {string} params.teamId - Assigned Team ID
- * @returns {Promise<{ invoice: Object|null, isDuplicate: boolean, error?: string }>}
- */
 const generateTeamInvoice = async ({ userId, teamId }) => {
   if (!userId || !teamId) {
     return { invoice: null, isDuplicate: false, error: "userId and teamId are required" };
   }
 
-  // 1. Fetch Player
+  //  Fetch Player
   const player = await User.findById(userId);
   if (!player) {
     return { invoice: null, isDuplicate: false, error: "Player not found" };
@@ -252,7 +222,7 @@ const generateTeamInvoice = async ({ userId, teamId }) => {
     return { invoice: null, isDuplicate: false, error: "Player has no parent associated" };
   }
 
-  // 2. Fetch Team
+  // Fetch Team
   const Team = require("../models/Team");
   const teamDoc = await Team.findById(teamId);
   if (!teamDoc) {
@@ -265,7 +235,7 @@ const generateTeamInvoice = async ({ userId, teamId }) => {
     return { invoice: null, isDuplicate: false };
   }
 
-  // 3. Duplicate Invoice Check
+  //  Duplicate Invoice Check
   const existingInvoice = await Invoice.findOne({
     parent: player.parentId,
     players: userId,
@@ -279,7 +249,7 @@ const generateTeamInvoice = async ({ userId, teamId }) => {
     return { invoice: existingInvoice, isDuplicate: true };
   }
 
-  // 4. Generate New Invoice
+  // Generate New Invoice
   const invoiceNumber = await generateInvoiceNumber();
 
   // Due date: 30 days from invoice generation
@@ -322,7 +292,7 @@ const generateTeamInvoice = async ({ userId, teamId }) => {
     }
   }
 
-  // 5. Send Notification to Parent
+  //  Send Notification to Parent
   try {
     await sendNotification({
       recipientType: "PARENT",

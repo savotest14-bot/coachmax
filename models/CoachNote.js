@@ -46,7 +46,6 @@ const coachNoteSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Index for efficient querying
 coachNoteSchema.index({ player: 1, createdAt: -1 });
 coachNoteSchema.index({ coach: 1, createdAt: -1 });
 coachNoteSchema.index({ classId: 1 });

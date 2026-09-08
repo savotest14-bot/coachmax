@@ -9,7 +9,6 @@ const Notification = require("../models/Notification");
 const { sendNotification } = require("../services/notificationService");
 const { generateClassInvoice } = require("../services/invoiceService");
 
-// ✅ List / Search / Filter Registration Requests (Admin)
 exports.getRegistrationRequests = async (req, res) => {
   try {
     let {
@@ -44,7 +43,6 @@ exports.getRegistrationRequests = async (req, res) => {
       query.programs = program;
     }
 
-    // Search by parent name
     const parentSearchTerm = searchParent || search;
     if (parentSearchTerm) {
       const parents = await Parent.find({
@@ -54,7 +52,6 @@ exports.getRegistrationRequests = async (req, res) => {
       query.parent = { $in: parentIds };
     }
 
-    // Search/filter by player (name, isMedicalCondition)
     if (searchPlayer || (isMedicalCondition !== undefined && isMedicalCondition !== "")) {
       const playerFilter = {};
 
@@ -109,15 +106,12 @@ exports.getRegistrationRequests = async (req, res) => {
   }
 };
 
-// ✅ Fetch Unallocated Players by Category and Program (Admin)
-// Requirement: GET /admin/players/unallocated?category=CAT_ID&program=PROGRAM_ID&search=SEARCH
 exports.getUnallocatedPlayers = async (req, res) => {
   try {
     const { category, program, search } = req.query;
 
     const pendingPlayerIds = await RegistrationRequest.find({ status: "PENDING" }).distinct("player");
 
-    // Find players from RegistrationRequest if category/program supplied
     let playerIdsFromRequests = [];
     if (category || program) {
       const reqFilter = { status: "PENDING" };
@@ -172,7 +166,6 @@ exports.getUnallocatedPlayers = async (req, res) => {
       }
     }
 
-    // Fetch matching unallocated players
     const unallocatedPlayers = await User.find(query)
       .populate("parentId", "fullName email phone emergencyContact relationship")
       .populate("category", "name")
@@ -225,11 +218,6 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
 
     const andConditions = [];
 
-    // ---------------------------------------------------
-    // ALLOCATION STATUS FILTERING:
-    // UNALLOCATED -> Players who have NO assigned classes OR have a PENDING request
-    // ALLOCATED   -> Players who HAVE assigned classes AND have NO pending request
-    // ---------------------------------------------------
     if (allocationStatus === "UNALLOCATED") {
       const requestFilter = { status: "PENDING" };
       if (category) requestFilter.category = category;
@@ -260,9 +248,6 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
       });
     }
 
-    // ---------------------------------------------------
-    // Search
-    // ---------------------------------------------------
     if (search) {
       const regex = new RegExp(search, "i");
 
@@ -281,9 +266,6 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
       query.$and = andConditions;
     }
 
-    // ---------------------------------------------------
-    // Fetch Total & Paginated Players
-    // ---------------------------------------------------
     const [total, players] = await Promise.all([
       User.countDocuments(query),
       User.find(query)
@@ -304,9 +286,6 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
         .limit(limitNum),
     ]);
 
-    // ---------------------------------------------------
-    // Attach Registration Request (if PENDING request exists)
-    // ---------------------------------------------------
     let registrationRequestsMap = {};
 
     if (players.length > 0) {
@@ -325,9 +304,6 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
       }, {});
     }
 
-    // ---------------------------------------------------
-    // Build Response
-    // ---------------------------------------------------
     const data = players.map((player) => {
       const obj = player.toObject();
       obj.registrationRequest =
@@ -365,8 +341,6 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
 };
 
 
-// ✅ Assign Classes to Player (Admin)
-// Requirement: PATCH /admin/player/:playerId/assign-classes
 exports.assignClassesToPlayer = async (req, res) => {
   try {
     const playerId = req.params?.playerId || req.body?.playerId;
@@ -386,7 +360,6 @@ exports.assignClassesToPlayer = async (req, res) => {
       });
     }
 
-    // Validate paymentStatus
     const validPaymentStatuses = ["TRIAL", "UNPAID", "PAID", "EXTRA", "SUBSTITUTE", "TBC", "HANDSHAKE"];
     if (!validPaymentStatuses.includes(paymentStatus)) {
       return res.status(400).json({
@@ -394,8 +367,6 @@ exports.assignClassesToPlayer = async (req, res) => {
         message: "Invalid paymentStatus value",
       });
     }
-
-    // Fetch Player
     const playerDoc = await User.findById(playerId);
     if (!playerDoc) {
       return res.status(404).json({
@@ -403,8 +374,6 @@ exports.assignClassesToPlayer = async (req, res) => {
         message: "Player not found",
       });
     }
-
-    // Handle RegistrationRequest (Optional)
     let requestDoc = null;
     if (registrationRequestId) {
       requestDoc = await RegistrationRequest.findById(registrationRequestId);
@@ -429,14 +398,11 @@ exports.assignClassesToPlayer = async (req, res) => {
         });
       }
     } else {
-      // Look up any pending RegistrationRequest for this player
       requestDoc = await RegistrationRequest.findOne({
         player: playerId,
         status: "PENDING",
       }).sort({ createdAt: -1 });
     }
-
-    // Fetch Selected Classes
     const selectedClasses = await Class.find({ _id: { $in: classIds } });
     if (selectedClasses.length !== classIds.length) {
       return res.status(404).json({
@@ -445,10 +411,6 @@ exports.assignClassesToPlayer = async (req, res) => {
       });
     }
 
-    // -------------------------------------------------------------
-    // VALIDATIONS:
-    // 1. Every selected class belongs to the SAME Term.
-    // -------------------------------------------------------------
     const firstClassTermStr = selectedClasses[0].term.toString();
 
     for (const cls of selectedClasses) {
@@ -459,11 +421,8 @@ exports.assignClassesToPlayer = async (req, res) => {
         });
       }
     }
-
-    // Automatic Term Assignment from derived class term
     const derivedTermId = selectedClasses[0].term;
 
-    // Derived category and programs from selected classes / request / player
     const assignedCategory = selectedClasses[0].category || (requestDoc ? requestDoc.category : playerDoc.category);
     const newProgramIds = selectedClasses.map((c) => c.program.toString());
     if (requestDoc && requestDoc.programs) {
@@ -475,13 +434,11 @@ exports.assignClassesToPlayer = async (req, res) => {
 
     const updatedProgramIds = [...new Set(newProgramIds.filter(Boolean))];
 
-    // Ensure player is added to selected classes' players array
     await Class.updateMany(
       { _id: { $in: classIds } },
       { $addToSet: { players: playerId } }
     );
 
-    // Update RegistrationRequest Document if exists
     if (requestDoc) {
       requestDoc.status = "COMPLETED";
       requestDoc.assignedBy = req.admin ? req.admin._id : null;
@@ -489,7 +446,6 @@ exports.assignClassesToPlayer = async (req, res) => {
       await requestDoc.save();
     }
 
-    // Clear hasPendingRequest flag if no pending requests remain for this player
     const remainingPendingRequests = await RegistrationRequest.countDocuments({
       player: playerId,
       status: "PENDING",
@@ -499,7 +455,6 @@ exports.assignClassesToPlayer = async (req, res) => {
       playerDoc.hasPendingRequest = false;
     }
 
-    // Update Player Document (Add new classes to existing assignedClasses without duplicates)
     const existingAssignedClassIds = (playerDoc.assignedClasses || []).map((id) =>
       id.toString()
     );
@@ -543,7 +498,6 @@ exports.assignClassesToPlayer = async (req, res) => {
     playerDoc.programs = updatedProgramIds;
     await playerDoc.save();
 
-    // ✅ Automatic Invoice Generation on Class Assignment (Skipped when paymentStatus is TRIAL)
     if (paymentStatus == "UNPAID") {
       try {
         for (const clsId of classIds) {
@@ -554,7 +508,6 @@ exports.assignClassesToPlayer = async (req, res) => {
       }
     }
 
-    // Send Parent Notification
     try {
       const termObj = await Term.findById(derivedTermId).select("name");
       const classNames = selectedClasses.map((c) => c.name).join(", ");

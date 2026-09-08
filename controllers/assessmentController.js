@@ -2,7 +2,6 @@ const PlayerAssessment = require("../models/PlayerAssessment");
 const SkillProgress = require("../models/SkillProgress");
 const User = require("../models/User");
 
-// ✅ Create assessment (Admin/Coach only)
 exports.createAssessment = async (req, res) => {
   try {
     const {
@@ -54,7 +53,6 @@ exports.createAssessment = async (req, res) => {
       overallRating,
     });
 
-    // Check last assessment to calculate skill progress delta updates
     const lastAssessment = await PlayerAssessment.findOne({ player, _id: { $ne: assessment._id } })
       .sort({ assessmentDate: -1 });
 
@@ -92,7 +90,6 @@ exports.createAssessment = async (req, res) => {
   }
 };
 
-// ✅ Get assessments list for a player (Parent or Coach/Admin)
 exports.getPlayerAssessments = async (req, res) => {
   try {
     const { playerId } = req.params;
@@ -114,7 +111,6 @@ exports.getPlayerAssessments = async (req, res) => {
   }
 };
 
-// ✅ Get skill progress history for a player
 exports.getSkillProgress = async (req, res) => {
   try {
     const { playerId } = req.params;

@@ -9,7 +9,6 @@ const BankDetails = require("../models/BankDetails");
 const PaymentSettings = require("../models/PaymentSettings");
 const { sendNotification } = require("../services/notificationService");
 
-// Helper to get or create singleton PaymentSettings
 const getOrCreatePaymentSettings = async () => {
   let settings = await PaymentSettings.findOne();
   if (!settings) {
@@ -22,7 +21,6 @@ const getOrCreatePaymentSettings = async () => {
 };
 exports.getOrCreatePaymentSettings = getOrCreatePaymentSettings;
 
-// ✅ Get Payment Settings (Public / Parent / Admin)
 exports.getPaymentSettings = async (req, res) => {
   try {
     const settings = await getOrCreatePaymentSettings();
@@ -46,7 +44,6 @@ exports.getPaymentSettings = async (req, res) => {
   }
 };
 
-// ✅ Update Payment Settings (Admin only)
 exports.updatePaymentSettings = async (req, res) => {
   try {
     const { isOnlineEnabled, isCodEnabled } = req.body;
@@ -87,7 +84,6 @@ exports.updatePaymentSettings = async (req, res) => {
   }
 };
 
-// ✅ Parent Pay COD (Cash on Delivery / Offline)
 exports.payCOD = async (req, res) => {
   try {
     const parentId = req.parent._id;
@@ -137,7 +133,6 @@ exports.payCOD = async (req, res) => {
     invoice.paymentStatus = "PAYMENT_PENDING";
     await invoice.save();
 
-    // Create Notification for Admin
     try {
       await sendNotification({
         recipientType: "ADMIN",
@@ -168,7 +163,6 @@ exports.payCOD = async (req, res) => {
   }
 };
 
-// ✅ Parent Pay Online (Bank Transfer + Upload Screenshot)
 exports.payOnline = async (req, res) => {
   try {
     const parentId = req.parent._id;
@@ -243,7 +237,6 @@ exports.payOnline = async (req, res) => {
     invoice.paymentStatus = "PAYMENT_PENDING";
     await invoice.save();
 
-    // Create Notification for Admin
     try {
       await sendNotification({
         recipientType: "ADMIN",
@@ -274,7 +267,6 @@ exports.payOnline = async (req, res) => {
   }
 };
 
-// ✅ Parent Resubmit Payment (After Rejection)
 exports.resubmitPayment = async (req, res) => {
   try {
     const parentId = req.parent._id;
@@ -312,7 +304,6 @@ exports.resubmitPayment = async (req, res) => {
     payment.rejectionReason = "";
     await payment.save();
 
-    // Update Invoice Payment Status back to PAYMENT_PENDING
     const invoice = await Invoice.findById(payment.invoice);
     if (invoice) {
       invoice.paymentStatus = "PAYMENT_PENDING";
@@ -331,44 +322,6 @@ exports.resubmitPayment = async (req, res) => {
     });
   }
 };
-
-// ✅ Get Parent Payment History
-// exports.getParentPayments = async (req, res) => {
-//   try {
-//     const parentId = req.parent._id;
-//     const { page = 1, limit = 10 } = req.query;
-
-//     const currentPage = Math.max(1, parseInt(page, 10) || 1);
-//     const pageLimit = Math.max(1, parseInt(limit, 10) || 10);
-//     const skip = (currentPage - 1) * pageLimit;
-
-//     const [payments, total] = await Promise.all([
-//       Payment.find({ parent: parentId })
-//         .populate("invoice", "invoiceNumber totalAmount items paymentStatus dueDate")
-//         .sort({ createdAt: -1 })
-//         .skip(skip)
-//         .limit(pageLimit),
-//       Payment.countDocuments({ parent: parentId }),
-//     ]);
-
-//     return res.status(200).json({
-//       success: true,
-//       count: payments.length,
-//       pagination: {
-//         page: currentPage,
-//         limit: pageLimit,
-//         total,
-//         pages: Math.ceil(total / pageLimit),
-//       },
-//       data: payments,
-//     });
-//   } catch (err) {
-//     return res.status(500).json({
-//       success: false,
-//       message: err.message,
-//     });
-//   }
-// };
 
 exports.getParentPayments = async (req, res) => {
   try {
@@ -391,7 +344,7 @@ exports.getParentPayments = async (req, res) => {
 
       Payment.countDocuments({ parent: parentId }),
 
-      BankDetails.findOne({ isActive: true }), // Change this query if needed
+      BankDetails.findOne({ isActive: true }),
     ]);
 
     const data = payments.map((payment) => {
@@ -423,8 +376,6 @@ exports.getParentPayments = async (req, res) => {
   }
 };
 
-
-// ✅ Get Admin Payments List (Search & Filter)
 exports.getAdminPayments = async (req, res) => {
   try {
     const {
@@ -515,7 +466,6 @@ exports.getAdminPayments = async (req, res) => {
   }
 };
 
-// ✅ Get Admin Single Payment By ID
 exports.getAdminPaymentById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -551,7 +501,6 @@ exports.getAdminPaymentById = async (req, res) => {
   }
 };
 
-// ✅ Admin Approve Payment (Transaction Safe)
 exports.approvePayment = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -588,19 +537,16 @@ exports.approvePayment = async (req, res) => {
       });
     }
 
-    // 1. Update Payment Status
     payment.status = "APPROVED";
     payment.approvedBy = req.admin ? req.admin._id : null;
     payment.approvedAt = new Date();
     await payment.save({ session });
 
-    // 2. Update Invoice Status
     invoice.paymentStatus = "PAID";
     invoice.verifiedBy = req.admin ? req.admin._id : null;
     invoice.verifiedAt = new Date();
     await invoice.save({ session });
 
-    // 3. Update Players Payment Status if players exist on invoice
     if (Array.isArray(invoice.players) && invoice.players.length > 0) {
       if (invoice.class) {
         const invoiceClassIdStr = invoice.class.toString();
@@ -643,7 +589,6 @@ exports.approvePayment = async (req, res) => {
       }
     }
 
-    // 4. Update Store Order Payment Status if this is a Store Order invoice
     if (invoice.type === "STORE_ORDER") {
       await Order.updateMany(
         { invoice: invoice._id },
@@ -655,7 +600,6 @@ exports.approvePayment = async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
-    // 5. Send Notification to Parent
     try {
       await sendNotification({
         recipientType: "PARENT",
@@ -690,7 +634,6 @@ exports.approvePayment = async (req, res) => {
   }
 };
 
-// ✅ Admin Reject Payment
 exports.rejectPayment = async (req, res) => {
   try {
     const { id } = req.params;
@@ -720,8 +663,6 @@ exports.rejectPayment = async (req, res) => {
       invoice.paymentStatus = "REJECTED";
       await invoice.save();
     }
-
-    // Send Notification to Parent
     try {
       await sendNotification({
         recipientType: "PARENT",
@@ -753,8 +694,6 @@ exports.rejectPayment = async (req, res) => {
     });
   }
 };
-
-// ✅ Get Admin Payment & Invoice Dashboard Statistics
 exports.getPaymentDashboardStats = async (req, res) => {
   try {
     const startOfToday = new Date();

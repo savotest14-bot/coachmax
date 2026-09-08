@@ -1,6 +1,5 @@
 const mongoose = require("mongoose");
 
-// Subdocument Schema for Team Temporary Players (Embedded inside Team schema to avoid hitting MongoDB collection limit)
 const teamTemporaryPlayerSchema = new mongoose.Schema(
   {
     name: {

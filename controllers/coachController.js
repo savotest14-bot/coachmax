@@ -10,10 +10,6 @@ const Admin = require("../models/Admin");
 const Notification = require("../models/Notification");
 const ChatRoom = require("../models/ChatRoom");
 
-// ─────────────────────────────────────────────
-// Helper: Generate class sessions from term dates
-// Supports SINGLE_DAY, WEEKDAYS, and CUSTOM scheduleTypes
-// ─────────────────────────────────────────────
 const _generateDatesForDayCoach = (start, end, targetDay) => {
   const dates = [];
   let current = new Date(start);
@@ -63,7 +59,6 @@ const generateClassSessions = (term, classObj) => {
   return sessions;
 };
 
-// Helper: Get per-day startTime/endTime for a session date
 const getSessionTimesForDateCoach = (classObj, sessionDate) => {
   const dayNames = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
   const scheduleType = classObj.scheduleType || "SINGLE_DAY";
@@ -77,15 +72,6 @@ const getSessionTimesForDateCoach = (classObj, sessionDate) => {
   return { startTime: classObj.startTime, endTime: classObj.endTime };
 };
 
-// ═══════════════════════════════════════════════
-// FEATURE 1 — Assigned Classes
-// ═══════════════════════════════════════════════
-
-/**
- * GET /api/coach/classes
- * Returns only classes assigned to the authenticated coach.
- * Supports pagination, search, and filtering by termId, day-wise, and week-wise.
- */
 exports.getMyAssignedClasses = async (req, res) => {
   try {
     const coachId = req.admin._id;
@@ -111,23 +97,19 @@ exports.getMyAssignedClasses = async (req, res) => {
     page = Number(page);
     limit = Number(limit);
 
-    // Build query: coach or assistantCoach
     const query = {
       $or: [{ coach: coachId }, { assistantCoach: coachId }],
       status: "ACTIVE",
     };
 
-    // 1. Term Filter
     const selectedTerm = termId || term;
     if (selectedTerm) {
       query.term = selectedTerm;
     }
 
-    // 2. Program & Category Filters
     if (programId) query.program = programId;
     if (categoryId) query.category = categoryId;
 
-    // 3. Search Filter
     if (search) {
       query.name = { $regex: search, $options: "i" };
     }
@@ -145,7 +127,6 @@ exports.getMyAssignedClasses = async (req, res) => {
     let sessionStartRange = null;
     let sessionEndRange = null;
 
-    // 4. Day-wise & Week-wise Filtering Logic
     const selectedDayParam = day || dayOfWeek;
     const isWeekFilter =
       filterType === "week" ||
@@ -159,7 +140,6 @@ exports.getMyAssignedClasses = async (req, res) => {
       Boolean(selectedDayParam && !isWeekFilter);
 
     if (isWeekFilter) {
-      // Week-wise filtering
       if (startDate && endDate) {
         sessionStartRange = new Date(startDate);
         sessionStartRange.setUTCHours(0, 0, 0, 0);
@@ -189,7 +169,6 @@ exports.getMyAssignedClasses = async (req, res) => {
         }
       }
 
-      // Filter by day of week if specified alongside week filter
       if (
         selectedDayParam &&
         weekdays.includes(selectedDayParam.toUpperCase())
@@ -201,19 +180,16 @@ exports.getMyAssignedClasses = async (req, res) => {
         ] });
       }
     } else if (isDayFilter) {
-      // Day-wise filtering
       if (
         selectedDayParam &&
         weekdays.includes(selectedDayParam.toUpperCase())
       ) {
-        // Filter by weekday name (e.g. MONDAY)
         query.$and = query.$and || [];
         query.$and.push({ $or: [
           { dayOfWeek: { $regex: new RegExp(`^${selectedDayParam}$`, "i") } },
           { "schedule.dayOfWeek": { $regex: new RegExp(`^${selectedDayParam}$`, "i") } },
         ] });
       } else {
-        // Filter by specific date (e.g. 2026-08-13) or today
         const targetDateStr = date || dayDate || selectedDayParam;
         const targetDate = targetDateStr ? new Date(targetDateStr) : new Date();
 
@@ -234,7 +210,6 @@ exports.getMyAssignedClasses = async (req, res) => {
       }
     }
 
-    // Filter terms in MongoDB query to terms overlapping active date range if session date range is present
     if (sessionStartRange && sessionEndRange) {
       const activeTerms = await Term.find({
         startDate: { $lte: sessionEndRange },
@@ -259,7 +234,6 @@ exports.getMyAssignedClasses = async (req, res) => {
         query.term = { $in: activeTerms.map((t) => t._id) };
       }
 
-      // Add weekday filtering to only return classes with sessions in the active date range
       const weekdaysInRange = [];
       const tempDate = new Date(sessionStartRange);
       const limitDate = new Date(sessionStartRange);
@@ -300,7 +274,6 @@ exports.getMyAssignedClasses = async (req, res) => {
       .skip((page - 1) * limit)
       .limit(limit);
 
-    // Fetch broadcast chat rooms for returned classes
     const classIds = classes.map((cls) => cls._id);
     const chatRooms = await ChatRoom.find({
       classId: { $in: classIds },
@@ -314,7 +287,6 @@ exports.getMyAssignedClasses = async (req, res) => {
       }
     });
 
-    // Build enriched class data with sessions and chatRoomId / broadcastChatRoomId
     const result = [];
 
     for (const cls of classes) {
@@ -323,7 +295,6 @@ exports.getMyAssignedClasses = async (req, res) => {
         sessions = generateClassSessions(cls.term, cls);
       }
 
-      // Filter sessions by date range if day-wise or week-wise date range filter is active
       if (sessionStartRange && sessionEndRange) {
         sessions = sessions.filter(
           (sessionDate) =>
@@ -383,7 +354,6 @@ exports.getClassDropdown = async (req, res) => {
   try {
     const adminId = req.admin._id;
 
-    // Fetch latest admin details from DB
     const admin = await Admin.findById(adminId).select("role");
 
     if (!admin) {
@@ -397,7 +367,6 @@ exports.getClassDropdown = async (req, res) => {
       status: "ACTIVE",
     };
 
-    // Coach -> only assigned classes
     if (admin.role === "COACH") {
       query.$and = query.$and || [];
       query.$and.push({
@@ -428,7 +397,6 @@ exports.getClassDropdown = async (req, res) => {
       });
     }
 
-    // Super Admin -> all active classes
     const classes = await Class.find(query)
       .select("_id name")
       .sort({ name: 1 });
@@ -446,11 +414,6 @@ exports.getClassDropdown = async (req, res) => {
   }
 };
 
-
-/**
- * GET /api/coach/classes/:classId
- * Returns detailed class info for a specific assigned class including player attendance.
- */
 exports.getAssignedClassById = async (req, res) => {
   try {
     const { classId } = req.params;
@@ -474,13 +437,11 @@ exports.getAssignedClassById = async (req, res) => {
       return res.status(404).json({ success: false, message: "Class not found" });
     }
 
-    // Fetch attendance records for this class
     const attendanceRecords = await Attendance.find({ class: classId })
       .select("sessionDate records markedBy createdAt updatedAt")
       .populate("markedBy", "name email")
       .sort({ sessionDate: -1 });
 
-    // Build attendance statistics map per player
     const playerAttendanceMap = {};
 
     attendanceRecords.forEach((attDoc) => {
@@ -520,8 +481,6 @@ exports.getAssignedClassById = async (req, res) => {
         });
       });
     });
-
-    // Enrich players with attendance data
     const enrichedPlayers = cls.players.map((p) => {
       const playerObj = p.toObject ? p.toObject() : { ...p };
       const pid = playerObj._id.toString();
@@ -555,7 +514,6 @@ exports.getAssignedClassById = async (req, res) => {
       return playerObj;
     });
 
-    // Generate sessions
     let sessions = [];
     if (cls.term) {
       sessions = generateClassSessions(cls.term, cls);
@@ -585,7 +543,6 @@ exports.getAssignedClassById = async (req, res) => {
       };
     });
 
-    // Fetch associated broadcast chat room if any
     const broadcastRoom = await ChatRoom.findOne({
       classId: cls._id,
       type: "BROADCAST",
@@ -627,10 +584,6 @@ exports.getAssignedClassById = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/teams
- * Returns only teams assigned to the authenticated coach.
- */
 exports.getMyAssignedTeams = async (req, res) => {
   try {
     const coachId = req.admin._id;
@@ -673,15 +626,6 @@ exports.getMyAssignedTeams = async (req, res) => {
   }
 };
 
-// ═══════════════════════════════════════════════
-// FEATURE 3 & 7 — Player Profile & Quick Access
-// ═══════════════════════════════════════════════
-
-/**
- * GET /api/coach/player/:playerId/profile
- * Aggregated player profile with medical alerts, attendance, notes, parent info, teams, programs.
- * Coach can only access players in their assigned classes.
- */
 exports.getPlayerProfile = async (req, res) => {
   try {
     const coachId = req.admin._id;
@@ -691,7 +635,6 @@ exports.getPlayerProfile = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid player ID" });
     }
 
-    // Verify player is in one of the coach's assigned classes (SUPER_ADMIN bypasses)
     if (req.admin.role === "COACH") {
       const assignedClasses = await Class.find({
         $or: [{ coach: coachId }, { assistantCoach: coachId }],
@@ -706,7 +649,6 @@ exports.getPlayerProfile = async (req, res) => {
       }
     }
 
-    // Fetch player with populated fields
     const player = await User.findById(playerId)
       .populate({
         path: "parentId",
@@ -722,16 +664,12 @@ exports.getPlayerProfile = async (req, res) => {
       return res.status(404).json({ success: false, message: "Player not found" });
     }
 
-    // Fetch medical profile if exists
     const medicalProfile = await MedicalProfile.findOne({ player: playerId }).lean();
 
-    // Fetch teams player belongs to
     const teams = await Team.find({ players: playerId })
       .select("teamName ageGroup coach")
       .populate("coach", "name")
       .lean();
-
-    // Fetch attendance history for this player
     const attendanceRecords = await Attendance.find({
       "records.player": playerId,
     })
@@ -741,7 +679,6 @@ exports.getPlayerProfile = async (req, res) => {
       .limit(50)
       .lean();
 
-    // Extract player-specific attendance
     const attendanceHistory = attendanceRecords.map((att) => {
       const playerRecord = att.records.find(
         (r) => r.player.toString() === playerId
@@ -756,14 +693,12 @@ exports.getPlayerProfile = async (req, res) => {
       };
     });
 
-    // Fetch coach notes for this player (visible to assigned coaches, admin, super admin)
     const coachNotes = await CoachNote.find({ player: playerId })
       .populate("coach", "name")
       .populate("classId", "name")
       .sort({ createdAt: -1 })
       .lean();
 
-    // Calculate current age
     let currentAge = null;
     if (player.dob) {
       const today = new Date();
@@ -775,7 +710,6 @@ exports.getPlayerProfile = async (req, res) => {
       }
     }
 
-    // Build medical alerts (highlighted at top)
     const medicalAlerts = {
       hasMedicalCondition: player.isMedicalCondition || false,
       medicalConditionDetails: player.medicalConditionDetails || "",
@@ -789,10 +723,7 @@ exports.getPlayerProfile = async (req, res) => {
     res.json({
       success: true,
       data: {
-        // Medical alerts at top
         medicalAlerts,
-
-        // Player overview
         player: {
           _id: player._id,
           fullName: player.fullName,
@@ -811,17 +742,14 @@ exports.getPlayerProfile = async (req, res) => {
           medicalConditionDetails: player.medicalConditionDetails,
         },
 
-        // Parent / Guardian info
         parent: player.parentId,
 
-        // Programs, classes, teams
         category: player.category,
         programs: player.programs,
         term: player.term,
         assignedClasses: player.assignedClasses,
         teams,
 
-        // Attendance history
         attendanceHistory,
         attendanceSummary: {
           total: attendanceHistory.length,
@@ -831,10 +759,8 @@ exports.getPlayerProfile = async (req, res) => {
           trial: attendanceHistory.filter((a) => a.status === "TRIAL").length,
         },
 
-        // Coach notes
         coachNotes,
 
-        // Medical profile (detailed)
         medicalProfile,
       },
     });
@@ -843,10 +769,6 @@ exports.getPlayerProfile = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/classes/:classId/players
- * Returns player list for a specific class with medical alert flags.
- */
 exports.getClassPlayers = async (req, res) => {
   try {
     const { classId } = req.params;
@@ -867,7 +789,6 @@ exports.getClassPlayers = async (req, res) => {
       return res.status(404).json({ success: false, message: "Class not found" });
     }
 
-    // Add medical alert flag for each player
     const players = classData.players.map((p) => ({
       _id: p._id,
       fullName: p.fullName,
@@ -904,11 +825,6 @@ exports.getClassPlayers = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/unique-players
- * GET /api/coach/unique-players/:coachId
- * Returns the count and list of unique players across all classes assigned to a coach.
- */
 exports.getUniquePlayersByCoach = async (req, res) => {
   try {
     const coachId = req.params.coachId || req.query.coachId || req.admin?._id;
@@ -924,13 +840,11 @@ exports.getUniquePlayersByCoach = async (req, res) => {
       });
     }
 
-    // Find all active classes assigned to this coach (either main or assistant coach)
     const coachClasses = await Class.find({
       $or: [{ coach: coachId }, { assistantCoach: coachId }],
       status: "ACTIVE",
     }).select("players");
 
-    // Extract unique player ObjectIds
     const playerIdsSet = new Set();
     coachClasses.forEach((cls) => {
       (cls.players || []).forEach((pId) => {
@@ -940,7 +854,6 @@ exports.getUniquePlayersByCoach = async (req, res) => {
 
     const playerIds = Array.from(playerIdsSet);
 
-    // Build query matching unique players for this coach
     const query = {
       _id: { $in: playerIds },
     };
@@ -1017,7 +930,6 @@ exports.getPlayerDetails = async (req, res) => {
       });
     }
 
-    // Fetch per-day attendance records for this player
     const attendanceRecords = await Attendance.find({
       "records.player": playerId,
     })
@@ -1025,7 +937,6 @@ exports.getPlayerDetails = async (req, res) => {
       .sort({ sessionDate: -1 })
       .lean();
 
-    // Map to per-day attendance format
     const perDayAttendance = attendanceRecords.map((att) => {
       const playerRecord = att.records.find(
         (r) => r.player && r.player.toString() === playerId.toString()
@@ -1044,7 +955,6 @@ exports.getPlayerDetails = async (req, res) => {
       };
     });
 
-    // Calculate overall attendance metrics
     const totalSessions = perDayAttendance.length;
     const presentCount = perDayAttendance.filter((a) => a.status === "PRESENT").length;
     const absentCount = perDayAttendance.filter((a) => a.status === "ABSENT").length;
@@ -1069,7 +979,6 @@ exports.getPlayerDetails = async (req, res) => {
 
     const { isPersonal } = req.query;
 
-    // Fetch coach notes for this player (exclude other coaches' personal notes)
     const coachNotesQuery = {
       player: playerId,
       $or: [
@@ -1087,7 +996,6 @@ exports.getPlayerDetails = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    // Calculate per-class payment statuses and summary metrics
     const classPaymentStatuses = player.classPaymentStatuses || [];
     const assignedClassesPaymentInfo = (player.assignedClasses || []).map((cls) => {
       const classIdStr = cls._id ? cls._id.toString() : cls.toString();
@@ -1129,7 +1037,6 @@ exports.getPlayerDetails = async (req, res) => {
       assignedClassesWithPaymentStatus: assignedClassesPaymentInfo,
     };
 
-    // Fetch assigned teams and team payment statuses
     const assignedTeams = await Team.find({ "players.player": playerId })
       .select("teamName teamFee logo players ageGroup")
       .lean();
@@ -1167,7 +1074,6 @@ exports.getPlayerDetails = async (req, res) => {
       assignedTeamsWithPaymentStatus: assignedTeamsPaymentInfo,
     };
 
-    // Fetch team attendance records for this player
     const teamAttendanceRecords = await Attendance.find({
       team: { $exists: true, $ne: null },
       "records.player": playerId,
@@ -1242,15 +1148,10 @@ exports.getPlayerDetails = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/dashboard
- * Returns comprehensive coach dashboard metrics and overview.
- */
 exports.getCoachDashboard = async (req, res) => {
   try {
     const coachId = req.admin._id;
 
-    // 1. Coach profile details
     const coach = await Admin.findById(coachId).select(
       "name email mobile profileImage role"
     );
@@ -1260,14 +1161,12 @@ exports.getCoachDashboard = async (req, res) => {
         .json({ success: false, message: "Coach profile not found" });
     }
 
-    // Today's date range (UTC)
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
 
     const endOfToday = new Date(today);
     endOfToday.setUTCHours(23, 59, 59, 999);
 
-    // Current week date range (Monday to Sunday UTC)
     const currentDayIdx = today.getUTCDay();
     const diffToMonday = currentDayIdx === 0 ? -6 : 1 - currentDayIdx;
 
@@ -1279,7 +1178,6 @@ exports.getCoachDashboard = async (req, res) => {
     weekEnd.setUTCDate(weekStart.getUTCDate() + 6);
     weekEnd.setUTCHours(23, 59, 59, 999);
 
-    // Execute queries in parallel for high performance
     const [
       assignedClasses,
       assignedTeams,
@@ -1290,7 +1188,6 @@ exports.getCoachDashboard = async (req, res) => {
       recentNotifications,
       todayAttendanceDocs,
     ] = await Promise.all([
-      // Assigned Active Classes
       Class.find({
         $or: [{ coach: coachId }, { assistantCoach: coachId }],
         status: "ACTIVE",
@@ -1300,32 +1197,26 @@ exports.getCoachDashboard = async (req, res) => {
         .populate("category", "name ageRange")
         .populate("players", "fullName profileImage dob"),
 
-      // Assigned Teams
       Team.find({
         $or: [{ coach: coachId }, { assistantCoach: coachId }],
       }).populate("players", "fullName profileImage"),
 
-      // Total Coach Notes
       CoachNote.countDocuments({ coach: coachId }),
 
-      // Temporary Players Added by Coach
       User.countDocuments({ createdBy: coachId }),
 
-      // Unread Notifications Count
       Notification.countDocuments({
         recipientType: { $in: ["ADMIN", "ALL", "COACH"] },
         admin: coachId,
         isRead: false,
       }),
 
-      // Recent 5 Notes
       CoachNote.find({ coach: coachId })
         .populate("player", "fullName profileImage")
         .populate("classId", "name")
         .sort({ createdAt: -1 })
         .limit(5),
 
-      // Recent 5 Notifications
       Notification.find({
         recipientType: { $in: ["ADMIN", "ALL", "COACH"] },
         admin: coachId,
@@ -1333,13 +1224,11 @@ exports.getCoachDashboard = async (req, res) => {
         .sort({ createdAt: -1 })
         .limit(5),
 
-      // Attendance marked today for coach's classes
       Attendance.find({
         sessionDate: { $gte: today, $lte: endOfToday },
       }),
     ]);
 
-    // Fetch broadcast chat rooms for assigned classes
     const classIds = assignedClasses.map((cls) => cls._id);
     const chatRooms = await ChatRoom.find({
       classId: { $in: classIds },
@@ -1353,7 +1242,6 @@ exports.getCoachDashboard = async (req, res) => {
       }
     });
 
-    // Unique Players calculation across assigned classes and teams
     const uniquePlayerIds = new Set();
     assignedClasses.forEach((cls) => {
       (cls.players || []).forEach((p) => uniquePlayerIds.add(p._id.toString()));
@@ -1362,7 +1250,6 @@ exports.getCoachDashboard = async (req, res) => {
       (team.players || []).forEach((p) => uniquePlayerIds.add(p._id.toString()));
     });
 
-    // Today's classes & week session calculations
     const todaysClasses = [];
     const upcomingSessions = [];
     let thisWeekSessionsCount = 0;
@@ -1372,13 +1259,11 @@ exports.getCoachDashboard = async (req, res) => {
 
       const sessions = generateClassSessions(cls.term, cls);
 
-      // Sessions for this week
       const weekSessions = sessions.filter(
         (s) => s >= weekStart && s <= weekEnd
       );
       thisWeekSessionsCount += weekSessions.length;
 
-      // Check if session exists today
       const isTodaySession = sessions.some((s) => {
         const d = new Date(s);
         d.setUTCHours(0, 0, 0, 0);
@@ -1416,7 +1301,6 @@ exports.getCoachDashboard = async (req, res) => {
         });
       }
 
-      // Collect upcoming sessions (sessions from today onwards)
       sessions.forEach((sDate) => {
         const sTime = new Date(sDate);
         sTime.setUTCHours(0, 0, 0, 0);
@@ -1449,7 +1333,6 @@ exports.getCoachDashboard = async (req, res) => {
       });
     }
 
-    // Sort upcoming sessions by date ascending
     upcomingSessions.sort(
       (a, b) => new Date(a.sessionDate) - new Date(b.sessionDate)
     );

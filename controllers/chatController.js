@@ -1,10 +1,9 @@
 const ChatRoom = require("../models/ChatRoom");
 const Message = require("../models/Message");
 
-// ✅ Create or Get Direct Chat Room
 exports.getOrCreateDirectRoom = async (req, res) => {
   try {
-    const { targetUserId, targetModel } = req.body; // e.g. Admin/Parent ID
+    const { targetUserId, targetModel } = req.body; 
 
     if (!targetUserId || !targetModel) {
       return res.status(400).json({ success: false, message: "targetUserId and targetModel are required" });
@@ -17,7 +16,6 @@ exports.getOrCreateDirectRoom = async (req, res) => {
       return res.status(401).json({ success: false, message: "Unauthorized access" });
     }
 
-    // Try finding existing direct room with these exact two members
     let room = await ChatRoom.findOne({
       type: "DIRECT",
       members: {
@@ -44,7 +42,6 @@ exports.getOrCreateDirectRoom = async (req, res) => {
   }
 };
 
-// ✅ Send Message
 exports.sendMessage = async (req, res) => {
   try {
     const { roomId, text, fileType } = req.body;
@@ -78,7 +75,6 @@ exports.sendMessage = async (req, res) => {
       readReceipts: [{ user: currentUserId, readAt: new Date() }],
     });
 
-    // Update room lastMessage
     const senderName = req.admin?.name || req.admin?.fullName || req.parent?.fullName || "User";
     room.lastMessage = {
       text: text || (attachments.length > 0 ? "Attachment" : ""),
@@ -97,7 +93,6 @@ exports.sendMessage = async (req, res) => {
   }
 };
 
-// ✅ Fetch Room Messages & Mark Read
 exports.getRoomMessages = async (req, res) => {
   try {
     const { roomId } = req.params;
@@ -109,7 +104,6 @@ exports.getRoomMessages = async (req, res) => {
 
     const messages = await Message.find({ room: roomId }).sort({ createdAt: 1 });
 
-    // Mark other unread messages as read
     await Message.updateMany(
       { room: roomId, "readReceipts.user": { $ne: currentUserId } },
       { $push: { readReceipts: { user: currentUserId, readAt: new Date() } } }
@@ -121,7 +115,6 @@ exports.getRoomMessages = async (req, res) => {
   }
 };
 
-// ✅ Fetch Chat Rooms list
 exports.getMyRooms = async (req, res) => {
   try {
     const currentUserId = req.admin ? req.admin._id : (req.parent || req.user)?._id;
@@ -147,11 +140,9 @@ exports.getMyRooms = async (req, res) => {
     if (search) {
       const searchRegex = new RegExp(search, "i");
       rooms = rooms.filter((room) => {
-        // Match room name
         if (room.name && searchRegex.test(room.name)) {
           return true;
         }
-        // Match members' details (excluding the current user from matching to make search intuitive)
         return room.members.some((member) => {
           if (!member.user || member.user._id.toString() === currentUserId.toString()) {
             return false;

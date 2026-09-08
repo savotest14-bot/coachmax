@@ -2,7 +2,6 @@ const BankDetails = require("../models/BankDetails");
 const fs = require("fs");
 const path = require("path");
 
-// ✅ Create Bank Details (Admin only)
 exports.upsertBankDetails = async (req, res) => {
   try {
     const {
@@ -15,7 +14,6 @@ exports.upsertBankDetails = async (req, res) => {
       instructions,
     } = req.body;
 
-    // Required fields
     if (!accountName || !bankName || !accountNumber) {
       return res.status(400).json({
         success: false,
@@ -24,16 +22,13 @@ exports.upsertBankDetails = async (req, res) => {
       });
     }
 
-    // Find existing bank details
     let bankDetails = await BankDetails.findOne();
     const isCreate = !bankDetails;
 
-    // Create new document if not exists
     if (!bankDetails) {
       bankDetails = new BankDetails();
     }
 
-    // Update fields
     bankDetails.accountName = accountName;
     bankDetails.bankName = bankName;
     bankDetails.accountNumber = accountNumber;
@@ -42,9 +37,7 @@ exports.upsertBankDetails = async (req, res) => {
     bankDetails.branch = branch || "";
     bankDetails.instructions = instructions || "";
 
-    // Replace QR Code Image
     if (req.file) {
-      // Delete old image if exists
       if (bankDetails.qrCodeImage) {
         try {
           const oldImagePath = path.join(
@@ -63,11 +56,9 @@ exports.upsertBankDetails = async (req, res) => {
         }
       }
 
-      // Save new image path
       bankDetails.qrCodeImage = `uploads/bank-details/${req.file.filename}`;
     }
 
-    // Updated By
     if (req.admin) {
       bankDetails.updatedBy = req.admin._id;
     }
@@ -89,7 +80,6 @@ exports.upsertBankDetails = async (req, res) => {
   }
 };
 
-// ✅ Get Active Bank Details (Public / Parent / Admin)
 exports.getBankDetails = async (req, res) => {
   try {
     const activeDetails = await BankDetails.findOne({ isActive: true }).sort({ updatedAt: -1 });
@@ -114,7 +104,6 @@ exports.getBankDetails = async (req, res) => {
   }
 };
 
-// ✅ Get All Bank Details List (Admin only)
 exports.getAllBankDetails = async (req, res) => {
   try {
     const list = await BankDetails.find().sort({ createdAt: -1 });

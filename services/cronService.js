@@ -13,16 +13,13 @@ const initCronJobs = () => {
       console.log("⏰ Running expired events cleanup cron job...");
       
       const now = new Date();
-      // Find all events where endDate is in the past
       const expiredEvents = await Event.find({ endDate: { $lt: now } }).select("_id");
       
       if (expiredEvents.length > 0) {
         const expiredEventIds = expiredEvents.map((e) => e._id);
         
-        // 1. Delete associated event registrations
         const regDeleteResult = await EventRegistration.deleteMany({ event: { $in: expiredEventIds } });
         
-        // 2. Delete the events themselves
         const eventDeleteResult = await Event.deleteMany({ _id: { $in: expiredEventIds } });
         
         console.log(`🧹 Successfully cleaned up:`);
@@ -53,7 +50,7 @@ const initCronJobs = () => {
           for (const token of user.tokens) {
             try {
               jwt.verify(token, secret);
-              validTokens.push(token); // keep valid token
+              validTokens.push(token);
             } catch (err) {
               totalCleaned++;
             }

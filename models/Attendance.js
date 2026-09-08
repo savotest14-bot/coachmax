@@ -70,11 +70,9 @@ const attendanceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// 🔥 prevent duplicate attendance per session/date
 attendanceSchema.index({ class: 1, sessionDate: 1 }, { unique: true, sparse: true });
 attendanceSchema.index({ team: 1, sessionDate: 1 }, { unique: true, sparse: true });
 
-// prevent duplicate attendance per training session
 attendanceSchema.index({ trainingSessionId: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model("Attendance", attendanceSchema);

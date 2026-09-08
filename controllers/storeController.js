@@ -7,7 +7,6 @@ const Parent = require("../models/Parent");
 const mongoose = require("mongoose");
 const { sendNotification } = require("../services/notificationService");
 
-// ✅ ProductCategory Create (Admin only)
 exports.createCategory = async (req, res) => {
   try {
     const { name, description } = req.body;
@@ -121,7 +120,6 @@ exports.deleteCategory = async (req, res) => {
   }
 };
 
-// ✅ Product Create (Admin only)
 exports.createProduct = async (req, res) => {
   try {
     const {
@@ -186,7 +184,6 @@ exports.createProduct = async (req, res) => {
   }
 };
 
-// ✅ Get Products List (User store catalog)
 exports.getProducts = async (req, res) => {
   try {
     const {
@@ -256,7 +253,6 @@ exports.getProducts = async (req, res) => {
   }
 };
 
-// ✅ Get All Products for Admin (Filter by search, category, status; returns all status if no status passed)
 exports.getAdminProducts = async (req, res) => {
   try {
     const {
@@ -325,7 +321,6 @@ exports.getAdminProducts = async (req, res) => {
   }
 };
 
-// ✅ Get Single Product By ID
 exports.getProductById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -350,7 +345,6 @@ exports.getProductById = async (req, res) => {
   }
 };
 
-// ✅ Update Product (Admin only)
 exports.updateProduct = async (req, res) => {
   try {
     const { id } = req.params;
@@ -438,7 +432,6 @@ exports.updateProduct = async (req, res) => {
   }
 };
 
-// ✅ Delete Product (Admin only - sets status to INACTIVE)
 exports.deleteProduct = async (req, res) => {
   try {
     const { id } = req.params;
@@ -467,7 +460,6 @@ exports.deleteProduct = async (req, res) => {
   }
 };
 
-// ✅ Add item to Cart (Parent only)
 exports.addToCart = async (req, res) => {
   try {
     const { productId, quantity, selectedSize = "", selectedColor = "" } = req.body;
@@ -487,7 +479,6 @@ exports.addToCart = async (req, res) => {
       });
     }
 
-    // Verify product
     const product = await Product.findById(productId);
     if (!product || product.status !== "ACTIVE") {
       return res.status(404).json({
@@ -496,7 +487,6 @@ exports.addToCart = async (req, res) => {
       });
     }
 
-    // Check stock
     if (quantity > product.stock) {
       return res.status(400).json({
         success: false,
@@ -522,10 +512,8 @@ exports.addToCart = async (req, res) => {
 
     if (itemIndex > -1) {
       if (quantity === 0) {
-        // Remove item
         cart.items.splice(itemIndex, 1);
       } else {
-        // Update quantity
         cart.items[itemIndex].quantity = quantity;
       }
     } else {
@@ -658,7 +646,6 @@ exports.removeCartItem = async (req, res) => {
   }
 };
 
-// ✅ Get Parent's Cart
 exports.getCart = async (req, res) => {
   try {
     const parentId = req.parent._id;
@@ -707,7 +694,6 @@ exports.getCart = async (req, res) => {
   }
 };
 
-// ✅ Checkout Order (Parent only)
 exports.checkout = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -728,7 +714,6 @@ exports.checkout = async (req, res) => {
     let totalAmount = 0;
     const orderItems = [];
 
-    // Verify stock and calculate total
     for (const item of cart.items) {
       const dbProduct = item.product;
 
@@ -740,7 +725,6 @@ exports.checkout = async (req, res) => {
         return res.status(400).json({ success: false, message: `Insufficient stock for product: ${dbProduct.name}` });
       }
 
-      // Decrement stock
       dbProduct.stock -= item.quantity;
       await dbProduct.save({ session });
 
@@ -754,7 +738,6 @@ exports.checkout = async (req, res) => {
       });
     }
 
-    // Create Invoice
     const year = new Date().getFullYear();
     const invoiceNumber = `INV-${year}-${Date.now().toString().slice(-6)}`;
     const dueDate = new Date();
@@ -785,7 +768,6 @@ exports.checkout = async (req, res) => {
       { session }
     );
 
-    // Create Order
     const order = await Order.create(
       [
         {
@@ -801,14 +783,12 @@ exports.checkout = async (req, res) => {
       { session }
     );
 
-    // Clear Cart
     cart.items = [];
     await cart.save({ session });
 
     await session.commitTransaction();
     session.endSession();
 
-    // Send Admin Notification & Push Notification for new store order
     try {
       const parentDoc = await Parent.findById(parentId).select("fullName");
       const parentName = parentDoc ? parentDoc.fullName : "Parent";
@@ -844,7 +824,6 @@ exports.checkout = async (req, res) => {
   }
 };
 
-// ✅ Get All Orders (Admin only with invoice number & other details)
 exports.getAllOrders = async (req, res) => {
   try {
     const {
@@ -939,7 +918,6 @@ exports.getAllOrders = async (req, res) => {
   }
 };
 
-// ✅ Get Order By ID (Admin)
 exports.getOrderById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -972,7 +950,6 @@ exports.getOrderById = async (req, res) => {
   }
 };
 
-// ✅ Update Order Status (Admin)
 exports.updateOrderStatus = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1008,7 +985,6 @@ exports.updateOrderStatus = async (req, res) => {
   }
 };
 
-// ✅ Get Parent's Orders (Parent only)
 exports.getMyOrders = async (req, res) => {
   try {
     const parentId = req.parent._id;

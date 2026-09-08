@@ -15,8 +15,8 @@ const eventSchema = new mongoose.Schema(
     startTime: String,
     endTime: String,
 
-    venueName: String, // Kept for backward compatibility
-    venue: String, // Added
+    venueName: String, 
+    venue: String, 
     address: String,
     googleMapLink: String,
 
@@ -44,7 +44,6 @@ const eventSchema = new mongoose.Schema(
       ref: "Admin",
     },
 
-    // Added fields
     eventType: {
       type: String,
       default: "TOURNAMENT",

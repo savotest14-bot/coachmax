@@ -13,12 +13,8 @@ const { sendNotification } = require("../services/notificationService");
 
 let io = null;
 
-// Track online users: userId -> { socketIds: Set, role, lastSeen }
 const onlineUsersMap = new Map();
 
-/**
- * Helper: Save socket attachment (Buffer / Base64 / File object) to disk
- */
 const saveSocketAttachment = (att) => {
   if (!att) return null;
 
@@ -122,7 +118,7 @@ const initSocket = (server) => {
     },
   });
 
-  // 🔐 Socket Authentication Middleware
+  // Socket Authentication Middleware
   io.use(async (socket, next) => {
     try {
       const token =
@@ -164,13 +160,13 @@ const initSocket = (server) => {
     }
   });
 
-  // 🔌 Connection Handler
+  //  Connection Handler
   io.on("connection", async (socket) => {
     const userIdStr = socket.userId;
     console.log(`⚡ Socket connected: ${socket.id} (User: ${userIdStr}, Role: ${socket.role})`);
 
     // ─────────────────────────────────────────────
-    // 🟢 Online / Offline Status Tracking
+    //  Online / Offline Status Tracking
     // ─────────────────────────────────────────────
     if (!onlineUsersMap.has(userIdStr)) {
       onlineUsersMap.set(userIdStr, {
@@ -204,7 +200,7 @@ const initSocket = (server) => {
     autoDeliverUnreadMessages(userIdStr);
 
     // ─────────────────────────────────────────────
-    // 1. Check User Online / Offline Status
+    //  Check User Online / Offline Status
     // ─────────────────────────────────────────────
     socket.on("check_user_status", (data, callback) => {
       const { targetUserId } = data || {};
@@ -224,7 +220,7 @@ const initSocket = (server) => {
     });
 
     // ─────────────────────────────────────────────
-    // 2. Join Chat Room
+    //  Join Chat Room
     // ─────────────────────────────────────────────
     socket.on("join_room", async (data, callback) => {
       try {
@@ -251,7 +247,7 @@ const initSocket = (server) => {
     });
 
     // ─────────────────────────────────────────────
-    // 3. Leave Chat Room
+    //  Leave Chat Room
     // ─────────────────────────────────────────────
     socket.on("leave_room", (data) => {
       const { roomId } = typeof data === "string" ? { roomId: data } : data;
@@ -261,7 +257,7 @@ const initSocket = (server) => {
     });
 
     // ─────────────────────────────────────────────
-    // 4. Real-Time Send Message (Single/Double/Blue Ticks + Attachment Upload)
+    // Real-Time Send Message (Single/Double/Blue Ticks + Attachment Upload)
     // ─────────────────────────────────────────────
     socket.on("send_message", async (data, callback) => {
       try {
@@ -386,7 +382,7 @@ const initSocket = (server) => {
     });
 
     // ─────────────────────────────────────────────
-    // 5. Typing Indicator
+    //  Typing Indicator
     // ─────────────────────────────────────────────
     socket.on("typing", async (data) => {
       const { roomId, isTyping } = data || {};
@@ -418,7 +414,7 @@ const initSocket = (server) => {
     });
 
     // ─────────────────────────────────────────────
-    // 6. Mark Read (Double Blue Tick)
+    //  Mark Read (Double Blue Tick)
     // ─────────────────────────────────────────────
     socket.on("mark_read", async (data, callback) => {
       try {
@@ -474,7 +470,7 @@ const initSocket = (server) => {
     });
 
     // ─────────────────────────────────────────────
-    // 7. Full Class Broadcast (Coach ➔ All Class Parents)
+    //  Full Class Broadcast (Coach ➔ All Class Parents)
     // ─────────────────────────────────────────────
     socket.on("send_broadcast", async (data, callback) => {
       try {
@@ -574,7 +570,7 @@ const initSocket = (server) => {
     });
 
     // ─────────────────────────────────────────────
-    // 🔴 Disconnect Handler
+    //  Disconnect Handler
     // ─────────────────────────────────────────────
     socket.on("disconnect", () => {
       console.log(`🔌 Socket disconnected: ${socket.id}`);

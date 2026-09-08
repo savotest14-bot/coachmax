@@ -21,7 +21,6 @@ const eventRegistrationSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// prevent duplicate registration
 eventRegistrationSchema.index({ user: 1, event: 1 }, { unique: true });
 
 module.exports = mongoose.model(

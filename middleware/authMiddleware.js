@@ -10,10 +10,8 @@ const auth = async (req, res, next) => {
       return res.status(401).json({ message: "No token provided" });
     }
 
-    // 🔐 Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    // 🛡️ Check Admin (Super Admin or Coach)
     const admin = await Admin.findOne({
       _id: decoded.id,
       tokens: token,
@@ -28,30 +26,25 @@ const auth = async (req, res, next) => {
       req.token = token;
       return next();
     }
-
-    // 👤 Check Parent
     const parent = await Parent.findOne({
       _id: decoded.id,
       tokens: token,
     });
 
     if (parent) {
-      // 🚫 Blocked check
       if (parent.isBlocked) {
         return res.status(403).json({
           message: "Your account is blocked. Contact admin.",
         });
       }
-
-      // 🚫 Approval check (if applicable, e.g. status)
       if (parent.status !== "APPROVED") {
         return res.status(403).json({
           message: `Your account is not approved. Status: ${parent.status}`,
         });
       }
 
-      req.user = parent; // Set req.user to Parent for compatibility with auth routes
-      req.parent = parent; // Set req.parent for explicit identification
+      req.user = parent; 
+      req.parent = parent;
       req.role = "PARENT";
       req.token = token;
 

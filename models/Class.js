@@ -22,15 +22,15 @@ const classSchema = new mongoose.Schema(
     },
 
     dayOfWeek: {
-      type: String, // Monday, Tuesday
+      type: String, 
       required: true,
     },
 
     startTime: String,
     endTime: String,
 
-    location: String, // Kept for backward compatibility
-    venue: String, // Added
+    location: String,
+    venue: String,
 
     coach: {
       type: mongoose.Schema.Types.ObjectId,

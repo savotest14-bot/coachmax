@@ -14,14 +14,10 @@ const auditLogSchema = new mongoose.Schema(
     action: {
       type: String,
       required: true,
-      // e.g., ATTENDANCE_UPDATED, NOTE_CREATED, NOTE_UPDATED,
-      // TEMP_PLAYER_CREATED, TEMP_PLAYER_APPROVED, TEMP_PLAYER_REJECTED,
-      // CHAT_MESSAGE_SENT, COACH_ASSIGNMENT_CHANGED
     },
     entityType: {
       type: String,
       required: true,
-      // e.g., Attendance, CoachNote, TemporaryPlayer, Message
     },
     entityId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -51,7 +47,6 @@ const auditLogSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Index for efficient querying
 auditLogSchema.index({ user: 1, createdAt: -1 });
 auditLogSchema.index({ entityType: 1, entityId: 1 });
 auditLogSchema.index({ action: 1 });

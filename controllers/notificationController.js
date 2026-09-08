@@ -3,11 +3,7 @@ const Parent = require("../models/Parent");
 const Admin = require("../models/Admin");
 const { sendNotification } = require("../services/notificationService");
 
-// =============================================================
-// PARENT NOTIFICATION CONTROLLERS
-// =============================================================
 
-// ✅ Get Parent Notifications (Paginated + Unread Count)
 exports.getParentNotifications = async (req, res) => {
   try {
     const parentId = req.parent._id;
@@ -54,7 +50,6 @@ exports.getParentNotifications = async (req, res) => {
   }
 };
 
-// ✅ Mark Single Parent Notification as Read
 exports.markParentNotificationRead = async (req, res) => {
   try {
     const { notificationId } = req.params;
@@ -90,7 +85,6 @@ exports.markParentNotificationRead = async (req, res) => {
   }
 };
 
-// ✅ Mark All Parent Notifications as Read
 exports.markAllParentNotificationsRead = async (req, res) => {
   try {
     const parentId = req.parent._id;
@@ -118,12 +112,6 @@ exports.markAllParentNotificationsRead = async (req, res) => {
   }
 };
 
-
-// =============================================================
-// ADMIN & COACH NOTIFICATION CONTROLLERS
-// =============================================================
-
-// ✅ Get Admin / Coach Notifications (Paginated + Unread Count)
 exports.getAdminNotifications = async (req, res) => {
   try {
     const adminId = req.admin ? req.admin._id : null;
@@ -135,9 +123,6 @@ exports.getAdminNotifications = async (req, res) => {
     page = Number(page);
     limit = Number(limit);
 
-    // Build role-aware query:
-    // Super Admins see global admin notifications (admin: null) + personal notifications
-    // Coaches see notifications specifically assigned to their coachId (admin: coachId)
     let query = {};
     if (isSuperAdmin) {
       query = {
@@ -185,7 +170,6 @@ exports.getAdminNotifications = async (req, res) => {
   }
 };
 
-// ✅ Mark Single Admin / Coach Notification as Read
 exports.markAdminNotificationRead = async (req, res) => {
   try {
     const { notificationId } = req.params;
@@ -228,7 +212,6 @@ exports.markAdminNotificationRead = async (req, res) => {
   }
 };
 
-// ✅ Mark All Admin / Coach Notifications as Read
 exports.markAllAdminNotificationsRead = async (req, res) => {
   try {
     const adminId = req.admin ? req.admin._id : null;
@@ -260,7 +243,6 @@ exports.markAllAdminNotificationsRead = async (req, res) => {
   }
 };
 
-// ✅ Admin Send Custom Push / DB Notification to Parents
 exports.sendAdminCustomNotification = async (req, res) => {
   try {
     const { parentId, title, message, type = "ANNOUNCEMENT", data = {} } = req.body;
@@ -272,7 +254,6 @@ exports.sendAdminCustomNotification = async (req, res) => {
       });
     }
 
-    // Target specific parent or ALL parents
     const recipientType = "PARENT";
 
     const notifDoc = await sendNotification({
@@ -298,8 +279,6 @@ exports.sendAdminCustomNotification = async (req, res) => {
     });
   }
 };
-
-// ✅ Save / Update Admin or Coach FCM Token
 exports.saveAdminFcmToken = async (req, res) => {
   try {
     const { fcmToken } = req.body;

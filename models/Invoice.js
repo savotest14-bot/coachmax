@@ -49,7 +49,7 @@ const invoiceSchema = new mongoose.Schema(
       default: 0,
     },
     amount: {
-      type: Number, // Backward compatibility field (synchronized with totalAmount)
+      type: Number,
       default: 0,
     },
     class: {

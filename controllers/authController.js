@@ -34,7 +34,7 @@ exports.forgotPassword = async (req, res) => {
     }
 
     const otp = generateOTP();
-    user.otp = otp;
+    user.otp = await bcrypt.hash(otp.toString(), 10);
     user.otpExpire = Date.now() + 10 * 60 * 1000;
     await user.save();
 
@@ -43,7 +43,7 @@ exports.forgotPassword = async (req, res) => {
 
     res.json({
       message: "OTP sent to email",
-      otp: otp,
+      // otp: otp,
       userId: user._id,
     });
   } catch (err) {
@@ -77,7 +77,7 @@ exports.resendOTP = async (req, res) => {
     }
 
     const otp = generateOTP();
-    user.otp = otp;
+    user.otp = await bcrypt.hash(otp.toString(), 10);
     user.otpExpire = Date.now() + 10 * 60 * 1000;
     await user.save();
 
@@ -86,7 +86,7 @@ exports.resendOTP = async (req, res) => {
 
     res.json({
       message: "OTP resent successfully",
-      otp: otp,
+      // otp: otp,
       userId: user._id,
     });
   } catch (err) {
@@ -113,7 +113,8 @@ exports.verifyOtp = async (req, res) => {
       });
     }
 
-    if (user.otp !== otp) {
+    const isMatch = await bcrypt.compare(otp.toString(), user.otp);
+    if (!isMatch) {
       return res.status(400).json({
         message: "Invalid OTP",
       });
@@ -179,47 +180,6 @@ exports.resetPassword = async (req, res) => {
   }
 };
 
-// exports.getMyProfile = async (req, res) => {
-//   try {
-//     let data = req.role === "ADMIN" ? req.admin : req.user;
-
-//     data = data.toObject();
-
-//     // Remove sensitive fields
-//     delete data.password;
-//     delete data.tokens;
-//     delete data.otp;
-//     delete data.otpExpire;
-
-//     let players = [];
-
-//     // If logged in user is a Parent, fetch players
-//     if (req.role !== "ADMIN") {
-//       players = await User.find({ parentId: data._id })
-//         .populate("category", "name")
-//         .populate("programs", "name")
-//         .populate("term", "name")
-//         .select("-__v");
-//     }
-
-//     res.json({
-//       success: true,
-//       role: req.role,
-//       data: {
-//         ...data,
-//         players,
-//       },
-//     });
-//   } catch (err) {
-//     res.status(500).json({
-//       success: false,
-//       message: err.message,
-//     });
-//   }
-// };
-
-
-
 exports.getMyProfile = async (req, res) => {
   try {
     let data = req.role === "ADMIN" ? req.admin : req.parent;
@@ -233,7 +193,6 @@ exports.getMyProfile = async (req, res) => {
 
     data = data.toObject();
 
-    // Remove sensitive fields
     delete data.password;
     delete data.tokens;
     delete data.otp;
@@ -284,7 +243,6 @@ exports.getMyProfile = async (req, res) => {
           const end = new Date(cls.term.endDate);
           end.setUTCHours(0, 0, 0, 0);
 
-          // Determine which days to iterate over
           const scheduleType = cls.scheduleType || "SINGLE_DAY";
           const schedule = cls.schedule || [];
           let daysToCount = [];
@@ -338,7 +296,6 @@ exports.getMyProfile = async (req, res) => {
             : 0;
       }
 
-      // Temporary players created by this coach this month
       const temporaryPlayersThisMonthCount = await User.countDocuments({
         createdBy: data._id,
         createdAt: { $gte: startOfMonth },
@@ -356,14 +313,12 @@ exports.getMyProfile = async (req, res) => {
         sessionsToBeDeliveredThisMonth: sessionsToBeDeliveredThisMonthCount,
       };
     } else if (req.role !== "ADMIN") {
-      // Get parent's players
       players = await User.find({ parentId: data._id })
         .populate("category", "name")
         .populate("programs", "name")
         .populate("term", "name")
         .select("-__v");
 
-      // Count unpaid invoices
       unpaidInvoiceCount = await Invoice.countDocuments({
         parent: data._id,
         status: "ACTIVE",
@@ -412,7 +367,6 @@ exports.updateMyProfile = async (req, res) => {
       });
     }
 
-    // Support single file upload from req.file or req.files (e.g. from uploads.any())
     const uploadedFile = req.file || (req.files && req.files.length > 0 ? req.files[0] : null);
 
     if (uploadedFile) {
@@ -421,7 +375,6 @@ exports.updateMyProfile = async (req, res) => {
 
       updateFields.profileImage = imagePath;
 
-      // Delete old profile image if exists
       const oldImage = currentUser.profileImage;
       if (oldImage) {
         const oldPath = path.resolve(oldImage);
@@ -440,11 +393,9 @@ exports.updateMyProfile = async (req, res) => {
     }
 
     if (req.role === "ADMIN") {
-      // Support both `name` and `fullName` for Admin/Coach
       if (req.body.name !== undefined) updateFields.name = req.body.name;
       if (req.body.fullName !== undefined) updateFields.name = req.body.fullName;
 
-      // Support both `mobile` and `phone` for Admin/Coach
       if (req.body.mobile !== undefined) updateFields.mobile = req.body.mobile;
       if (req.body.phone !== undefined) updateFields.mobile = req.body.phone;
 
@@ -470,14 +421,12 @@ exports.updateMyProfile = async (req, res) => {
       }
     }
 
-    // Remove undefined values
     Object.keys(updateFields).forEach((key) => {
       if (updateFields[key] === undefined) {
         delete updateFields[key];
       }
     });
 
-    // Check for duplicate mobile number across both Admin and Parent models
     const newMobile = updateFields.mobile || updateFields.phone;
     if (newMobile) {
       const currentMobile = currentUser.mobile || currentUser.phone;
@@ -500,7 +449,6 @@ exports.updateMyProfile = async (req, res) => {
       }
     }
 
-    // Check for duplicate email across both Admin and Parent models
     if (updateFields.email) {
       const currentEmail = currentUser.email;
       if (updateFields.email.toLowerCase() !== (currentEmail ? currentEmail.toLowerCase() : "")) {
@@ -561,7 +509,6 @@ exports.updateChild = async (req, res) => {
   try {
     const { childId } = req.params;
 
-    // Ensure child belongs to logged-in parent
     const child = await User.findOne({
       _id: childId,
       parentId: req.parent._id,
@@ -614,7 +561,6 @@ exports.updateChild = async (req, res) => {
     if (req.body.medicalConditionDetails !== undefined)
       updateFields.medicalConditionDetails = req.body.medicalConditionDetails;
 
-    // Parse DOB
     if (req.body.dob) {
       const parts = req.body.dob.split("/");
 
@@ -627,7 +573,6 @@ exports.updateChild = async (req, res) => {
       }
     }
 
-    // Profile Image
     if (req.file) {
       updateFields.profileImage = `uploads/profiles/${req.file.filename}`;
 

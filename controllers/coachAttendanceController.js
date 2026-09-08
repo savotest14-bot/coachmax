@@ -5,15 +5,6 @@ const Class = require("../models/Class");
 const { sendNotification } = require("../services/notificationService");
 const Admin = require("../models/Admin");
 
-// ═══════════════════════════════════════════════
-// FEATURE 2 — Attendance with History Tracking
-// ═══════════════════════════════════════════════
-
-/**
- * POST /api/coach/attendance/:classId
- * Mark attendance for an entire session.
- * Stores history for every change.
- */
 exports.markAttendance = async (req, res) => {
   try {
     const { classId } = req.params;
@@ -27,11 +18,9 @@ exports.markAttendance = async (req, res) => {
       });
     }
 
-    // Normalize date
     const date = new Date(sessionDate);
     date.setUTCHours(0, 0, 0, 0);
 
-    // Find existing attendance
     let attendance = await Attendance.findOne({
       class: classId,
       sessionDate: date,
@@ -40,7 +29,6 @@ exports.markAttendance = async (req, res) => {
     const isUpdate = !!attendance;
 
     if (attendance) {
-      // Track history for every changed record
       for (const newRecord of records) {
         const existingRecord = attendance.records.find(
           (r) => r.player.toString() === newRecord.player
@@ -51,7 +39,6 @@ exports.markAttendance = async (req, res) => {
         const newStatus = newRecord.status || "ABSENT";
         const newComment = newRecord.comment || "";
 
-        // Only log if something changed
         if (previousStatus !== newStatus || previousComment !== newComment) {
           await AttendanceHistory.create({
             attendanceId: attendance._id,
@@ -68,7 +55,6 @@ exports.markAttendance = async (req, res) => {
         }
       }
 
-      // Update existing records
       attendance.records = records.map((r) => ({
         player: r.player,
         status: r.status || "ABSENT",
@@ -83,7 +69,6 @@ exports.markAttendance = async (req, res) => {
       attendance.markedBy = coachId;
       await attendance.save();
 
-      // Audit log
       await AuditLog.create({
         user: coachId,
         userRole: req.admin.role,
@@ -102,7 +87,6 @@ exports.markAttendance = async (req, res) => {
       });
     }
 
-    // Create new attendance
     attendance = await Attendance.create({
       class: classId,
       sessionDate: date,
@@ -119,7 +103,6 @@ exports.markAttendance = async (req, res) => {
       markedBy: coachId,
     });
 
-    // Create initial history entries
     for (const record of records) {
       await AttendanceHistory.create({
         attendanceId: attendance._id,
@@ -134,7 +117,6 @@ exports.markAttendance = async (req, res) => {
       });
     }
 
-    // Audit log
     await AuditLog.create({
       user: coachId,
       userRole: req.admin.role,
@@ -146,7 +128,6 @@ exports.markAttendance = async (req, res) => {
       description: `Attendance marked for class ${classId} on ${date.toISOString().split("T")[0]}`,
     });
 
-    // Notify Super Admin
     const superAdmins = await Admin.find({ role: "SUPER_ADMIN" }).select("_id");
     for (const sa of superAdmins) {
       await sendNotification({
@@ -175,10 +156,6 @@ exports.markAttendance = async (req, res) => {
   }
 };
 
-/**
- * POST /api/coach/attendance/:classId/single
- * Mark or update attendance for a single player.
- */
 exports.markSingleAttendance = async (req, res) => {
   try {
     const { classId } = req.params;
@@ -200,7 +177,6 @@ exports.markSingleAttendance = async (req, res) => {
       });
     }
 
-    // Normalize date
     const date = new Date(sessionDate);
     date.setUTCHours(0, 0, 0, 0);
 
@@ -218,7 +194,6 @@ exports.markSingleAttendance = async (req, res) => {
       });
     }
 
-    // Find existing record for this player
     const existingRecord = attendance.records.find(
       (r) => r.player.toString() === playerId
     );
@@ -226,7 +201,6 @@ exports.markSingleAttendance = async (req, res) => {
     const previousStatus = existingRecord ? existingRecord.status : "NONE";
     const previousComment = existingRecord ? (existingRecord.comment || "") : "";
 
-    // Track history
     if (previousStatus !== status || previousComment !== (comment || "")) {
       await AttendanceHistory.create({
         attendanceId: attendance._id,
@@ -257,7 +231,6 @@ exports.markSingleAttendance = async (req, res) => {
     attendance.markedBy = coachId;
     await attendance.save();
 
-    // Audit log
     await AuditLog.create({
       user: coachId,
       userRole: req.admin.role,
@@ -281,10 +254,6 @@ exports.markSingleAttendance = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/attendance/:classId
- * Get attendance records for a class (all sessions).
- */
 exports.getAttendanceByClass = async (req, res) => {
   try {
     const { classId } = req.params;
@@ -318,10 +287,6 @@ exports.getAttendanceByClass = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/attendance/:classId/date
- * Get attendance for a specific date.
- */
 exports.getAttendanceByDate = async (req, res) => {
   try {
     const { classId } = req.params;
@@ -359,10 +324,6 @@ exports.getAttendanceByDate = async (req, res) => {
   }
 };
 
-/**
- * GET /api/admin/attendance-history/:classId
- * Super Admin only — View attendance modification history.
- */
 exports.getAttendanceHistory = async (req, res) => {
   try {
     const { classId } = req.params;
@@ -402,10 +363,6 @@ exports.getAttendanceHistory = async (req, res) => {
   }
 };
 
-/**
- * POST /api/coach/team-attendance/:teamId
- * Mark attendance for an entire team session.
- */
 exports.markTeamAttendance = async (req, res) => {
   try {
     const { teamId } = req.params;
@@ -547,10 +504,6 @@ exports.markTeamAttendance = async (req, res) => {
   }
 };
 
-/**
- * POST /api/coach/team-attendance/:teamId/single
- * Mark or update attendance for a single player on a team.
- */
 exports.markSingleTeamAttendance = async (req, res) => {
   try {
     const { teamId } = req.params;
@@ -636,9 +589,6 @@ exports.markSingleTeamAttendance = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/team-attendance/:teamId
- */
 exports.getAttendanceByTeam = async (req, res) => {
   try {
     const { teamId } = req.params;
@@ -672,9 +622,6 @@ exports.getAttendanceByTeam = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/team-attendance/:teamId/date
- */
 exports.getAttendanceByTeamDate = async (req, res) => {
   try {
     const { teamId } = req.params;
@@ -712,9 +659,6 @@ exports.getAttendanceByTeamDate = async (req, res) => {
   }
 };
 
-/**
- * GET /api/admin/team-attendance-history/:teamId
- */
 exports.getTeamAttendanceHistory = async (req, res) => {
   try {
     const { teamId } = req.params;

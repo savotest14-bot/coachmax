@@ -2,7 +2,6 @@ const TrainingSession = require("../models/TrainingSession");
 const Class = require("../models/Class");
 const User = require("../models/User");
 
-// ✅ Create training session (Admin/Coach only)
 exports.createTrainingSession = async (req, res) => {
   try {
     const { classId, date, title, objectives, notes, completionStatus } = req.body;
@@ -47,7 +46,6 @@ exports.createTrainingSession = async (req, res) => {
   }
 };
 
-// ✅ Get sessions list for a class (Parent, Coach, Admin)
 exports.getClassTrainingSessions = async (req, res) => {
   try {
     const { classId } = req.params;
@@ -57,7 +55,6 @@ exports.getClassTrainingSessions = async (req, res) => {
       return res.status(404).json({ success: false, message: "Class not found" });
     }
 
-    // Verify parent's children enrollment in class
     if (req.role === "PARENT") {
       const childCount = await User.countDocuments({
         parentId: req.parent._id,
@@ -78,7 +75,6 @@ exports.getClassTrainingSessions = async (req, res) => {
   }
 };
 
-// ✅ Update training session (Admin/Coach only)
 exports.updateTrainingSession = async (req, res) => {
   try {
     const { sessionId } = req.params;

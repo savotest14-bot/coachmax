@@ -18,14 +18,6 @@ const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
 
-// ═══════════════════════════════════════════════
-// FEATURE 4 — Temporary Player Flow (Single User/Parent Architecture)
-// ═══════════════════════════════════════════════
-
-/**
- * POST /api/coach/temporary-players
- * Coach creates a temporary player (Parent + User record with playerStatus="PENDING_APPROVAL").
- */
 exports.createTemporaryPlayer = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -52,7 +44,6 @@ exports.createTemporaryPlayer = async (req, res) => {
       gender,
     } = req.body;
 
-    // Required field validation
     if (!name || !dob || !parentName || !parentPhone || !emergencyContact || !classId || !sessionDate) {
       await session.abortTransaction();
       session.endSession();
@@ -62,7 +53,6 @@ exports.createTemporaryPlayer = async (req, res) => {
       });
     }
 
-    // Verify class assignment for coach & fetch class info
     const classData = await Class.findById(classId).select("coach assistantCoach category program term venue location").session(session);
     if (!classData) {
       await session.abortTransaction();
@@ -85,7 +75,6 @@ exports.createTemporaryPlayer = async (req, res) => {
       }
     }
 
-    // 1. Find or create Parent record
     const emailToUse = parentEmail ? parentEmail.toLowerCase() : `temp.${Date.now()}.${Math.floor(Math.random() * 1000)}@tempcoachmax.com`;
     let parent = await Parent.findOne({
       $or: [{ phone: parentPhone }, { email: emailToUse }],
@@ -94,7 +83,6 @@ exports.createTemporaryPlayer = async (req, res) => {
     let generatedPassword = null;
 
     if (!parent) {
-      // Generate random temporary password
       generatedPassword = crypto.randomBytes(4).toString("hex") + "@1A";
       const hashedPassword = await bcrypt.hash(generatedPassword, 10);
 
@@ -115,17 +103,14 @@ exports.createTemporaryPlayer = async (req, res) => {
       parent = newParentDocs[0];
     }
 
-    // 2. Split player full name
     const nameParts = name.trim().split(" ");
     const firstName = nameParts[0];
     const lastName = nameParts.slice(1).join(" ") || "";
 
-    // Parse date
     const parsedDob = new Date(dob);
     const parsedSessionDate = new Date(sessionDate);
     parsedSessionDate.setUTCHours(0, 0, 0, 0);
 
-    // Derive category, programs, term, and preferred classes
     const catList = Array.isArray(categories)
       ? categories
       : category
@@ -150,7 +135,6 @@ exports.createTemporaryPlayer = async (req, res) => {
       ? preferredClasses
       : [classId];
 
-    // 3. Create User (Player) record
     const hasMedical = !!(medicalConditions || allergies);
     const medicalDetails = [medicalConditions, allergies ? `Allergies: ${allergies}` : ""].filter(Boolean).join(" | ");
 
@@ -187,7 +171,6 @@ exports.createTemporaryPlayer = async (req, res) => {
 
     const player = newPlayerDocs[0];
 
-    // Create RegistrationRequest (TEMPORARY_PLAYER)
     await RegistrationRequest.create(
       [
         {
@@ -205,7 +188,6 @@ exports.createTemporaryPlayer = async (req, res) => {
       { session }
     );
 
-    // Audit log entry
     await AuditLog.create(
       [
         {
@@ -233,8 +215,6 @@ exports.createTemporaryPlayer = async (req, res) => {
 
     await session.commitTransaction();
     session.endSession();
-
-    // 4. Send email to parent if temporary password was generated (non-blocking)
     if (generatedPassword && parentEmail) {
       sendEmail(
         parentEmail,
@@ -243,7 +223,6 @@ exports.createTemporaryPlayer = async (req, res) => {
       ).catch((err) => console.error("Parent temp credential email error:", err.message));
     }
 
-    // 5. Notify Super Admins
     const superAdmins = await Admin.find({ role: "SUPER_ADMIN" }).select("_id");
     for (const sa of superAdmins) {
       await sendNotification({
@@ -282,10 +261,6 @@ exports.createTemporaryPlayer = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/temporary-players
- * View temporary/pending players.
- */
 exports.getTemporaryPlayers = async (req, res) => {
   try {
     const coachId = req.admin._id;
@@ -303,7 +278,6 @@ exports.getTemporaryPlayers = async (req, res) => {
     page = Number(page) || 1;
     limit = Number(limit) || 20;
 
-    // 1. Build Player query for temporary / coach created players
     const playerQuery = {};
     if (req.admin.role === "COACH") {
       playerQuery.createdBy = coachId;
@@ -312,11 +286,9 @@ exports.getTemporaryPlayers = async (req, res) => {
       playerQuery.temporaryClass = classId;
     }
 
-    // Find players matching coach/class criteria
     const matchingPlayers = await User.find(playerQuery).select("_id parentId category programs temporaryClass createdBy");
     const matchingPlayerIds = matchingPlayers.map((p) => p._id);
 
-    // Lazy migration: Ensure any matching user without a RegistrationRequest gets one
     for (const tu of matchingPlayers) {
       const existingReq = await RegistrationRequest.findOne({ player: tu._id });
       if (!existingReq && tu.parentId) {
@@ -333,7 +305,6 @@ exports.getTemporaryPlayers = async (req, res) => {
       }
     }
 
-    // 2. Build RegistrationRequest query
     const reqQuery = {
       $or: [
         { requestType: { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] } },
@@ -419,10 +390,6 @@ exports.getTemporaryPlayers = async (req, res) => {
   }
 };
 
-/**
- * PATCH /api/admin/temporary-players/:id/approve
- * Super Admin approves a temporary player (updates playerStatus="ACTIVE").
- */
 exports.approveTemporaryPlayer = async (req, res) => {
   try {
     const { id } = req.params;
@@ -442,13 +409,10 @@ exports.approveTemporaryPlayer = async (req, res) => {
       });
     }
 
-    // Update status to ACTIVE
     player.playerStatus = "ACTIVE";
 
-    // Optional class/program allocations
     if (assignedClasses && Array.isArray(assignedClasses)) {
       player.assignedClasses = assignedClasses;
-      // Add player to class rosters
       await Class.updateMany(
         { _id: { $in: assignedClasses } },
         { $addToSet: { players: player._id } }
@@ -467,7 +431,6 @@ exports.approveTemporaryPlayer = async (req, res) => {
 
     await player.save();
 
-    // ✅ Automatic Invoice Generation on Class Assignment
     if (assignedClasses && Array.isArray(assignedClasses)) {
       try {
         for (const clsId of assignedClasses) {
@@ -478,7 +441,6 @@ exports.approveTemporaryPlayer = async (req, res) => {
       }
     }
 
-    // Audit log
     await AuditLog.create({
       user: adminId,
       userRole: req.admin.role,
@@ -492,12 +454,11 @@ exports.approveTemporaryPlayer = async (req, res) => {
       description: `Temporary player "${player.fullName}" approved by Admin and set to ACTIVE`,
     });
 
-    // Notify coach if created by coach
     if (player.createdBy) {
       await sendNotification({
         recipientType: "ADMIN",
         adminId: player.createdBy,
-        title: "Temporary Player Approved ✅",
+        title: "Temporary Player Approved",
         message: `Temporary player "${player.fullName}" has been approved by Super Admin and is now ACTIVE.`,
         type: "TEMPORARY_PLAYER_ADDED",
         data: { playerId: player._id.toString() },
@@ -514,10 +475,6 @@ exports.approveTemporaryPlayer = async (req, res) => {
   }
 };
 
-/**
- * PATCH /api/admin/temporary-players/:id/reject
- * Super Admin rejects a temporary player (updates playerStatus="REJECTED").
- */
 exports.rejectTemporaryPlayer = async (req, res) => {
   try {
     const { id } = req.params;
@@ -533,7 +490,6 @@ exports.rejectTemporaryPlayer = async (req, res) => {
     player.playerStatus = "REJECTED";
     await player.save();
 
-    // Audit log
     await AuditLog.create({
       user: adminId,
       userRole: req.admin.role,
@@ -547,7 +503,6 @@ exports.rejectTemporaryPlayer = async (req, res) => {
       description: `Temporary player "${player.fullName}" rejected by Admin`,
     });
 
-    // Notify coach
     if (player.createdBy) {
       await sendNotification({
         recipientType: "ADMIN",
@@ -569,10 +524,6 @@ exports.rejectTemporaryPlayer = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/admin/temporary-players/:id
- * Super Admin cascade deletes a temporary/rejected player and all associated data.
- */
 exports.deleteTemporaryPlayer = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -591,14 +542,12 @@ exports.deleteTemporaryPlayer = async (req, res) => {
 
     const parentId = player.parentId;
 
-    // 1. Remove player from Class rosters
     await Class.updateMany(
       { players: player._id },
       { $pull: { players: player._id } },
       { session }
     );
 
-    // 2. Delete Attendance records & history
     await Attendance.updateMany(
       { "records.player": player._id },
       { $pull: { records: { player: player._id } } },
@@ -606,21 +555,16 @@ exports.deleteTemporaryPlayer = async (req, res) => {
     );
     await AttendanceHistory.deleteMany({ playerId: player._id }, { session });
 
-    // 3. Delete Coach Notes
     await CoachNote.deleteMany({ player: player._id }, { session });
 
-    // 4. Delete Player record
     await User.findByIdAndDelete(player._id, { session });
 
-    // 5. Delete Parent if no other children exist
     if (parentId) {
       const remainingChildren = await User.countDocuments({ parentId }).session(session);
       if (remainingChildren === 0) {
         await Parent.findByIdAndDelete(parentId, { session });
       }
     }
-
-    // Audit log
     await AuditLog.create(
       [
         {

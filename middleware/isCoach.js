@@ -1,14 +1,8 @@
 const Class = require("../models/Class");
 const Team = require("../models/Team");
 
-/**
- * Middleware: Ensures the request is from a COACH or SUPER_ADMIN.
- * For COACH, additionally verifies ownership of the resource if classId/teamId is present.
- * SUPER_ADMIN bypasses all ownership checks.
- */
 const isCoach = async (req, res, next) => {
   try {
-    // Must be authenticated as admin (COACH or SUPER_ADMIN)
     if (!req.admin) {
       return res.status(403).json({
         success: false,
@@ -16,20 +10,16 @@ const isCoach = async (req, res, next) => {
       });
     }
 
-    // SUPER_ADMIN bypasses all ownership checks
     if (req.admin.role === "SUPER_ADMIN") {
       return next();
     }
 
-    // Must be a COACH
     if (req.admin.role !== "COACH") {
       return res.status(403).json({
         success: false,
         message: "Access denied. Coach role required.",
       });
     }
-
-    // If classId is present, verify coach is assigned to that class
     const classId = req.params?.classId || req.body?.classId || req.query?.classId;
 
     if (classId) {
@@ -54,8 +44,6 @@ const isCoach = async (req, res, next) => {
         });
       }
     }
-
-    // If teamId is present, verify coach is assigned to that team
     const teamId = req.params?.teamId || req.body?.teamId || req.query?.teamId;
 
     if (teamId) {
@@ -90,10 +78,6 @@ const isCoach = async (req, res, next) => {
   }
 };
 
-/**
- * Middleware: Ensures the request is from a SUPER_ADMIN only.
- * Used for admin-only operations like approving temporary players, deleting resources, etc.
- */
 const isSuperAdmin = (req, res, next) => {
   if (!req.admin || req.admin.role !== "SUPER_ADMIN") {
     return res.status(403).json({

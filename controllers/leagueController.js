@@ -11,7 +11,6 @@ const mongoose = require("mongoose");
 const fs = require("fs");
 const path = require("path");
 
-// ✅ Create League (Admin only)
 exports.createLeague = async (req, res) => {
   try {
     const {
@@ -136,7 +135,6 @@ exports.getAllLeagues = async (req, res) => {
   }
 };
 
-// ✅ Create Team (Admin only)
 exports.createTeam = async (req, res) => {
   try {
     const {
@@ -278,13 +276,11 @@ exports.getAllTeams = async (req, res) => {
   }
 };
 
-// ✅ Assign player to Team (Admin only)
 exports.assignPlayerToTeam = async (req, res) => {
   try {
     const { teamId } = req.params;
     const { playerId, playerIds } = req.body;
 
-    // Support both playerId (string or array) and playerIds (string or array)
     const rawIds = playerId || playerIds;
     if (!rawIds) {
       return res.status(400).json({ success: false, message: "Player ID(s) required" });
@@ -292,7 +288,6 @@ exports.assignPlayerToTeam = async (req, res) => {
 
     const normalizedIds = Array.isArray(rawIds) ? rawIds : [rawIds];
 
-    // Validate ObjectIds
     const isValid = normalizedIds.every(id => mongoose.Types.ObjectId.isValid(id));
     if (!isValid) {
       return res.status(400).json({ success: false, message: "Invalid player ID format" });
@@ -303,7 +298,6 @@ exports.assignPlayerToTeam = async (req, res) => {
       return res.status(404).json({ success: false, message: "Team not found" });
     }
 
-    // Verify all players exist
     const uniqueIds = [...new Set(normalizedIds)];
     const existingPlayersCount = await User.countDocuments({ _id: { $in: uniqueIds } });
     if (existingPlayersCount !== uniqueIds.length) {
@@ -335,7 +329,6 @@ exports.assignPlayerToTeam = async (req, res) => {
     }));
     await team.save();
 
-    // Automatically generate team fee invoice for assigned players if team fee > 0
     if (team.teamFee > 0) {
       for (const pId of uniqueIds) {
         try {
@@ -354,7 +347,6 @@ exports.assignPlayerToTeam = async (req, res) => {
 
 exports.getAvailablePlayers = async (req, res) => {
   try {
-    // Get all assigned player IDs and their associated team details
     const teams = await Team.find({}, "players teamName");
 
     const playerTeamMap = {};
@@ -370,7 +362,6 @@ exports.getAvailablePlayers = async (req, res) => {
       }
     });
 
-    // Get all unblocked players
     const allPlayers = await User.find({
       isBlocked: false,
     })
@@ -381,7 +372,6 @@ exports.getAvailablePlayers = async (req, res) => {
         "firstName lastName fullName profileImage category programs term phone email"
       );
 
-    // Add isAssigned flag and assignedTeam details
     const enrichedPlayers = allPlayers.map((player) => {
       const playerObj = player.toObject();
       const teamInfo = playerTeamMap[player._id.toString()] || null;
@@ -403,7 +393,6 @@ exports.getAvailablePlayers = async (req, res) => {
   }
 };
 
-// ✅ Create Fixture (Admin only)
 exports.createFixture = async (req, res) => {
   try {
     const {
@@ -505,7 +494,6 @@ exports.createFixture = async (req, res) => {
   }
 };
 
-// ✅ Record Match Event & Update Stats (Admin/Coach only)
 exports.recordMatchEvent = async (req, res) => {
   try {
     const { matchId } = req.params;
@@ -529,10 +517,8 @@ exports.recordMatchEvent = async (req, res) => {
       details,
     });
 
-    // Link event to match
     match.events.push(event._id);
 
-    // Update match scores if GOAL
     if (eventType === "GOAL") {
       if (match.homeTeam.toString() === team) {
         match.score.homeScore += 1;
@@ -543,7 +529,6 @@ exports.recordMatchEvent = async (req, res) => {
 
     await match.save();
 
-    // Increment player level totals and league totals
     const playerUpdate = {};
     const statsUpdate = {};
 
@@ -564,7 +549,6 @@ exports.recordMatchEvent = async (req, res) => {
     if (playerUpdate.$inc) {
       await User.findByIdAndUpdate(player, playerUpdate);
 
-      // Upsert league player statistics
       await PlayerStatistics.findOneAndUpdate(
         { player, league: match.league, team },
         { ...statsUpdate, $setOnInsert: { appearances: 0, cleanSheets: 0, minutesPlayed: 0 } },
@@ -578,7 +562,6 @@ exports.recordMatchEvent = async (req, res) => {
   }
 };
 
-// ✅ Complete Match & Update Standings (Admin/Coach only)
 exports.completeMatch = async (req, res) => {
   try {
     const { matchId } = req.params;
@@ -820,7 +803,6 @@ exports.updatePlayerStatistics = async (req, res) => {
     });
   }
 };
-// ✅ Fetch Standings Table
 exports.getLeagueStandings = async (req, res) => {
   try {
     const { leagueId } = req.params;
@@ -834,7 +816,6 @@ exports.getLeagueStandings = async (req, res) => {
   }
 };
 
-// ✅ Fetch Top Scorers / Leaderboards
 exports.getLeagueLeaderboard = async (req, res) => {
   try {
     const { leagueId } = req.params;
@@ -849,7 +830,6 @@ exports.getLeagueLeaderboard = async (req, res) => {
   }
 };
 
-// ✅ Fetch Fixtures
 exports.getFixtures = async (req, res) => {
   try {
     const { leagueId } = req.params;
@@ -864,7 +844,6 @@ exports.getFixtures = async (req, res) => {
   }
 };
 
-// ✅ Get Team Details By ID
 exports.getTeamById = async (req, res) => {
   try {
     const { teamId } = req.params;
@@ -906,7 +885,6 @@ exports.getTeamById = async (req, res) => {
   }
 };
 
-// ✅ Unassign player from Team (Admin only)
 exports.unassignPlayerFromTeam = async (req, res) => {
   try {
     const { teamId } = req.params;
@@ -919,7 +897,6 @@ exports.unassignPlayerFromTeam = async (req, res) => {
 
     const normalizedIds = (Array.isArray(rawIds) ? rawIds : [rawIds]).map(id => id.toString());
 
-    // Validate ObjectIds
     const isValid = normalizedIds.every(id => mongoose.Types.ObjectId.isValid(id));
     if (!isValid) {
       return res.status(400).json({ success: false, message: "Invalid player ID format" });
@@ -930,7 +907,6 @@ exports.unassignPlayerFromTeam = async (req, res) => {
       return res.status(404).json({ success: false, message: "Team not found" });
     }
 
-    // Clean up captain/viceCaptain if they are being removed
     if (team.captain && normalizedIds.includes(team.captain.toString())) {
       team.captain = null;
     }
@@ -938,7 +914,6 @@ exports.unassignPlayerFromTeam = async (req, res) => {
       team.viceCaptain = null;
     }
 
-    // Filter out the players
     const originalLength = team.players.length;
     team.players = team.players.filter((p) => {
       const pid = p.player ? p.player.toString() : p.toString();
@@ -957,7 +932,6 @@ exports.unassignPlayerFromTeam = async (req, res) => {
   }
 };
 
-// ✅ Update Team Details (Admin only)
 exports.updateTeam = async (req, res) => {
   try {
     const { teamId } = req.params;
@@ -1000,7 +974,6 @@ exports.updateTeam = async (req, res) => {
     if (scheduleType !== undefined) team.scheduleType = scheduleType;
     if (schedule !== undefined) team.schedule = schedule;
 
-    // Update Team Name and check duplicate
     if (teamName !== undefined) {
       const trimmedName = teamName.trim();
       if (!trimmedName) {
@@ -1017,7 +990,6 @@ exports.updateTeam = async (req, res) => {
       team.teamName = trimmedName;
     }
 
-    // Update Team Type
     if (teamType !== undefined) {
       const upperType = teamType.toUpperCase();
       if (!["INTERNAL", "EXTERNAL"].includes(upperType)) {
@@ -1026,7 +998,6 @@ exports.updateTeam = async (req, res) => {
       team.teamType = upperType;
     }
 
-    // Update Team Fee
     const providedFee = fee !== undefined ? fee : teamFee;
     if (providedFee !== undefined) {
       const numFee = Number(providedFee);
@@ -1036,9 +1007,7 @@ exports.updateTeam = async (req, res) => {
       team.teamFee = numFee;
     }
 
-    // Update Logo if a new file is uploaded
     if (req.file) {
-      // Try to delete old logo from disk if it exists
       if (team.logo) {
         const oldPath = path.join(__dirname, "..", team.logo);
         fs.unlink(oldPath, (err) => {
@@ -1050,7 +1019,6 @@ exports.updateTeam = async (req, res) => {
       team.logo = `uploads/teamlogos/${req.file.filename}`;
     }
 
-    // Validate and update Coach
     if (coach !== undefined) {
       if (coach) {
         if (!mongoose.Types.ObjectId.isValid(coach)) {
@@ -1066,7 +1034,6 @@ exports.updateTeam = async (req, res) => {
       }
     }
 
-    // Validate and update Assistant Coach
     if (assistantCoach !== undefined) {
       if (assistantCoach) {
         if (!mongoose.Types.ObjectId.isValid(assistantCoach)) {
@@ -1082,12 +1049,10 @@ exports.updateTeam = async (req, res) => {
       }
     }
 
-    // Update Age Group
     if (ageGroup !== undefined) {
       team.ageGroup = ageGroup || "";
     }
 
-    // Validate and update Captain
     if (captain !== undefined) {
       if (captain) {
         if (!mongoose.Types.ObjectId.isValid(captain)) {
@@ -1103,7 +1068,6 @@ exports.updateTeam = async (req, res) => {
       }
     }
 
-    // Validate and update Vice Captain
     if (viceCaptain !== undefined) {
       if (viceCaptain) {
         if (!mongoose.Types.ObjectId.isValid(viceCaptain)) {
@@ -1118,21 +1082,17 @@ exports.updateTeam = async (req, res) => {
         team.viceCaptain = null;
       }
     }
-
-    // Validate and update Players array
     if (players !== undefined) {
       const playerIds = Array.isArray(players) ? players : [players];
       if (playerIds.length > 20) {
         return res.status(400).json({ success: false, message: "A team cannot have more than 20 players" });
       }
 
-      // Validate ObjectIds
       const isValid = playerIds.every(id => mongoose.Types.ObjectId.isValid(id));
       if (!isValid) {
         return res.status(400).json({ success: false, message: "Invalid player ID format inside players array" });
       }
 
-      // Verify all players exist
       const existingPlayersCount = await User.countDocuments({ _id: { $in: playerIds } });
       if (existingPlayersCount !== playerIds.length) {
         return res.status(400).json({ success: false, message: "One or more players in the array do not exist" });
@@ -1165,7 +1125,6 @@ exports.updateTeam = async (req, res) => {
   }
 };
 
-// ✅ Delete Team Permanently (Admin only)
 exports.deleteTeam = async (req, res) => {
   try {
     const { teamId } = req.params;
@@ -1179,7 +1138,6 @@ exports.deleteTeam = async (req, res) => {
       return res.status(404).json({ success: false, message: "Team not found" });
     }
 
-    // Delete team logo from disk
     if (team.logo) {
       const logoPath = path.join(__dirname, "..", team.logo);
       fs.unlink(logoPath, (err) => {
@@ -1203,7 +1161,6 @@ exports.deleteTeam = async (req, res) => {
   }
 };
 
-// ✅ Add Team Temporary Player(s) (Single or Bulk)
 exports.createTeamTemporaryPlayers = async (req, res) => {
   try {
     const { teamId } = req.params;
@@ -1218,23 +1175,19 @@ exports.createTeamTemporaryPlayers = async (req, res) => {
       return res.status(404).json({ success: false, message: "Team not found" });
     }
 
-    // Parse req.body or req.body.players if sent as JSON string (common in multipart form-data)
     let parsedBody = req.body;
     if (typeof req.body.players === "string") {
       try {
         parsedBody = JSON.parse(req.body.players);
       } catch (e) {
-        // keep as string
       }
     } else if (typeof req.body === "string") {
       try {
         parsedBody = JSON.parse(req.body);
       } catch (e) {
-        // keep as string
       }
     }
 
-    // Support single object, array in body, or body.players array
     const rawList = Array.isArray(parsedBody)
       ? parsedBody
       : Array.isArray(parsedBody.players)
@@ -1245,7 +1198,6 @@ exports.createTeamTemporaryPlayers = async (req, res) => {
       return res.status(400).json({ success: false, message: "At least one temporary player object with a 'name' is required" });
     }
 
-    // Process uploaded files array (req.files) or single file (req.file)
     const uploadedFiles = Array.isArray(req.files)
       ? req.files
       : req.file
@@ -1297,7 +1249,6 @@ exports.createTeamTemporaryPlayers = async (req, res) => {
   }
 };
 
-// ✅ Get All Temporary Players for a Team
 exports.getTeamTemporaryPlayers = async (req, res) => {
   try {
     const { teamId } = req.params;
@@ -1321,7 +1272,6 @@ exports.getTeamTemporaryPlayers = async (req, res) => {
   }
 };
 
-// ✅ Update Team Temporary Player
 exports.updateTeamTemporaryPlayer = async (req, res) => {
   try {
     const { teamId, tempPlayerId } = req.params;
@@ -1404,7 +1354,6 @@ exports.updateTeamTemporaryPlayer = async (req, res) => {
   }
 };
 
-// ✅ Delete Team Temporary Player
 exports.deleteTeamTemporaryPlayer = async (req, res) => {
   try {
     const { teamId, tempPlayerId } = req.params;
@@ -1423,7 +1372,6 @@ exports.deleteTeamTemporaryPlayer = async (req, res) => {
       return res.status(404).json({ success: false, message: "Temporary player not found for this team" });
     }
 
-    // Unlink image file if exists
     if (tempPlayer.profileImage) {
       const oldPath = path.join(__dirname, "..", tempPlayer.profileImage);
       fs.unlink(oldPath, (err) => {

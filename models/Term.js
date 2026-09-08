@@ -3,7 +3,7 @@ const mongoose = require("mongoose");
 const termSchema = new mongoose.Schema(
   {
     name: {
-      type: String, // Term 1, Term 2
+      type: String, 
       required: true,
     },
     year: {

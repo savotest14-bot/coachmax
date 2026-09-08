@@ -11,14 +11,6 @@ const path = require("path");
 const { sendNotification } = require("../services/notificationService");
 const { getIO, isUserOnline, calculateTickStatus } = require("../sockets/chatSocket");
 
-// ═══════════════════════════════════════════════
-// FEATURE 6 — Parent & Coach Communication
-// ═══════════════════════════════════════════════
-
-/**
- * POST /api/coach/chat/direct or /api/user/chat/direct
- * Initiate or retrieve a direct chat room between parent and coach/admin.
- */
 exports.startDirectChat = async (req, res) => {
   try {
     const currentUserId = req.admin ? req.admin._id : (req.parent || req.user)?._id;
@@ -50,7 +42,6 @@ exports.startDirectChat = async (req, res) => {
       });
     }
 
-    // Verify coach has access to this parent (child in assigned class)
     if (req.admin && req.admin.role === "COACH" && otherModel === "Parent") {
       const children = await User.find({ parentId: otherId }).select("_id");
       const childIds = children.map((c) => c._id);
@@ -67,8 +58,6 @@ exports.startDirectChat = async (req, res) => {
         });
       }
     }
-
-    // Find existing direct room
     let room = await ChatRoom.findOne({
       type: "DIRECT",
       members: {
@@ -88,8 +77,6 @@ exports.startDirectChat = async (req, res) => {
         ],
       });
     }
-
-    // Populate for response
     const populatedRoom = await ChatRoom.findById(room._id)
       .populate("members.user", "name fullName email phone profileImage");
 
@@ -102,10 +89,6 @@ exports.startDirectChat = async (req, res) => {
   }
 };
 
-/**
- * POST /api/coach/chat/broadcast/:classId
- * Coach sends a broadcast message to all parents in a class.
- */
 exports.sendClassBroadcast = async (req, res) => {
   try {
     if (!req.admin) {
@@ -128,14 +111,10 @@ exports.sendClassBroadcast = async (req, res) => {
 
     let queryClasses = [];
 
-    // If param is a valid ObjectId, filter by that class only
     if (paramClassId && mongoose.Types.ObjectId.isValid(paramClassId)) {
       queryClasses = [paramClassId];
     } else {
-      // Determine filter criteria from request body and query
       const filter = { status: "ACTIVE" };
-
-      // Coach can only broadcast to their assigned classes
       if (req.admin.role === "COACH") {
         filter.$and = filter.$and || [];
         filter.$and.push({
@@ -185,7 +164,6 @@ exports.sendClassBroadcast = async (req, res) => {
       });
     }
 
-    // Get classes with players and their parents
     const classesData = await Class.find({ _id: { $in: queryClasses } })
       .populate({
         path: "players",
@@ -201,7 +179,6 @@ exports.sendClassBroadcast = async (req, res) => {
     const coachName = req.admin.name || req.admin.fullName || "Coach";
 
     for (const classData of classesData) {
-      // Get unique parent IDs
       const parentIds = [...new Set(
         classData.players
           .filter((p) => p.parentId)
@@ -212,7 +189,6 @@ exports.sendClassBroadcast = async (req, res) => {
         continue;
       }
 
-      // Find or create broadcast room for this class
       let broadcastRoom = await ChatRoom.findOne({
         type: "BROADCAST",
         classId: classData._id,
@@ -231,7 +207,6 @@ exports.sendClassBroadcast = async (req, res) => {
           members,
         });
       } else {
-        // Update members to include any new parents
         const existingMemberIds = broadcastRoom.members.map((m) => m.user.toString());
 
         for (const pid of parentIds) {
@@ -240,7 +215,6 @@ exports.sendClassBroadcast = async (req, res) => {
           }
         }
 
-        // Ensure coach is in members
         if (!existingMemberIds.includes(coachId.toString())) {
           broadcastRoom.members.push({ refModel: "Admin", user: coachId });
         }
@@ -248,7 +222,6 @@ exports.sendClassBroadcast = async (req, res) => {
         await broadcastRoom.save();
       }
 
-      // Create the broadcast message
       const message = await Message.create({
         room: broadcastRoom._id,
         sender: { refModel: "Admin", user: coachId },
@@ -256,7 +229,6 @@ exports.sendClassBroadcast = async (req, res) => {
         readReceipts: [{ user: coachId, readAt: new Date() }],
       });
 
-      // Update broadcast room lastMessage
       broadcastRoom.lastMessage = {
         text: text || "",
         sender: coachId,
@@ -267,8 +239,6 @@ exports.sendClassBroadcast = async (req, res) => {
       };
       broadcastRoom.updatedAt = new Date();
       await broadcastRoom.save();
-
-      // Notify all parents
       for (const pid of parentIds) {
         sendNotification({
           recipientType: "PARENT",
@@ -312,10 +282,6 @@ exports.sendClassBroadcast = async (req, res) => {
   }
 };
 
-/**
- * POST /api/coach/chat/message or /api/user/chat/message/send
- * User (Coach/Admin or Parent) sends a message in a chat room.
- */
 exports.sendMessage = async (req, res) => {
   try {
     const currentUserId = req.admin ? req.admin._id : (req.parent || req.user)?._id;
@@ -339,7 +305,6 @@ exports.sendMessage = async (req, res) => {
       return res.status(404).json({ success: false, message: "Chat room not found" });
     }
 
-    // Verify user is a member of this room (Super Admin bypasses)
     const isMember = room.members.some(
       (m) => m.user.toString() === currentUserId.toString() && m.refModel === currentModel
     );
@@ -356,7 +321,6 @@ exports.sendMessage = async (req, res) => {
       attachments = [{ fileType: fileType || "FILE", url: `uploads/chat/${req.file.filename}` }];
     }
 
-    // Check if recipient is online for Double Gray Tick (DELIVERED)
     const recipientMembers = room.members.filter(
       (m) => m.user.toString() !== currentUserId.toString()
     );
@@ -380,7 +344,6 @@ exports.sendMessage = async (req, res) => {
       readReceipts: [{ user: currentUserId, readAt: new Date() }],
     });
 
-    // Update room lastMessage
     const lastMsgSenderName = req.admin?.name || req.admin?.fullName || req.parent?.fullName || "User";
     room.lastMessage = {
       text: text || (attachments.length > 0 ? "Attachment" : ""),
@@ -399,7 +362,6 @@ exports.sendMessage = async (req, res) => {
 
     populatedMessage.tickStatus = calculateTickStatus(populatedMessage, currentUserId);
 
-    // Emit live Socket message if active
     try {
       const io = getIO();
       if (io) {
@@ -412,7 +374,6 @@ exports.sendMessage = async (req, res) => {
       // Socket silent
     }
 
-    // Send push notifications to offline recipients
     const senderName = req.admin
       ? (req.admin.name || req.admin.fullName || "Coach")
       : ((req.parent || req.user)?.fullName || "Parent");
@@ -451,10 +412,6 @@ exports.sendMessage = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/chat/rooms or /api/user/chat/rooms
- * User (Coach/Admin or Parent) views their chat rooms.
- */
 exports.getMyRooms = async (req, res) => {
   try {
     const currentUserId = req.admin ? req.admin._id : (req.parent || req.user)?._id;
@@ -474,7 +431,6 @@ exports.getMyRooms = async (req, res) => {
       "members.refModel": currentModel,
     };
 
-    // Super Admin can see all rooms if specified
     if (req.admin && req.admin.role === "SUPER_ADMIN") {
       delete query["members.user"];
       delete query["members.refModel"];
@@ -489,7 +445,6 @@ exports.getMyRooms = async (req, res) => {
       .skip((page - 1) * limit)
       .limit(limit);
 
-    // Get last message for each room
     const roomsWithLastMessage = await Promise.all(
       rooms.map(async (room) => {
         const lastMessage = await Message.findOne({ room: room._id })
@@ -500,14 +455,11 @@ exports.getMyRooms = async (req, res) => {
         if (lastMessage) {
           lastMessage.tickStatus = calculateTickStatus(lastMessage, currentUserId);
         }
-
-        // Count unread messages
         const unreadCount = await Message.countDocuments({
           room: room._id,
           "readReceipts.user": { $ne: currentUserId },
         });
 
-        // Online status of recipient
         const partner = room.members.find(
           (m) => m.user?._id?.toString() !== currentUserId.toString()
         );
@@ -534,10 +486,6 @@ exports.getMyRooms = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/chat/room/:roomId/messages or /api/user/chat/room/:roomId/messages
- * Get messages for a room with pagination. Marks as read (Double Blue Tick).
- */
 exports.getRoomMessages = async (req, res) => {
   try {
     const currentUserId = req.admin ? req.admin._id : (req.parent || req.user)?._id;
@@ -552,7 +500,6 @@ exports.getRoomMessages = async (req, res) => {
     page = Number(page);
     limit = Number(limit);
 
-    // Verify membership (Super Admin bypasses)
     if (!req.admin || req.admin.role !== "SUPER_ADMIN") {
       const room = await ChatRoom.findById(roomId);
       if (!room) {
@@ -573,7 +520,6 @@ exports.getRoomMessages = async (req, res) => {
 
     const total = await Message.countDocuments({ room: roomId });
 
-    // Mark unread messages as READ (Double Blue Tick)
     const unreadMsgs = await Message.find({
       room: roomId,
       "readReceipts.user": { $ne: currentUserId },
@@ -590,7 +536,6 @@ exports.getRoomMessages = async (req, res) => {
         }
       );
 
-      // Socket notification for double blue tick update
       try {
         const io = getIO();
         if (io) {
@@ -599,7 +544,7 @@ exports.getRoomMessages = async (req, res) => {
             readBy: currentUserId.toString(),
             readAt: new Date(),
             messageIds: unreadIds,
-            status: "READ", // Double Blue Tick
+            status: "READ", 
           });
         }
       } catch (e) {
@@ -614,7 +559,6 @@ exports.getRoomMessages = async (req, res) => {
       .limit(limit)
       .lean();
 
-    // Attach calculated tick status to each message
     const formattedMessages = messages.map((m) => ({
       ...m,
       tickStatus: calculateTickStatus(m, m.sender?.user?._id || m.sender?.user),
@@ -626,17 +570,13 @@ exports.getRoomMessages = async (req, res) => {
       page,
       limit,
       totalPages: Math.ceil(total / limit),
-      data: formattedMessages.reverse(), // Return in chronological order
+      data: formattedMessages.reverse(), 
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
-/**
- * GET /api/admin/chat/conversations
- * Super Admin views all coach-parent conversations for safeguarding.
- */
 exports.getAllConversations = async (req, res) => {
   try {
     let { page = 1, limit = 20, search, coachId } = req.query;
@@ -660,7 +600,6 @@ exports.getAllConversations = async (req, res) => {
       .skip((page - 1) * limit)
       .limit(limit);
 
-    // Enrich with last message and message count
     const enrichedRooms = await Promise.all(
       rooms.map(async (room) => {
         const lastMessage = await Message.findOne({ room: room._id })
@@ -691,11 +630,6 @@ exports.getAllConversations = async (req, res) => {
   }
 };
 
-/**
- * GET /api/coach/chat/class/:classId/parents
- * Get list of parents in a class that the coach can message.
- * Phone numbers are hidden — only shows names and email.
- */
 exports.getClassParents = async (req, res) => {
   try {
     const { classId } = req.params;
@@ -706,7 +640,7 @@ exports.getClassParents = async (req, res) => {
         select: "fullName parentId",
         populate: {
           path: "parentId",
-          select: "fullName email profileImage", // No phone number exposed
+          select: "fullName email profileImage",
         },
       });
 
@@ -714,7 +648,6 @@ exports.getClassParents = async (req, res) => {
       return res.status(404).json({ success: false, message: "Class not found" });
     }
 
-    // Get unique parents
     const parentMap = new Map();
     classData.players.forEach((p) => {
       if (p.parentId && !parentMap.has(p.parentId._id.toString())) {
@@ -743,10 +676,6 @@ exports.getClassParents = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/admin/chat/message/:messageId
- * Admin permanently deletes a single message from a chat room.
- */
 exports.deleteSingleMessage = async (req, res) => {
   try {
     const { messageId } = req.params;
@@ -763,7 +692,6 @@ exports.deleteSingleMessage = async (req, res) => {
 
     const roomId = message.room;
 
-    // Clean up attachment files from disk if stored locally
     if (message.attachments && Array.isArray(message.attachments)) {
       message.attachments.forEach((att) => {
         if (att.url && att.url.startsWith("/uploads/")) {
@@ -777,10 +705,8 @@ exports.deleteSingleMessage = async (req, res) => {
       });
     }
 
-    // Permanently delete message document
     await Message.findByIdAndDelete(messageId);
 
-    // Audit log
     if (adminId) {
       await AuditLog.create({
         user: adminId,
@@ -794,7 +720,6 @@ exports.deleteSingleMessage = async (req, res) => {
       });
     }
 
-    // Update room's lastMessage if the deleted message was the latest message
     if (roomId) {
       const remainingLatestMsg = await Message.findOne({ room: roomId }).sort({
         createdAt: -1,
@@ -827,7 +752,6 @@ exports.deleteSingleMessage = async (req, res) => {
           },
         });
       } else {
-        // Reset lastMessage when room has no remaining messages
         await ChatRoom.findByIdAndUpdate(roomId, {
           lastMessage: {
             text: "",
@@ -840,7 +764,6 @@ exports.deleteSingleMessage = async (req, res) => {
         });
       }
 
-      // Emit socket event if active
       try {
         const io = getIO();
         if (io) {
@@ -859,10 +782,6 @@ exports.deleteSingleMessage = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/admin/chat/room/:roomId
- * Admin permanently deletes an entire chat room and all its messages.
- */
 exports.deleteFullChatRoom = async (req, res) => {
   try {
     const { roomId } = req.params;
@@ -877,7 +796,6 @@ exports.deleteFullChatRoom = async (req, res) => {
       return res.status(404).json({ success: false, message: "Chat room not found" });
     }
 
-    // Find all messages in the room to clean up attachment files
     const messages = await Message.find({ room: roomId });
 
     messages.forEach((msg) => {
@@ -895,13 +813,10 @@ exports.deleteFullChatRoom = async (req, res) => {
       }
     });
 
-    // Delete all messages in room
     const deleteResult = await Message.deleteMany({ room: roomId });
 
-    // Delete chat room
     await ChatRoom.findByIdAndDelete(roomId);
 
-    // Audit log
     if (adminId) {
       await AuditLog.create({
         user: adminId,
@@ -914,8 +829,6 @@ exports.deleteFullChatRoom = async (req, res) => {
         description: `Admin deleted chat room ${roomId} and ${deleteResult.deletedCount || 0} message(s)`,
       });
     }
-
-    // Emit socket event if active
     try {
       const io = getIO();
       if (io) {

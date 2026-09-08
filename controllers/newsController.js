@@ -2,7 +2,6 @@ const News = require("../models/News");
 const fs = require("fs");
 const path = require("path");
 
-// ✅ Create Announcement / News (Admin only)
 exports.createNews = async (req, res) => {
   try {
     const { title, description, category, featured } = req.body;
@@ -37,7 +36,6 @@ exports.createNews = async (req, res) => {
   }
 };
 
-// ✅ Fetch all News / Announcements (Public / Parents / Coaches)
 exports.getAllNews = async (req, res) => {
   try {
     const { featured, category, search } = req.query;
@@ -66,7 +64,6 @@ exports.getAllNews = async (req, res) => {
   }
 };
 
-// ✅ Get single News details by ID
 exports.getNewsById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -82,7 +79,6 @@ exports.getNewsById = async (req, res) => {
   }
 };
 
-// ✅ Update / Edit News (Admin only)
 exports.updateNews = async (req, res) => {
   try {
     const { id } = req.params;
@@ -100,11 +96,9 @@ exports.updateNews = async (req, res) => {
       news.featured = featured === "true" || featured === true;
     }
 
-    // Handle image updates
     if (req.files && req.files.length > 0) {
       const newImages = req.files.map((file) => `uploads/images/${file.filename}`);
       if (keepExistingImages === "false" || keepExistingImages === false) {
-        // Delete old image files
         (news.images || []).forEach((imgRelPath) => {
           const fullPath = path.join(__dirname, "..", imgRelPath);
           if (fs.existsSync(fullPath)) {
@@ -146,7 +140,6 @@ exports.updateNews = async (req, res) => {
   }
 };
 
-// ✅ Permanent Delete News (Admin only)
 exports.deleteNews = async (req, res) => {
   try {
     const { id } = req.params;
@@ -156,7 +149,6 @@ exports.deleteNews = async (req, res) => {
       return res.status(404).json({ success: false, message: "News article not found" });
     }
 
-    // Unlink image files from disk
     if (news.images && news.images.length > 0) {
       news.images.forEach((imgRelPath) => {
         const fullPath = path.join(__dirname, "..", imgRelPath);
@@ -179,7 +171,6 @@ exports.deleteNews = async (req, res) => {
   }
 };
 
-// ✅ Get All Unique News Categories (extracted directly from news collection)
 exports.getNewsCategories = async (req, res) => {
   try {
     const rawCategories = await News.distinct("category");

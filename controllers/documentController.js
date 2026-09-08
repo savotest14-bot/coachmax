@@ -1,7 +1,6 @@
 const Document = require("../models/Document");
 const User = require("../models/User");
 
-// ✅ Upload Player Document (Parent only)
 exports.uploadDocument = async (req, res) => {
   try {
     const { playerId, documentType } = req.body;
@@ -14,7 +13,6 @@ exports.uploadDocument = async (req, res) => {
       return res.status(400).json({ success: false, message: "No document file was uploaded" });
     }
 
-    // Verify parent owns the child
     const child = await User.findOne({ _id: playerId, parentId: req.parent._id });
     if (!child) {
       return res.status(403).json({ success: false, message: "Unauthorized child profile" });
@@ -38,7 +36,6 @@ exports.uploadDocument = async (req, res) => {
   }
 };
 
-// ✅ Fetch Child's Documents (Parent or Admin)
 exports.getPlayerDocuments = async (req, res) => {
   try {
     const { playerId } = req.params;

@@ -128,9 +128,6 @@ exports.updateEvent = async (req, res) => {
 
     const updates = { ...req.body };
 
-    // -----------------------
-    // 🔹 Manual Validation
-    // -----------------------
     if (updates.title && updates.title.trim() === "") {
       return res.status(400).json({
         success: false,
@@ -180,9 +177,6 @@ exports.updateEvent = async (req, res) => {
       }
     }
 
-    // -----------------------
-    // 🔹 Handle banner image replacement
-    // -----------------------
     if (req.file) {
       if (event.bannerImage) {
         const oldImagePath = path.join(__dirname, "..", event.bannerImage);
@@ -196,9 +190,6 @@ exports.updateEvent = async (req, res) => {
       updates.bannerImage = `uploads/eventImg/${req.file.filename}`;
     }
 
-    // -----------------------
-    // 🔹 Update event
-    // -----------------------
     const updatedEvent = await Event.findByIdAndUpdate(id, updates, {
       new: true,
       runValidators: true,
@@ -223,24 +214,20 @@ exports.getAllEventsForUser = async (req, res) => {
   try {
     const userId = req.user._id;
 
-    // ✅ get all events
     const events = await Event.find({
       status: "UPCOMING",
       isRegistrationOpen: true,
     }).sort({ startDate: 1 });
 
-    // ✅ get user's registrations
     const registrations = await EventRegistration.find({
       user: userId,
       status: "REGISTERED",
     }).select("event");
 
-    // convert to set for fast lookup
     const registeredEventIds = new Set(
       registrations.map((r) => r.event.toString())
     );
 
-    // ✅ attach flag
     const updatedEvents = events.map((event) => ({
       ...event._doc,
       isRegistered: registeredEventIds.has(event._id.toString()),
@@ -287,30 +274,25 @@ exports.registerForEvent = async (req, res) => {
       });
     }
 
-    // Find Player document
     const player = await User.findById(targetPlayerId);
 
-    // 🔥 check existing registration
     let existing = await EventRegistration.findOne({
       user: targetPlayerId,
       event: eventId,
     });
 
-    // ❌ already registered
     if (existing && existing.status === "REGISTERED") {
       return res.status(400).json({
         message: "Already registered",
       });
     }
 
-    // ❌ check capacity
     if (event.totalRegistered >= event.maxParticipants) {
       return res.status(400).json({
         message: "Event is full",
       });
     }
 
-    // Helper to handle RegistrationRequest & player status
     const processRegistrationRequest = async () => {
       if (player) {
         let reqCategory = player.category || (player.categories && player.categories[0]);
@@ -351,8 +333,6 @@ exports.registerForEvent = async (req, res) => {
         }
       }
     };
-
-    // ✅ re-register (if previously cancelled)
     if (existing && existing.status === "CANCELLED") {
       existing.status = "REGISTERED";
       await existing.save();
@@ -370,7 +350,6 @@ exports.registerForEvent = async (req, res) => {
       });
     }
 
-    // ✅ first-time registration
     const registration = await EventRegistration.create({
       user: targetPlayerId,
       event: eventId,
@@ -410,11 +389,9 @@ exports.cancelRegistration = async (req, res) => {
       });
     }
 
-    // ✅ update status
     registration.status = "CANCELLED";
     await registration.save();
 
-    // ✅ decrement count safely
     await Event.findOneAndUpdate(
       { _id: eventId, totalRegistered: { $gt: 0 } },
       { $inc: { totalRegistered: -1 } }
@@ -453,7 +430,6 @@ exports.getEventDetails = async (req, res) => {
     const { eventId } = req.params;
     const userId = req.user?._id;
 
-    // ✅ get event
     const event = await Event.findById(eventId);
 
     if (!event) {
@@ -462,12 +438,10 @@ exports.getEventDetails = async (req, res) => {
       });
     }
 
-    // 📊 stats
     const totalSlots = event.maxParticipants || 0;
     const registered = event.totalRegistered || 0;
     const availableSlots = totalSlots - registered;
 
-    // 👤 user registration status
     let userRegistrationStatus = "NOT_REGISTERED";
 
     if (userId) {
@@ -477,7 +451,7 @@ exports.getEventDetails = async (req, res) => {
       });
 
       if (registration) {
-        userRegistrationStatus = registration.status; // REGISTERED / CANCELLED
+        userRegistrationStatus = registration.status;
       }
     }
 
@@ -504,7 +478,6 @@ exports.getEventDetailsAdmin = async (req, res) => {
   try {
     const { eventId } = req.params;
 
-    // ✅ get event
     const event = await Event.findById(eventId).populate(
       "createdBy",
       "fullName email"
@@ -516,7 +489,6 @@ exports.getEventDetailsAdmin = async (req, res) => {
       });
     }
 
-    // 📊 stats
     const totalRegistered = await EventRegistration.countDocuments({
       event: eventId,
       status: "REGISTERED",
@@ -562,14 +534,12 @@ exports.getEventParticipants = async (req, res) => {
     const limitNumber = parseInt(limit);
     const skip = (pageNumber - 1) * limitNumber;
 
-    // ✅ get event details (for stats)
     const event = await Event.findById(eventId);
 
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
     }
 
-    // 🔥 aggregation (BEST)
     const pipeline = [
       {
         $match: {
@@ -588,7 +558,6 @@ exports.getEventParticipants = async (req, res) => {
       { $unwind: "$user" },
     ];
 
-    // 🔍 search filter
     if (search) {
       pipeline.push({
         $match: {
@@ -601,7 +570,6 @@ exports.getEventParticipants = async (req, res) => {
       });
     }
 
-    // 📊 total count (after search)
     const totalData = await EventRegistration.aggregate([
       ...pipeline,
       { $count: "total" },
@@ -609,7 +577,6 @@ exports.getEventParticipants = async (req, res) => {
 
     const total = totalData[0]?.total || 0;
 
-    // 📥 CSV EXPORT (no pagination)
     if (exportCsv === "true") {
       const data = await EventRegistration.aggregate(pipeline);
 
@@ -631,14 +598,12 @@ exports.getEventParticipants = async (req, res) => {
       return res.send(csv);
     }
 
-    // 📄 pagination
     pipeline.push({ $sort: { createdAt: -1 } });
     pipeline.push({ $skip: skip });
     pipeline.push({ $limit: limitNumber });
 
     const participants = await EventRegistration.aggregate(pipeline);
 
-    // 📊 stats
     const stats = {
       totalSlots: event.maxParticipants,
       registered: event.totalRegistered,
@@ -663,15 +628,11 @@ exports.exportEventParticipants = async (req, res) => {
     const { eventId } = req.params;
     const { format = "csv" } = req.body;
 
-    // ✅ validate event
     const event = await Event.findById(eventId);
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
     }
 
-    // -----------------------
-    // 🔥 GET FULL DATA
-    // -----------------------
     const data = await EventRegistration.aggregate([
       {
         $match: {
@@ -696,9 +657,6 @@ exports.exportEventParticipants = async (req, res) => {
       return res.status(404).json({ message: "No participants found" });
     }
 
-    // -----------------------
-    // 🧾 FORMAT DATA (FULL)
-    // -----------------------
     const formatted = data.map((d) => ({
       // 🔹 Event Info
       EventTitle: event.title,
@@ -708,7 +666,6 @@ exports.exportEventParticipants = async (req, res) => {
         : "",
       EventVenue: event.venueName || "",
 
-      // 🔹 User Info
       Name: d.user.fullName || "",
       Email: d.user.email || "",
       Phone: d.user.phone || "",
@@ -724,7 +681,6 @@ exports.exportEventParticipants = async (req, res) => {
       MedicalCondition: d.user.medicalCondition || "",
       Comments: d.user.comments || "",
 
-      // 🔹 Registration Info
       RegistrationStatus: d.status,
       RegisteredAt: new Date(d.createdAt).toLocaleString(),
     }));
