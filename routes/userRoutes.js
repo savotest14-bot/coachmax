@@ -8,6 +8,8 @@ const {
   getProgramsByCategory,
   getMyClasses,
   getMyAttendanceByClass,
+  getMyTeams,
+  getMyAttendanceByTeam,
   getChildren,
   addChild,
   requestAddProgram,
@@ -129,9 +131,16 @@ router.get("/getPlayerPrograms/:playerId", auth, getPlayerPrograms);
 router.get("/getDashboard", auth, getDashboard);
 
 // Classes & Attendance
+router.get("/getMyClasses", auth, getMyClasses);
 router.get("/getMyClasses/:playerId", auth, getMyClasses);
 router.get("/getMyAttendanceByClass/:classId", auth, getMyAttendanceByClass);
 router.post("/attendance/mark-absent", auth, markPlayerAbsent);
+
+// Teams & Attendance
+router.get("/getMyTeams", auth, getMyTeams);
+router.get("/getMyTeams/:playerId", auth, getMyTeams);
+router.get("/getMyAttendanceByTeam/:teamId", auth, getMyAttendanceByTeam);
+router.post("/team-attendance/mark-absent", auth, markPlayerAbsent);
 
 
 // Medical profile
@@ -160,7 +169,7 @@ router.get("/leagues/:leagueId/fixtures", getFixtures);
 // Bank Details & Payment Settings
 router.get("/bank-details", getBankDetails);
 router.get("/payment-settings", auth, getPaymentSettings);
-
+ 
 // Payments & Invoicing (Parent)
 router.get("/invoices", auth, getParentInvoices);
 router.get("/parent/invoices", auth, getParentInvoices);

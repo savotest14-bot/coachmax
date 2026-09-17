@@ -9,6 +9,7 @@ const Category = require("../models/Category");
 const Term = require("../models/Term");
 const Attendance = require("../models/Attendance");
 const Class = require("../models/Class");
+const Team = require("../models/Team");
 const News = require("../models/News");
 const Invoice = require("../models/Invoice");
 const Fixture = require("../models/Fixture");
@@ -1213,6 +1214,540 @@ exports.getMyAttendanceByClass = async (req, res) => {
   }
 };
 
+exports.getMyTeams = async (req, res) => {
+  try {
+    let playerId = req.params.playerId || req.query.playerId;
+    if (!playerId) {
+      const firstChild = await User.findOne({ parentId: req.parent._id });
+      if (!firstChild) {
+        return res.status(200).json({
+          success: true,
+          message: "Teams with attendance fetched successfully",
+          overallAttendancePercentage: 0,
+          currentMonthCalendar: null,
+          data: [],
+        });
+      }
+      playerId = firstChild._id;
+    } else {
+      const child = await User.findOne({ _id: playerId, parentId: req.parent._id });
+      if (!child) {
+        return res.status(403).json({ success: false, message: "Unauthorized child profile" });
+      }
+    }
+
+    const player = await User.findById(playerId).select("fullName email");
+    if (!player) {
+      return res.status(404).json({ success: false, message: "Player not found" });
+    }
+
+    const teams = await Team.find({ "players.player": playerId })
+      .populate("term", "name startDate endDate")
+      .populate("coach", "name email phone")
+      .populate("assistantCoach", "name email phone")
+      .populate("captain", "fullName email phone profileImage jerseyNumber")
+      .populate("viceCaptain", "fullName email phone profileImage jerseyNumber")
+      .populate({
+        path: "players.player",
+        select: "firstName lastName fullName profileImage jerseyNumber dob gender rating contactName relationship",
+      });
+
+    const teamIds = teams.map((t) => t._id);
+    const [allAttendance, allFixtures] = await Promise.all([
+      Attendance.find({ team: { $in: teamIds } }).select("team sessionDate records"),
+      Fixture.find({
+        $or: [{ homeTeam: { $in: teamIds } }, { awayTeam: { $in: teamIds } }],
+      })
+        .populate("league", "name season logo description startDate endDate status type")
+        .populate("homeTeam", "teamName logo venue")
+        .populate("awayTeam", "teamName logo venue")
+        .sort({ kickoffTime: 1 })
+        .lean(),
+    ]);
+
+    const attendanceByTeam = {};
+    allAttendance.forEach((att) => {
+      const teamId = att.team.toString();
+      if (!attendanceByTeam[teamId]) {
+        attendanceByTeam[teamId] = [];
+      }
+      attendanceByTeam[teamId].push(att);
+    });
+
+    const result = [];
+    const dayNames = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
+
+    for (const team of teams) {
+      const teamIdStr = team._id.toString();
+      const teamAttendance = attendanceByTeam[teamIdStr] || [];
+
+      // Format all team members (roster)
+      const teamMembers = (team.players || []).map((item) => {
+        const p = item.player && typeof item.player === "object" ? item.player : null;
+        const pId = p ? p._id : item.player;
+        const isCaptain = (team.captain?._id || team.captain)?.toString() === pId?.toString();
+        const isViceCaptain = (team.viceCaptain?._id || team.viceCaptain)?.toString() === pId?.toString();
+        const isCurrentPlayer = pId?.toString() === playerId.toString();
+
+        return {
+          _id: pId,
+          playerId: pId,
+          fullName: p ? p.fullName : "Unknown Player",
+          firstName: p?.firstName || "",
+          lastName: p?.lastName || "",
+          profileImage: p?.profileImage || "",
+          jerseyNumber: p?.jerseyNumber ?? null,
+          gender: p?.gender || "",
+          dob: p?.dob || null,
+          rating: p?.rating || 1,
+          paymentStatus: item.paymentStatus || "UNPAID",
+          isCaptain,
+          isViceCaptain,
+          isCurrentPlayer,
+        };
+      });
+
+      // Get fixtures and league connected to this team
+      const fixtures = allFixtures
+        .filter(
+          (f) =>
+            (f.homeTeam?._id || f.homeTeam)?.toString() === teamIdStr ||
+            (f.awayTeam?._id || f.awayTeam)?.toString() === teamIdStr
+        )
+        .map((f) => {
+          const isHome = (f.homeTeam?._id || f.homeTeam)?.toString() === teamIdStr;
+          const opponent = isHome ? f.awayTeam : f.homeTeam;
+          return {
+            _id: f._id,
+            kickoffTime: f.kickoffTime,
+            venue: f.venue,
+            referee: f.referee || "",
+            status: f.status,
+            score: f.score,
+            league: f.league,
+            homeTeam: f.homeTeam,
+            awayTeam: f.awayTeam,
+            isHome,
+            opponent: opponent
+              ? {
+                  _id: opponent._id,
+                  teamName: opponent.teamName,
+                  logo: opponent.logo || "",
+                }
+              : null,
+          };
+        });
+
+      const nowTime = new Date();
+      const upcomingFixtures = fixtures.filter((f) => new Date(f.kickoffTime) >= nowTime);
+      const pastFixtures = fixtures.filter((f) => new Date(f.kickoffTime) < nowTime);
+      const nextFixture = upcomingFixtures.length > 0 ? upcomingFixtures[0] : null;
+
+      // Extract the league connected via fixture
+      const fixtureWithLeague = fixtures.find((f) => f.league);
+      const league = fixtureWithLeague ? fixtureWithLeague.league : null;
+
+      // Generate sessions from term & schedule
+      const generatedSessions = team.term ? generateClassSessions(team.term, team) : [];
+
+      // Also collect any dates from existing attendance records so they aren't missed
+      const sessionDateMap = new Map();
+      generatedSessions.forEach((s) => {
+        const d = new Date(s);
+        d.setUTCHours(0, 0, 0, 0);
+        sessionDateMap.set(d.toISOString().split("T")[0], d);
+      });
+
+      teamAttendance.forEach((att) => {
+        const d = new Date(att.sessionDate);
+        d.setUTCHours(0, 0, 0, 0);
+        const iso = d.toISOString().split("T")[0];
+        if (!sessionDateMap.has(iso)) {
+          sessionDateMap.set(iso, d);
+        }
+      });
+
+      const sortedSessionDates = Array.from(sessionDateMap.values()).sort(
+        (a, b) => a.getTime() - b.getTime()
+      );
+
+      const sessions = [];
+      let presentCount = 0;
+      let missedSessions = 0;
+
+      sortedSessionDates.forEach((normalizedDate) => {
+        const attendanceRecord = teamAttendance.find((att) => {
+          const dbDate = new Date(att.sessionDate);
+          dbDate.setUTCHours(0, 0, 0, 0);
+          return dbDate.getTime() === normalizedDate.getTime();
+        });
+
+        let status = "NOT_MARKED";
+        let reason = "";
+        let remarks = "";
+        let markedByParent = false;
+
+        if (attendanceRecord) {
+          const record = attendanceRecord.records.find(
+            (r) => r.player.toString() === playerId.toString()
+          );
+          if (record) {
+            status = record.status;
+            reason = record.reason || record.remarks || "";
+            remarks = record.remarks || "";
+            markedByParent = record.markedByParent || false;
+          } else {
+            status = "ABSENT";
+          }
+        }
+
+        if (status === "PRESENT") presentCount++;
+        else if (status === "ABSENT") missedSessions++;
+
+        const sessionTimes = getSessionTimesForDateUser(team, normalizedDate);
+
+        sessions.push({
+          date: normalizedDate.toISOString().split("T")[0],
+          day: dayNames[normalizedDate.getUTCDay()],
+          startTime: sessionTimes.startTime || team.startTime || "",
+          endTime: sessionTimes.endTime || team.endTime || "",
+          status,
+          reason,
+          remarks,
+          markedByParent,
+        });
+      });
+
+      const totalSessions = sortedSessionDates.length;
+      const attendancePercentage =
+        totalSessions > 0
+          ? Number(((presentCount / totalSessions) * 100).toFixed(1))
+          : 0;
+
+      const playerEntry = (team.players || []).find(
+        (p) => (p.player?._id || p.player || "").toString() === playerId.toString()
+      );
+      const paymentStatus = playerEntry ? playerEntry.paymentStatus : "UNPAID";
+
+      result.push({
+        teamId: team._id,
+        teamName: team.teamName,
+        logo: team.logo || "",
+        ageGroup: team.ageGroup || "",
+        teamType: team.teamType || "INTERNAL",
+        teamFee: team.teamFee || 0,
+        paymentStatus,
+        term: team.term,
+        league,
+        fixtures,
+        upcomingFixtures,
+        pastFixtures,
+        nextFixture,
+        totalFixtures: fixtures.length,
+        coach: team.coach,
+        assistantCoach: team.assistantCoach,
+        captain: team.captain,
+        viceCaptain: team.viceCaptain,
+        venue: team.venue || "",
+        location: team.location || "",
+        dayOfWeek: team.dayOfWeek || "",
+        startTime: team.startTime || "",
+        endTime: team.endTime || "",
+        scheduleType: team.scheduleType || "SINGLE_DAY",
+        schedule: team.schedule || [],
+        players: teamMembers,
+        teamMembers,
+        totalMembers: teamMembers.length,
+        attendancePercentage,
+        presentCount,
+        missedSessions,
+        totalSessions,
+        sessions,
+      });
+    }
+
+    let grandTotalSessions = 0;
+    let grandTotalPresent = 0;
+
+    for (const item of result) {
+      grandTotalSessions += item.totalSessions;
+      grandTotalPresent += item.presentCount;
+    }
+
+    const overallAttendancePercentage =
+      grandTotalSessions > 0
+        ? Number(((grandTotalPresent / grandTotalSessions) * 100).toFixed(1))
+        : 0;
+
+    const now = new Date();
+    const targetYear = req.query.year ? Number(req.query.year) : now.getUTCFullYear();
+    const targetMonth = req.query.month ? Number(req.query.month) : now.getUTCMonth() + 1;
+
+    const monthNames = [
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December"
+    ];
+
+    const currentMonthName = monthNames[targetMonth - 1] || "July";
+    const currentMonthYearStr = `${currentMonthName} ${targetYear}`;
+
+    const currentMonthEvents = [];
+    let currentMonthPresentCount = 0;
+    let currentMonthMissedCount = 0;
+
+    for (const item of result) {
+      for (const sess of item.sessions) {
+        const d = new Date(sess.date);
+        const sessYear = d.getUTCFullYear();
+        const sessMonth = d.getUTCMonth() + 1;
+
+        if (sessYear === targetYear && sessMonth === targetMonth) {
+          if (sess.status === "PRESENT") {
+            currentMonthPresentCount++;
+          } else if (sess.status === "ABSENT") {
+            currentMonthMissedCount++;
+          }
+
+          currentMonthEvents.push({
+            date: sess.date,
+            day: sess.day,
+            startTime: sess.startTime,
+            endTime: sess.endTime,
+            status: sess.status,
+            teamId: item.teamId,
+            teamName: item.teamName,
+            logo: item.logo,
+            coach: item.coach,
+            term: item.term,
+            venue: item.venue,
+            location: item.location,
+          });
+        }
+      }
+    }
+
+    currentMonthEvents.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    const totalCurrentMonthSessions = currentMonthEvents.length;
+    const currentMonthAttendancePercentage =
+      totalCurrentMonthSessions > 0
+        ? Number(((currentMonthPresentCount / totalCurrentMonthSessions) * 100).toFixed(1))
+        : 0;
+
+    const daysMap = {};
+    currentMonthEvents.forEach((evt) => {
+      if (!daysMap[evt.date]) {
+        daysMap[evt.date] = {
+          date: evt.date,
+          day: evt.day,
+          teams: [],
+        };
+      }
+      daysMap[evt.date].teams.push({
+        teamId: evt.teamId,
+        teamName: evt.teamName,
+        logo: evt.logo,
+        startTime: evt.startTime,
+        endTime: evt.endTime,
+        status: evt.status,
+        coach: evt.coach,
+        term: evt.term,
+        venue: evt.venue,
+        location: evt.location,
+      });
+    });
+
+    const currentMonthCalendar = {
+      month: currentMonthName,
+      year: targetYear,
+      monthNumber: targetMonth,
+      monthYear: currentMonthYearStr,
+      attendancePercentage: currentMonthAttendancePercentage,
+      totalSessions: totalCurrentMonthSessions,
+      presentCount: currentMonthPresentCount,
+      missedSessions: currentMonthMissedCount,
+      days: Object.values(daysMap).sort((a, b) => new Date(a.date) - new Date(b.date)),
+      events: currentMonthEvents,
+    };
+
+    return res.status(200).json({
+      success: true,
+      message: "Teams with attendance fetched successfully",
+      overallAttendancePercentage,
+      currentMonthCalendar,
+      data: result,
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: "Something went wrong" });
+  }
+};
+
+exports.getMyAttendanceByTeam = async (req, res) => {
+  try {
+    let playerId = req.query.playerId;
+    if (!playerId) {
+      const firstChild = await User.findOne({ parentId: req.parent._id });
+      if (!firstChild) {
+        return res.status(400).json({ success: false, message: "No children profiles found" });
+      }
+      playerId = firstChild._id;
+    } else {
+      // Validate ownership
+      const child = await User.findOne({ _id: playerId, parentId: req.parent._id });
+      if (!child) {
+        return res.status(403).json({ success: false, message: "Unauthorized child profile" });
+      }
+    }
+
+    const team = await Team.findById(teamId)
+      .populate({
+        path: "term",
+        select: "startDate endDate",
+      })
+      .populate({
+        path: "players.player",
+        select: "firstName lastName fullName profileImage jerseyNumber dob gender rating contactName relationship",
+      })
+      .populate("coach", "name email phone")
+      .populate("assistantCoach", "name email phone")
+      .populate("captain", "fullName profileImage jerseyNumber")
+      .populate("viceCaptain", "fullName profileImage jerseyNumber");
+
+    if (!team) {
+      return res.status(404).json({ success: false, message: "Team not found" });
+    }
+
+    const teamMembers = (team.players || []).map((item) => {
+      const p = item.player && typeof item.player === "object" ? item.player : null;
+      const pId = p ? p._id : item.player;
+      return {
+        _id: pId,
+        playerId: pId,
+        fullName: p ? p.fullName : "Unknown Player",
+        firstName: p?.firstName || "",
+        lastName: p?.lastName || "",
+        profileImage: p?.profileImage || "",
+        jerseyNumber: p?.jerseyNumber ?? null,
+        gender: p?.gender || "",
+        dob: p?.dob || null,
+        rating: p?.rating || 1,
+        paymentStatus: item.paymentStatus || "UNPAID",
+        isCaptain: (team.captain?._id || team.captain)?.toString() === pId?.toString(),
+        isViceCaptain: (team.viceCaptain?._id || team.viceCaptain)?.toString() === pId?.toString(),
+        isCurrentPlayer: pId?.toString() === playerId.toString(),
+      };
+    });
+
+    const generatedSessions = team.term ? generateClassSessions(team.term, team) : [];
+    const attendanceData = await Attendance.find({ team: teamId }).select("sessionDate records");
+
+    const sessionDateMap = new Map();
+    generatedSessions.forEach((s) => {
+      const d = new Date(s);
+      d.setUTCHours(0, 0, 0, 0);
+      sessionDateMap.set(d.toISOString().split("T")[0], d);
+    });
+
+    const attendanceMap = {};
+    attendanceData.forEach((att) => {
+      const d = new Date(att.sessionDate);
+      d.setUTCHours(0, 0, 0, 0);
+      const dateIso = d.toISOString().split("T")[0];
+      if (!sessionDateMap.has(dateIso)) {
+        sessionDateMap.set(dateIso, d);
+      }
+      const record = att.records.find((r) => r.player.toString() === playerId.toString());
+      if (record) {
+        attendanceMap[dateIso] = record.status;
+      }
+    });
+
+    const sortedDates = Array.from(sessionDateMap.keys()).sort();
+
+    let presentCount = 0;
+    let missedSessions = 0;
+
+    const sessions = sortedDates.map((date) => {
+      let status = attendanceMap[date] || "NOT_MARKED";
+      if (status === "PRESENT") presentCount++;
+      else if (status === "ABSENT") missedSessions++;
+
+      return { date, status };
+    });
+
+    const totalSessions = sortedDates.length;
+    const attendancePercentage =
+      totalSessions > 0
+        ? Number(((presentCount / totalSessions) * 100).toFixed(1))
+        : 0;
+
+    const teamFixtures = await Fixture.find({
+      $or: [{ homeTeam: teamId }, { awayTeam: teamId }],
+    })
+      .populate("league", "name season logo description startDate endDate status type")
+      .populate("homeTeam", "teamName logo venue")
+      .populate("awayTeam", "teamName logo venue")
+      .sort({ kickoffTime: 1 })
+      .lean();
+
+    const formattedFixtures = teamFixtures.map((f) => {
+      const isHome = (f.homeTeam?._id || f.homeTeam)?.toString() === teamId.toString();
+      const opponent = isHome ? f.awayTeam : f.homeTeam;
+      return {
+        _id: f._id,
+        kickoffTime: f.kickoffTime,
+        venue: f.venue,
+        referee: f.referee || "",
+        status: f.status,
+        score: f.score,
+        league: f.league,
+        homeTeam: f.homeTeam,
+        awayTeam: f.awayTeam,
+        isHome,
+        opponent: opponent
+          ? {
+              _id: opponent._id,
+              teamName: opponent.teamName,
+              logo: opponent.logo || "",
+            }
+          : null,
+      };
+    });
+
+    const nowTime = new Date();
+    const upcomingFixtures = formattedFixtures.filter((f) => new Date(f.kickoffTime) >= nowTime);
+    const pastFixtures = formattedFixtures.filter((f) => new Date(f.kickoffTime) < nowTime);
+    const nextFixture = upcomingFixtures.length > 0 ? upcomingFixtures[0] : null;
+    const fixtureWithLeague = formattedFixtures.find((f) => f.league);
+    const league = fixtureWithLeague ? fixtureWithLeague.league : null;
+
+    res.json({
+      success: true,
+      data: {
+        teamId,
+        teamName: team.teamName,
+        league,
+        fixtures: formattedFixtures,
+        upcomingFixtures,
+        pastFixtures,
+        nextFixture,
+        totalFixtures: formattedFixtures.length,
+        players: teamMembers,
+        teamMembers,
+        totalMembers: teamMembers.length,
+        totalSessions,
+        presentCount,
+        missedSessions,
+        attendancePercentage,
+        sessions,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 exports.getDashboard = async (req, res) => {
   try {
     const parentId = req.parent._id;
@@ -1243,7 +1778,7 @@ exports.getDashboard = async (req, res) => {
       }
     }
 
-    const teams = await mongoose.model("Team").find({ players: { $in: childIds } }).select("_id");
+    const teams = await Team.find({ "players.player": { $in: childIds } }).select("_id");
     const teamIds = teams.map((t) => t._id);
     const nextMatchDoc = await Fixture.findOne({
       $or: [{ homeTeam: { $in: teamIds } }, { awayTeam: { $in: teamIds } }],
@@ -1370,6 +1905,130 @@ exports.getPlayerProfile = async (req, res) => {
       }
     }
 
+    const rawAssignedTeams = await Team.find({ "players.player": playerId })
+      .populate("term", "name startDate endDate")
+      .populate("coach", "name email phone")
+      .populate("assistantCoach", "name email phone")
+      .populate("captain", "fullName email phone profileImage jerseyNumber")
+      .populate("viceCaptain", "fullName email phone profileImage jerseyNumber")
+      .populate({
+        path: "players.player",
+        select: "firstName lastName fullName profileImage jerseyNumber dob gender rating contactName relationship",
+      })
+      .select("teamName logo ageGroup teamType teamFee dayOfWeek startTime endTime venue location coach assistantCoach captain viceCaptain term players");
+
+    const playerTeamIds = rawAssignedTeams.map((t) => t._id);
+
+    const playerTeamFixtures = await Fixture.find({
+      $or: [{ homeTeam: { $in: playerTeamIds } }, { awayTeam: { $in: playerTeamIds } }],
+    })
+      .populate("league", "name season logo description startDate endDate status type")
+      .populate("homeTeam", "teamName logo venue")
+      .populate("awayTeam", "teamName logo venue")
+      .sort({ kickoffTime: 1 })
+      .lean();
+
+    const now = new Date();
+
+    const assignedTeams = rawAssignedTeams.map((team) => {
+      const tIdStr = team._id.toString();
+
+      const teamMembers = (team.players || []).map((item) => {
+        const p = item.player && typeof item.player === "object" ? item.player : null;
+        const pId = p ? p._id : item.player;
+        const isCaptain = (team.captain?._id || team.captain)?.toString() === pId?.toString();
+        const isViceCaptain = (team.viceCaptain?._id || team.viceCaptain)?.toString() === pId?.toString();
+        const isCurrentPlayer = pId?.toString() === playerId.toString();
+
+        return {
+          _id: pId,
+          playerId: pId,
+          fullName: p ? p.fullName : "Unknown Player",
+          firstName: p?.firstName || "",
+          lastName: p?.lastName || "",
+          profileImage: p?.profileImage || "",
+          jerseyNumber: p?.jerseyNumber ?? null,
+          gender: p?.gender || "",
+          dob: p?.dob || null,
+          rating: p?.rating || 1,
+          paymentStatus: item.paymentStatus || "UNPAID",
+          isCaptain,
+          isViceCaptain,
+          isCurrentPlayer,
+        };
+      });
+
+      const fixtures = playerTeamFixtures
+        .filter(
+          (f) =>
+            (f.homeTeam?._id || f.homeTeam)?.toString() === tIdStr ||
+            (f.awayTeam?._id || f.awayTeam)?.toString() === tIdStr
+        )
+        .map((f) => {
+          const isHome = (f.homeTeam?._id || f.homeTeam)?.toString() === tIdStr;
+          const opponent = isHome ? f.awayTeam : f.homeTeam;
+          return {
+            _id: f._id,
+            kickoffTime: f.kickoffTime,
+            venue: f.venue,
+            referee: f.referee || "",
+            status: f.status,
+            score: f.score,
+            league: f.league,
+            homeTeam: f.homeTeam,
+            awayTeam: f.awayTeam,
+            isHome,
+            opponent: opponent
+              ? {
+                  _id: opponent._id,
+                  teamName: opponent.teamName,
+                  logo: opponent.logo || "",
+                }
+              : null,
+          };
+        });
+
+      const upcomingFixtures = fixtures.filter((f) => new Date(f.kickoffTime) >= now);
+      const pastFixtures = fixtures.filter((f) => new Date(f.kickoffTime) < now);
+      const nextFixture = upcomingFixtures.length > 0 ? upcomingFixtures[0] : null;
+
+      const fixtureWithLeague = fixtures.find((f) => f.league);
+      const league = fixtureWithLeague ? fixtureWithLeague.league : null;
+
+      const pEntry = (team.players || []).find(
+        (p) => (p.player?._id || p.player || "").toString() === playerId.toString()
+      );
+
+      return {
+        _id: team._id,
+        teamName: team.teamName,
+        logo: team.logo,
+        ageGroup: team.ageGroup,
+        teamType: team.teamType,
+        teamFee: team.teamFee,
+        paymentStatus: pEntry ? pEntry.paymentStatus : "UNPAID",
+        term: team.term,
+        coach: team.coach,
+        assistantCoach: team.assistantCoach,
+        captain: team.captain,
+        viceCaptain: team.viceCaptain,
+        venue: team.venue,
+        location: team.location,
+        dayOfWeek: team.dayOfWeek,
+        startTime: team.startTime,
+        endTime: team.endTime,
+        league,
+        fixtures,
+        upcomingFixtures,
+        pastFixtures,
+        nextFixture,
+        totalFixtures: fixtures.length,
+        players: teamMembers,
+        teamMembers,
+        totalMembers: teamMembers.length,
+      };
+    });
+
     return res.status(200).json({
       success: true,
       data: {
@@ -1417,6 +2076,7 @@ exports.getPlayerProfile = async (req, res) => {
         parent: player.parentId,
 
         assignedClasses: player.assignedClasses,
+        assignedTeams: assignedTeams || [],
       },
     });
   } catch (error) {
@@ -1463,12 +2123,12 @@ exports.getClasses = async (req, res) => {
 exports.markPlayerAbsent = async (req, res) => {
   try {
     const parentId = req.parent._id;
-    const { playerId, classId, sessionDate, reason } = req.body;
+    const { playerId, classId, teamId, sessionDate, reason } = req.body;
 
-    if (!playerId || !classId || !sessionDate) {
+    if (!playerId || (!classId && !teamId) || !sessionDate) {
       return res.status(400).json({
         success: false,
-        message: "playerId, classId, and sessionDate are required",
+        message: "playerId, sessionDate, and either classId or teamId are required",
       });
     }
 
@@ -1487,23 +2147,6 @@ exports.markPlayerAbsent = async (req, res) => {
       });
     }
 
-    const classDoc = await Class.findById(classId).populate("term");
-    if (!classDoc) {
-      return res.status(404).json({
-        success: false,
-        message: "Class not found",
-      });
-    }
-
-    const isAssigned =
-      childDoc.assignedClasses &&
-      childDoc.assignedClasses.some((c) => c.toString() === classId.toString());
-    if (!isAssigned) {
-      return res.status(400).json({
-        success: false,
-        message: "Player is not enrolled in this class",
-      });
-    }
     const targetDate = new Date(sessionDate);
     if (isNaN(targetDate.getTime())) {
       return res.status(400).json({
@@ -1521,121 +2164,262 @@ exports.markPlayerAbsent = async (req, res) => {
       return res.status(400).json({
         success: false,
         message:
-          "Cannot mark absent for past class sessions. You can only mark absent for today's session or future upcoming sessions.",
+          "Cannot mark absent for past sessions. You can only mark absent for today's session or future upcoming sessions.",
       });
     }
 
-    if (classDoc.term) {
-      const termStart = new Date(classDoc.term.startDate);
-      termStart.setUTCHours(0, 0, 0, 0);
-      const termEnd = new Date(classDoc.term.endDate);
-      termEnd.setUTCHours(23, 59, 59, 999);
+    const dayNames = [
+      "SUNDAY",
+      "MONDAY",
+      "TUESDAY",
+      "WEDNESDAY",
+      "THURSDAY",
+      "FRIDAY",
+      "SATURDAY",
+    ];
+    const sessionDay = dayNames[targetDate.getUTCDay()];
 
-      if (targetDate < termStart || targetDate > termEnd) {
-        return res.status(400).json({
+    if (classId) {
+      const classDoc = await Class.findById(classId).populate("term");
+      if (!classDoc) {
+        return res.status(404).json({
           success: false,
-          message: `Session date is outside of Term dates (${classDoc.term.name})`,
+          message: "Class not found",
         });
       }
 
-      if (classDoc.dayOfWeek) {
-        const dayNames = [
-          "SUNDAY",
-          "MONDAY",
-          "TUESDAY",
-          "WEDNESDAY",
-          "THURSDAY",
-          "FRIDAY",
-          "SATURDAY",
-        ];
-        const sessionDay = dayNames[targetDate.getUTCDay()];
-        if (sessionDay !== classDoc.dayOfWeek.toUpperCase()) {
+      const isAssigned =
+        childDoc.assignedClasses &&
+        childDoc.assignedClasses.some((c) => c.toString() === classId.toString());
+      if (!isAssigned) {
+        return res.status(400).json({
+          success: false,
+          message: "Player is not enrolled in this class",
+        });
+      }
+
+      if (classDoc.term) {
+        const termStart = new Date(classDoc.term.startDate);
+        termStart.setUTCHours(0, 0, 0, 0);
+        const termEnd = new Date(classDoc.term.endDate);
+        termEnd.setUTCHours(23, 59, 59, 999);
+
+        if (targetDate < termStart || targetDate > termEnd) {
           return res.status(400).json({
             success: false,
-            message: `Selected date is a ${sessionDay}, but this class runs on ${classDoc.dayOfWeek}`,
+            message: `Session date is outside of Term dates (${classDoc.term.name})`,
           });
         }
+
+        if (classDoc.dayOfWeek) {
+          if (sessionDay !== classDoc.dayOfWeek.toUpperCase()) {
+            return res.status(400).json({
+              success: false,
+              message: `Selected date is a ${sessionDay}, but this class runs on ${classDoc.dayOfWeek}`,
+            });
+          }
+        }
       }
-    }
 
-    let attendanceDoc = await Attendance.findOne({
-      class: classId,
-      sessionDate: targetDate,
-    });
-
-    if (!attendanceDoc) {
-      attendanceDoc = new Attendance({
+      let attendanceDoc = await Attendance.findOne({
         class: classId,
         sessionDate: targetDate,
-        records: [],
-      });
-    }
-
-    const recordIndex = attendanceDoc.records.findIndex(
-      (r) => r.player.toString() === playerId.toString()
-    );
-
-    if (recordIndex >= 0) {
-      attendanceDoc.records[recordIndex].status = "ABSENT";
-      attendanceDoc.records[recordIndex].remarks = reason.trim();
-      attendanceDoc.records[recordIndex].reason = reason.trim();
-      attendanceDoc.records[recordIndex].markedByParent = true;
-    } else {
-      attendanceDoc.records.push({
-        player: playerId,
-        status: "ABSENT",
-        remarks: reason.trim(),
-        reason: reason.trim(),
-        markedByParent: true,
-      });
-    }
-
-    await attendanceDoc.save();
-
-    try {
-      const formattedDateStr = targetDate.toISOString().split("T")[0];
-      const notifData = {
-        parentId: String(req.parent._id),
-        playerId: String(playerId),
-        classId: String(classId),
-        sessionDate: formattedDateStr,
-        reason: reason.trim(),
-      };
-
-      await sendNotification({
-        recipientType: "ADMIN",
-        adminId: null,
-        title: "Player Absence Notice",
-        message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for class "${classDoc.name}" on ${formattedDateStr}. Reason: ${reason.trim()}`,
-        type: "ATTENDANCE_ALERT",
-        data: notifData,
       });
 
-      if (classDoc.coach) {
+      if (!attendanceDoc) {
+        attendanceDoc = new Attendance({
+          class: classId,
+          sessionDate: targetDate,
+          records: [],
+        });
+      }
+
+      const recordIndex = attendanceDoc.records.findIndex(
+        (r) => r.player.toString() === playerId.toString()
+      );
+
+      if (recordIndex >= 0) {
+        attendanceDoc.records[recordIndex].status = "ABSENT";
+        attendanceDoc.records[recordIndex].remarks = reason.trim();
+        attendanceDoc.records[recordIndex].reason = reason.trim();
+        attendanceDoc.records[recordIndex].markedByParent = true;
+      } else {
+        attendanceDoc.records.push({
+          player: playerId,
+          status: "ABSENT",
+          remarks: reason.trim(),
+          reason: reason.trim(),
+          markedByParent: true,
+        });
+      }
+
+      await attendanceDoc.save();
+
+      try {
+        const formattedDateStr = targetDate.toISOString().split("T")[0];
+        const notifData = {
+          parentId: String(req.parent._id),
+          playerId: String(playerId),
+          classId: String(classId),
+          sessionDate: formattedDateStr,
+          reason: reason.trim(),
+        };
+
         await sendNotification({
-          recipientType: "COACH",
-          coachId: classDoc.coach,
+          recipientType: "ADMIN",
+          adminId: null,
           title: "Player Absence Notice",
           message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for class "${classDoc.name}" on ${formattedDateStr}. Reason: ${reason.trim()}`,
           type: "ATTENDANCE_ALERT",
           data: notifData,
         });
-      }
-    } catch (notifErr) {
-      console.error("Absence notice notification error:", notifErr.message);
-    }
 
-    return res.status(200).json({
-      success: true,
-      message: "Player marked as absent for the class session successfully",
-      data: {
-        playerId,
-        classId,
-        sessionDate: targetDate.toISOString().split("T")[0],
-        status: "ABSENT",
-        reason: reason.trim(),
-      },
-    });
+        if (classDoc.coach) {
+          await sendNotification({
+            recipientType: "COACH",
+            coachId: classDoc.coach,
+            title: "Player Absence Notice",
+            message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for class "${classDoc.name}" on ${formattedDateStr}. Reason: ${reason.trim()}`,
+            type: "ATTENDANCE_ALERT",
+            data: notifData,
+          });
+        }
+      } catch (notifErr) {
+        console.error("Absence notice notification error:", notifErr.message);
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Player marked as absent for the class session successfully",
+        data: {
+          playerId,
+          classId,
+          sessionDate: targetDate.toISOString().split("T")[0],
+          status: "ABSENT",
+          reason: reason.trim(),
+        },
+      });
+    } else {
+      const teamDoc = await Team.findById(teamId).populate("term");
+      if (!teamDoc) {
+        return res.status(404).json({
+          success: false,
+          message: "Team not found",
+        });
+      }
+
+      const isAssigned = (teamDoc.players || []).some(
+        (p) => (p.player?._id || p.player || "").toString() === playerId.toString()
+      );
+      if (!isAssigned) {
+        return res.status(400).json({
+          success: false,
+          message: "Player is not enrolled in this team",
+        });
+      }
+
+      if (teamDoc.term) {
+        const termStart = new Date(teamDoc.term.startDate);
+        termStart.setUTCHours(0, 0, 0, 0);
+        const termEnd = new Date(teamDoc.term.endDate);
+        termEnd.setUTCHours(23, 59, 59, 999);
+
+        if (targetDate < termStart || targetDate > termEnd) {
+          return res.status(400).json({
+            success: false,
+            message: `Session date is outside of Term dates (${teamDoc.term.name})`,
+          });
+        }
+      }
+
+      if (teamDoc.dayOfWeek) {
+        if (sessionDay !== teamDoc.dayOfWeek.toUpperCase()) {
+          return res.status(400).json({
+            success: false,
+            message: `Selected date is a ${sessionDay}, but this team runs on ${teamDoc.dayOfWeek}`,
+          });
+        }
+      }
+
+      let attendanceDoc = await Attendance.findOne({
+        team: teamId,
+        sessionDate: targetDate,
+      });
+
+      if (!attendanceDoc) {
+        attendanceDoc = new Attendance({
+          team: teamId,
+          sessionDate: targetDate,
+          records: [],
+        });
+      }
+
+      const recordIndex = attendanceDoc.records.findIndex(
+        (r) => r.player.toString() === playerId.toString()
+      );
+
+      if (recordIndex >= 0) {
+        attendanceDoc.records[recordIndex].status = "ABSENT";
+        attendanceDoc.records[recordIndex].remarks = reason.trim();
+        attendanceDoc.records[recordIndex].reason = reason.trim();
+        attendanceDoc.records[recordIndex].markedByParent = true;
+      } else {
+        attendanceDoc.records.push({
+          player: playerId,
+          status: "ABSENT",
+          remarks: reason.trim(),
+          reason: reason.trim(),
+          markedByParent: true,
+        });
+      }
+
+      await attendanceDoc.save();
+
+      try {
+        const formattedDateStr = targetDate.toISOString().split("T")[0];
+        const notifData = {
+          parentId: String(req.parent._id),
+          playerId: String(playerId),
+          teamId: String(teamId),
+          sessionDate: formattedDateStr,
+          reason: reason.trim(),
+        };
+
+        await sendNotification({
+          recipientType: "ADMIN",
+          adminId: null,
+          title: "Player Absence Notice",
+          message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for team "${teamDoc.teamName}" on ${formattedDateStr}. Reason: ${reason.trim()}`,
+          type: "ATTENDANCE_ALERT",
+          data: notifData,
+        });
+
+        if (teamDoc.coach) {
+          await sendNotification({
+            recipientType: "COACH",
+            coachId: teamDoc.coach,
+            title: "Player Absence Notice",
+            message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for team "${teamDoc.teamName}" on ${formattedDateStr}. Reason: ${reason.trim()}`,
+            type: "ATTENDANCE_ALERT",
+            data: notifData,
+          });
+        }
+      } catch (notifErr) {
+        console.error("Absence notice notification error:", notifErr.message);
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Player marked as absent for the team session successfully",
+        data: {
+          playerId,
+          teamId,
+          sessionDate: targetDate.toISOString().split("T")[0],
+          status: "ABSENT",
+          reason: reason.trim(),
+        },
+      });
+    }
   } catch (error) {
     return res.status(500).json({
       success: false,

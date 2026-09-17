@@ -666,7 +666,7 @@ exports.getPlayerProfile = async (req, res) => {
 
     const medicalProfile = await MedicalProfile.findOne({ player: playerId }).lean();
 
-    const teams = await Team.find({ players: playerId })
+    const teams = await Team.find({ "players.player": playerId })
       .select("teamName ageGroup coach")
       .populate("coach", "name")
       .lean();
