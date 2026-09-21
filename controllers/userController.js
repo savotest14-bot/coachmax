@@ -588,7 +588,7 @@ exports.addChild = async (req, res) => {
       }
     }
 
-    const prefTerm = preferredTerm || term || null;
+    const prefTerm = preferredTerm || null;
 
     if (prefTerm) {
       const termData = await Term.findById(prefTerm);
