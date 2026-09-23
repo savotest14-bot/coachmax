@@ -7,6 +7,10 @@ const fixtureSchema = new mongoose.Schema(
       ref: "League",
       required: true,
     },
+    round: {
+      type: Number,
+      default: 1,
+    },
     kickoffTime: {
       type: Date,
       required: true,
@@ -62,6 +66,22 @@ const fixtureSchema = new mongoose.Schema(
       type: String,
       enum: ["SCHEDULED", "LIVE", "COMPLETED", "POSTPONED"],
       default: "SCHEDULED",
+    },
+    matchStatistics: {
+      homePossession: { type: Number, default: 50 },
+      awayPossession: { type: Number, default: 50 },
+      homeShots: { type: Number, default: 0 },
+      awayShots: { type: Number, default: 0 },
+      homeShotsOnTarget: { type: Number, default: 0 },
+      awayShotsOnTarget: { type: Number, default: 0 },
+      homeCorners: { type: Number, default: 0 },
+      awayCorners: { type: Number, default: 0 },
+      homeFouls: { type: Number, default: 0 },
+      awayFouls: { type: Number, default: 0 },
+      homeYellowCards: { type: Number, default: 0 },
+      awayYellowCards: { type: Number, default: 0 },
+      homeRedCards: { type: Number, default: 0 },
+      awayRedCards: { type: Number, default: 0 },
     },
   },
   { timestamps: true }

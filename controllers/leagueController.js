@@ -19,8 +19,18 @@ exports.createLeague = async (req, res) => {
       description,
       startDate,
       endDate,
+      registrationStartDate,
+      registrationEndDate,
+      status,
       type,
       leagueType,
+      competitionScope,
+      visibility,
+      pointsForWin,
+      pointsForDraw,
+      allowDraws,
+      automaticLadderRecalculation,
+      teams,
     } = req.body;
 
     if (!name || !season || !startDate || !endDate) {
@@ -42,13 +52,26 @@ exports.createLeague = async (req, res) => {
       });
     }
 
-    const rawType = (type || leagueType || "").toUpperCase();
+    const rawType = (type || leagueType || competitionScope || "").toUpperCase();
     const VALID_TYPES = ["INTERNATIONAL", "NATIONAL", "STATE", "LOCAL", "OTHERS"];
     const parsedType = VALID_TYPES.includes(rawType) ? rawType : "LOCAL";
+
+    const parsedStatus = status && ["UPCOMING", "ACTIVE", "COMPLETED"].includes(status.toUpperCase())
+      ? status.toUpperCase()
+      : "ACTIVE";
+
+    const parsedVisibility = visibility && ["PUBLIC", "PRIVATE"].includes(visibility.toUpperCase())
+      ? visibility.toUpperCase()
+      : "PUBLIC";
 
     const logo = req.file
       ? `/uploads/leaguelogos/${req.file.filename}`
       : "";
+
+    let parsedTeams = [];
+    if (Array.isArray(teams)) {
+      parsedTeams = teams.filter((id) => mongoose.Types.ObjectId.isValid(id));
+    }
 
     const league = await League.create({
       name: name.trim(),
@@ -57,7 +80,18 @@ exports.createLeague = async (req, res) => {
       description: description || "",
       startDate,
       endDate,
+      registrationStartDate: registrationStartDate || null,
+      registrationEndDate: registrationEndDate || null,
+      status: parsedStatus,
       type: parsedType,
+      visibility: parsedVisibility,
+      pointsForWin: pointsForWin !== undefined ? Number(pointsForWin) : 3,
+      pointsForDraw: pointsForDraw !== undefined ? Number(pointsForDraw) : 1,
+      allowDraws: allowDraws !== undefined ? Boolean(allowDraws === "true" || allowDraws === true) : true,
+      automaticLadderRecalculation: automaticLadderRecalculation !== undefined
+        ? Boolean(automaticLadderRecalculation === "true" || automaticLadderRecalculation === true)
+        : true,
+      teams: parsedTeams,
     });
 
     return res.status(201).json({
@@ -466,8 +500,11 @@ exports.createFixture = async (req, res) => {
       });
     }
 
+    const roundNumber = req.body.round ? Math.max(1, parseInt(req.body.round, 10)) : 1;
+
     const fixture = await Fixture.create({
       league,
+      round: roundNumber,
       kickoffTime: new Date(kickoffTime),
       venue: venue.trim(),
       referee: referee || "",
@@ -475,6 +512,47 @@ exports.createFixture = async (req, res) => {
       awayTeam,
       status: "SCHEDULED",
     });
+
+    // Auto-enroll teams into the league's teams roster if not already present
+    await League.findByIdAndUpdate(league, {
+      $addToSet: { teams: { $each: [homeTeam, awayTeam] } },
+    });
+
+    // Ensure initial standings exist for both teams in this league
+    await Promise.all([
+      Standing.findOneAndUpdate(
+        { league, team: homeTeam },
+        {
+          $setOnInsert: {
+            played: 0,
+            won: 0,
+            drawn: 0,
+            lost: 0,
+            goalsFor: 0,
+            goalsAgainst: 0,
+            goalDifference: 0,
+            points: 0,
+          },
+        },
+        { upsert: true, new: true }
+      ),
+      Standing.findOneAndUpdate(
+        { league, team: awayTeam },
+        {
+          $setOnInsert: {
+            played: 0,
+            won: 0,
+            drawn: 0,
+            lost: 0,
+            goalsFor: 0,
+            goalsAgainst: 0,
+            goalDifference: 0,
+            points: 0,
+          },
+        },
+        { upsert: true, new: true }
+      ),
+    ]);
 
     const data = await Fixture.findById(fixture._id)
       .populate("league", "name season")
@@ -1392,3 +1470,1034 @@ exports.deleteTeamTemporaryPlayer = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
+
+exports.getAdminLeagueData = async (req, res) => {
+  try {
+    const { leagueId } = req.params;
+    const { tab, round } = req.query;
+
+    if (!mongoose.Types.ObjectId.isValid(leagueId)) {
+      return res.status(400).json({ success: false, message: "Invalid League ID format" });
+    }
+
+    const league = await League.findById(leagueId).populate({
+      path: "teams",
+      select: "teamName logo coach assistantCoach ageGroup teamType players temporaryPlayers statistics",
+      populate: [
+        { path: "coach", select: "name email mobile profileImage" },
+        { path: "assistantCoach", select: "name email mobile profileImage" },
+      ],
+    });
+
+    if (!league) {
+      return res.status(404).json({ success: false, message: "League not found" });
+    }
+
+    // 1. Fetch standings for this league
+    const standingsDocs = await Standing.find({ league: leagueId })
+      .populate({
+        path: "team",
+        select: "teamName logo coach assistantCoach ageGroup teamType players temporaryPlayers statistics",
+        populate: [
+          { path: "coach", select: "name email mobile profileImage" },
+          { path: "assistantCoach", select: "name email mobile profileImage" },
+        ],
+      })
+      .sort({ points: -1, goalDifference: -1, goalsFor: -1 });
+
+    const standingsMap = {};
+    standingsDocs.forEach((s) => {
+      if (s.team && s.team._id) {
+        standingsMap[s.team._id.toString()] = s;
+      }
+    });
+
+    // 2. Fetch all fixtures for this league
+    const fixtureFilter = { league: leagueId };
+    if (round) {
+      fixtureFilter.round = Number(round);
+    }
+    const allFixtures = await Fixture.find(fixtureFilter)
+      .populate("homeTeam", "teamName logo")
+      .populate("awayTeam", "teamName logo")
+      .sort({ round: 1, kickoffTime: 1 });
+
+    // 3. Aggregate all participating teams (union of league.teams and teams in standings/fixtures)
+    const teamsMap = new Map();
+    (league.teams || []).forEach((t) => {
+      if (t && t._id) teamsMap.set(t._id.toString(), t);
+    });
+    standingsDocs.forEach((s) => {
+      if (s.team && s.team._id && !teamsMap.has(s.team._id.toString())) {
+        teamsMap.set(s.team._id.toString(), s.team);
+      }
+    });
+
+    const participatingTeams = Array.from(teamsMap.values()).map((t) => {
+      const s = standingsMap[t._id.toString()];
+      const tStat = t.statistics || {};
+      const record = s && (s.played > 0 || s.points > 0 || s.won > 0 || s.drawn > 0 || s.lost > 0)
+        ? s
+        : (tStat.played > 0 || tStat.points > 0 || tStat.won > 0 || tStat.drawn > 0 || tStat.lost > 0)
+          ? tStat
+          : (s || tStat || {
+              played: 0,
+              won: 0,
+              drawn: 0,
+              lost: 0,
+              goalsFor: 0,
+              goalsAgainst: 0,
+              goalDifference: 0,
+              points: 0,
+            });
+
+      const playersCount =
+        (Array.isArray(t.players) ? t.players.length : 0) +
+        (Array.isArray(t.temporaryPlayers) ? t.temporaryPlayers.length : 0);
+
+      return {
+        _id: t._id,
+        teamName: t.teamName,
+        logo: t.logo || "",
+        ageGroup: t.ageGroup || "",
+        teamType: t.teamType || "INTERNAL",
+        coach: t.coach
+          ? {
+              _id: t.coach._id,
+              name: t.coach.name,
+              email: t.coach.email,
+              mobile: t.coach.mobile,
+              profileImage: t.coach.profileImage,
+            }
+          : null,
+        assistantCoach: t.assistantCoach
+          ? {
+              _id: t.assistantCoach._id,
+              name: t.assistantCoach.name,
+              email: t.assistantCoach.email,
+            }
+          : null,
+        playersCount,
+        status: "ACTIVE",
+        record: {
+          played: record.played || 0,
+          won: record.won || 0,
+          drawn: record.drawn || 0,
+          lost: record.lost || 0,
+          goalsFor: record.goalsFor || 0,
+          goalsAgainst: record.goalsAgainst || 0,
+          goalDifference: record.goalDifference || 0,
+          points: record.points || 0,
+        },
+      };
+    });
+
+    // 4. Ladder / Standings with rank
+    const ladderMap = new Map();
+    standingsDocs.forEach((s) => {
+      if (s.team && s.team._id) {
+        ladderMap.set(s.team._id.toString(), {
+          standingId: s._id,
+          team: {
+            _id: s.team._id,
+            teamName: s.team.teamName || "Unknown Team",
+            logo: s.team.logo || "",
+          },
+          played: s.played || 0,
+          won: s.won || 0,
+          drawn: s.drawn || 0,
+          lost: s.lost || 0,
+          goalsFor: s.goalsFor || 0,
+          goalsAgainst: s.goalsAgainst || 0,
+          goalDifference: s.goalDifference || 0,
+          points: s.points || 0,
+        });
+      }
+    });
+
+    // Ensure all participating teams are included in the ladder table
+    participatingTeams.forEach((pt) => {
+      if (!ladderMap.has(pt._id.toString())) {
+        ladderMap.set(pt._id.toString(), {
+          standingId: null,
+          team: {
+            _id: pt._id,
+            teamName: pt.teamName,
+            logo: pt.logo,
+          },
+          played: pt.record.played || 0,
+          won: pt.record.won || 0,
+          drawn: pt.record.drawn || 0,
+          lost: pt.record.lost || 0,
+          goalsFor: pt.record.goalsFor || 0,
+          goalsAgainst: pt.record.goalsAgainst || 0,
+          goalDifference: pt.record.goalDifference || 0,
+          points: pt.record.points || 0,
+        });
+      }
+    });
+
+    const ladder = Array.from(ladderMap.values())
+      .sort((a, b) => b.points - a.points || b.goalDifference - a.goalDifference || b.goalsFor - a.goalsFor)
+      .map((item, index) => ({
+        rank: index + 1,
+        ...item,
+      }));
+
+    // 5. Schedule grouped by round
+    const roundsMap = {};
+    allFixtures.forEach((fix) => {
+      const r = fix.round || 1;
+      if (!roundsMap[r]) {
+        roundsMap[r] = {
+          round: r,
+          roundName: `Round ${r}`,
+          matches: [],
+        };
+      }
+      roundsMap[r].matches.push({
+        _id: fix._id,
+        round: r,
+        kickoffTime: fix.kickoffTime,
+        venue: fix.venue,
+        referee: fix.referee,
+        status: fix.status,
+        homeTeam: fix.homeTeam
+          ? { _id: fix.homeTeam._id, teamName: fix.homeTeam.teamName, logo: fix.homeTeam.logo }
+          : null,
+        awayTeam: fix.awayTeam
+          ? { _id: fix.awayTeam._id, teamName: fix.awayTeam.teamName, logo: fix.awayTeam.logo }
+          : null,
+        score: fix.score || { homeScore: 0, awayScore: 0 },
+        matchStatistics: fix.matchStatistics || {},
+      });
+    });
+    const scheduleByRound = Object.values(roundsMap).sort((a, b) => a.round - b.round);
+
+    // 6. League Statistics (KPIs, Results Distribution, Top Scorers)
+    const completedFixtures = allFixtures.filter((f) => f.status === "COMPLETED");
+    const totalTeams = participatingTeams.length;
+    const totalMatches = allFixtures.length;
+    const matchesPlayed = completedFixtures.length;
+    const goalsScored = completedFixtures.reduce(
+      (sum, f) => sum + (f.score?.homeScore || 0) + (f.score?.awayScore || 0),
+      0
+    );
+    const avgGoalsPerMatch = matchesPlayed > 0 ? parseFloat((goalsScored / matchesPlayed).toFixed(1)) : 0;
+
+    // Team vs Goals
+    const teamGoalsMap = {};
+    participatingTeams.forEach((t) => {
+      teamGoalsMap[t._id.toString()] = {
+        teamId: t._id,
+        teamName: t.teamName,
+        logo: t.logo,
+        goals: 0,
+      };
+    });
+    completedFixtures.forEach((f) => {
+      const hId = f.homeTeam?._id?.toString();
+      const aId = f.awayTeam?._id?.toString();
+      if (hId && teamGoalsMap[hId]) teamGoalsMap[hId].goals += f.score?.homeScore || 0;
+      if (aId && teamGoalsMap[aId]) teamGoalsMap[aId].goals += f.score?.awayScore || 0;
+    });
+    const teamVsGoals = Object.values(teamGoalsMap).sort((a, b) => b.goals - a.goals);
+    const topScoringTeams = teamVsGoals.slice(0, 5);
+
+    // Results Distribution (Decisive Wins > 1 goal, Competitive Games == 1 goal, Draws)
+    let decisiveWins = 0;
+    let draws = 0;
+    let competitiveGames = 0;
+    completedFixtures.forEach((f) => {
+      const diff = Math.abs((f.score?.homeScore || 0) - (f.score?.awayScore || 0));
+      if (diff === 0) draws++;
+      else if (diff === 1) competitiveGames++;
+      else decisiveWins++;
+    });
+
+    const resultsDistribution = {
+      decisiveWins,
+      draws,
+      competitiveGames,
+      totalCompleted: matchesPlayed,
+    };
+
+    // 7. Visual Analytics & Trends (Graphs)
+    // Goals Per Round Trend
+    const roundGoalsMap = {};
+    completedFixtures.forEach((f) => {
+      const r = f.round || 1;
+      const g = (f.score?.homeScore || 0) + (f.score?.awayScore || 0);
+      roundGoalsMap[r] = (roundGoalsMap[r] || 0) + g;
+    });
+    const goalsPerRoundTrend = Object.keys(roundGoalsMap)
+      .map((r) => ({
+        round: Number(r),
+        roundLabel: `Round ${r}`,
+        totalGoals: roundGoalsMap[r],
+      }))
+      .sort((a, b) => a.round - b.round);
+
+    // Points Progression across Rounds
+    const sortedRounds = Array.from(new Set(allFixtures.map((f) => f.round || 1))).sort((a, b) => a - b);
+    const cumulativePoints = {};
+    participatingTeams.forEach((t) => {
+      cumulativePoints[t._id.toString()] = 0;
+    });
+
+    const pointsProgression = participatingTeams.map((t) => ({
+      teamId: t._id,
+      teamName: t.teamName,
+      logo: t.logo,
+      progression: [],
+    }));
+
+    const winPts = league.pointsForWin || 3;
+    const drawPts = league.pointsForDraw || 1;
+
+    sortedRounds.forEach((r) => {
+      const roundMatches = completedFixtures.filter((f) => (f.round || 1) === r);
+      roundMatches.forEach((f) => {
+        const hId = f.homeTeam?._id?.toString();
+        const aId = f.awayTeam?._id?.toString();
+        const hs = f.score?.homeScore || 0;
+        const as = f.score?.awayScore || 0;
+
+        if (hs > as) {
+          if (cumulativePoints[hId] !== undefined) cumulativePoints[hId] += winPts;
+        } else if (as > hs) {
+          if (cumulativePoints[aId] !== undefined) cumulativePoints[aId] += winPts;
+        } else {
+          if (cumulativePoints[hId] !== undefined) cumulativePoints[hId] += drawPts;
+          if (cumulativePoints[aId] !== undefined) cumulativePoints[aId] += drawPts;
+        }
+      });
+
+      pointsProgression.forEach((p) => {
+        p.progression.push({
+          round: r,
+          roundLabel: `R${r}`,
+          points: cumulativePoints[p.teamId.toString()] || 0,
+        });
+      });
+    });
+
+    // Team Win Efficiency Index
+    const teamWinEfficiency = participatingTeams
+      .map((t) => {
+        const p = t.record.played;
+        const w = t.record.won;
+        return {
+          teamId: t._id,
+          teamName: t.teamName,
+          logo: t.logo,
+          played: p,
+          won: w,
+          winEfficiency: p > 0 ? Math.round((w / p) * 100) : 0,
+        };
+      })
+      .sort((a, b) => b.winEfficiency - a.winEfficiency);
+
+    // Consolidated full response
+    const fullData = {
+      league: {
+        _id: league._id,
+        name: league.name,
+        season: league.season,
+        logo: league.logo,
+        description: league.description,
+        type: league.type,
+        status: league.status,
+        startDate: league.startDate,
+        endDate: league.endDate,
+        registrationStartDate: league.registrationStartDate,
+        registrationEndDate: league.registrationEndDate,
+        visibility: league.visibility,
+        pointsForWin: league.pointsForWin,
+        pointsForDraw: league.pointsForDraw,
+        allowDraws: league.allowDraws,
+        automaticLadderRecalculation: league.automaticLadderRecalculation,
+      },
+      kpis: {
+        totalTeams,
+        totalMatches,
+        matchesPlayed,
+        goalsScored,
+        avgGoalsPerMatch,
+      },
+      ladder,
+      schedule: scheduleByRound,
+      fixtures: allFixtures,
+      teams: participatingTeams,
+      teamManagement: participatingTeams,
+      stats: {
+        totalTeams,
+        totalMatches,
+        matchesPlayed,
+        goalsScored,
+        avgGoalsPerMatch,
+        teamVsGoals,
+        resultsDistribution,
+        topScoringTeams,
+      },
+      graphs: {
+        pointsProgression,
+        goalsPerRoundTrend,
+        teamWinEfficiency,
+      },
+      details: {
+        _id: league._id,
+        name: league.name,
+        season: league.season,
+        logo: league.logo,
+        description: league.description,
+        type: league.type,
+        status: league.status,
+        startDate: league.startDate,
+        endDate: league.endDate,
+        registrationStartDate: league.registrationStartDate,
+        registrationEndDate: league.registrationEndDate,
+        visibility: league.visibility,
+        pointsForWin: league.pointsForWin,
+        pointsForDraw: league.pointsForDraw,
+        allowDraws: league.allowDraws,
+        automaticLadderRecalculation: league.automaticLadderRecalculation,
+      },
+    };
+
+    const normalizedTab = tab ? tab.toLowerCase().replace(/[-_]/g, "") : null;
+    const tabMapping = {
+      ladder: fullData.ladder,
+      schedule: fullData.schedule,
+      teams: fullData.teams,
+      stats: fullData.stats,
+      graphs: fullData.graphs,
+      details: fullData.details,
+      teammanagement: fullData.teamManagement,
+    };
+
+    if (normalizedTab && tabMapping[normalizedTab]) {
+      return res.status(200).json({
+        success: true,
+        message: `League ${tab} data fetched successfully`,
+        data: tabMapping[normalizedTab],
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "League data fetched successfully",
+      data: fullData,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.updateLeague = async (req, res) => {
+  try {
+    const { leagueId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(leagueId)) {
+      return res.status(400).json({ success: false, message: "Invalid League ID format" });
+    }
+
+    const league = await League.findById(leagueId);
+    if (!league) {
+      return res.status(404).json({ success: false, message: "League not found" });
+    }
+
+    const {
+      name,
+      season,
+      description,
+      startDate,
+      endDate,
+      registrationStartDate,
+      registrationEndDate,
+      status,
+      type,
+      leagueType,
+      competitionScope,
+      visibility,
+      pointsForWin,
+      pointsForDraw,
+      allowDraws,
+      automaticLadderRecalculation,
+    } = req.body;
+
+    if (name) league.name = name.trim();
+    if (season) league.season = season.trim();
+    if (description !== undefined) league.description = description.trim();
+    if (startDate) league.startDate = new Date(startDate);
+    if (endDate) league.endDate = new Date(endDate);
+    if (registrationStartDate !== undefined) {
+      league.registrationStartDate = registrationStartDate ? new Date(registrationStartDate) : null;
+    }
+    if (registrationEndDate !== undefined) {
+      league.registrationEndDate = registrationEndDate ? new Date(registrationEndDate) : null;
+    }
+
+    if (status && ["UPCOMING", "ACTIVE", "COMPLETED"].includes(status.toUpperCase())) {
+      league.status = status.toUpperCase();
+    }
+
+    const rawType = (type || leagueType || competitionScope || "").toUpperCase();
+    if (rawType && ["INTERNATIONAL", "NATIONAL", "STATE", "LOCAL", "OTHERS"].includes(rawType)) {
+      league.type = rawType;
+    }
+
+    if (visibility && ["PUBLIC", "PRIVATE"].includes(visibility.toUpperCase())) {
+      league.visibility = visibility.toUpperCase();
+    }
+
+    if (pointsForWin !== undefined) league.pointsForWin = Number(pointsForWin);
+    if (pointsForDraw !== undefined) league.pointsForDraw = Number(pointsForDraw);
+    if (allowDraws !== undefined) {
+      league.allowDraws = Boolean(allowDraws === "true" || allowDraws === true);
+    }
+    if (automaticLadderRecalculation !== undefined) {
+      league.automaticLadderRecalculation = Boolean(
+        automaticLadderRecalculation === "true" || automaticLadderRecalculation === true
+      );
+    }
+
+    if (req.file) {
+      if (league.logo && league.logo.startsWith("/uploads/")) {
+        const oldLogoPath = path.join(__dirname, "..", league.logo);
+        fs.unlink(oldLogoPath, (err) => {
+          if (err && err.code !== "ENOENT") {
+            console.error("Failed to delete previous league logo:", err);
+          }
+        });
+      }
+      league.logo = `/uploads/leaguelogos/${req.file.filename}`;
+    }
+
+    await league.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "League updated successfully",
+      data: league,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.addTeamToLeague = async (req, res) => {
+  try {
+    const { leagueId } = req.params;
+    const { teamId, teamIds } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(leagueId)) {
+      return res.status(400).json({ success: false, message: "Invalid League ID format" });
+    }
+
+    const league = await League.findById(leagueId);
+    if (!league) {
+      return res.status(404).json({ success: false, message: "League not found" });
+    }
+
+    const teamsToAdd = [];
+    if (teamId) teamsToAdd.push(teamId);
+    if (Array.isArray(teamIds)) teamsToAdd.push(...teamIds);
+
+    const validTeamIds = teamsToAdd.filter((id) => mongoose.Types.ObjectId.isValid(id));
+    if (validTeamIds.length === 0) {
+      return res.status(400).json({ success: false, message: "No valid team ID(s) provided" });
+    }
+
+    const existingTeams = await Team.find({ _id: { $in: validTeamIds } });
+    if (existingTeams.length === 0) {
+      return res.status(404).json({ success: false, message: "Specified teams not found" });
+    }
+
+    const foundIds = existingTeams.map((t) => t._id);
+    await League.findByIdAndUpdate(leagueId, {
+      $addToSet: { teams: { $each: foundIds } },
+    });
+
+    const standingPromises = foundIds.map((tId) =>
+      Standing.findOneAndUpdate(
+        { league: leagueId, team: tId },
+        {
+          $setOnInsert: {
+            played: 0,
+            won: 0,
+            drawn: 0,
+            lost: 0,
+            goalsFor: 0,
+            goalsAgainst: 0,
+            goalDifference: 0,
+            points: 0,
+          },
+        },
+        { upsert: true, new: true }
+      )
+    );
+    await Promise.all(standingPromises);
+
+    const updatedLeague = await League.findById(leagueId).populate("teams", "teamName logo");
+
+    return res.status(200).json({
+      success: true,
+      message: "Team(s) enrolled into league successfully",
+      data: updatedLeague,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.removeTeamFromLeague = async (req, res) => {
+  try {
+    const { leagueId, teamId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(leagueId) || !mongoose.Types.ObjectId.isValid(teamId)) {
+      return res.status(400).json({ success: false, message: "Invalid ID format" });
+    }
+
+    const league = await League.findById(leagueId);
+    if (!league) {
+      return res.status(404).json({ success: false, message: "League not found" });
+    }
+
+    const fixtureCount = await Fixture.countDocuments({
+      league: leagueId,
+      $or: [{ homeTeam: teamId }, { awayTeam: teamId }],
+      status: "COMPLETED",
+    });
+
+    if (fixtureCount > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot remove team as it already has completed fixtures in this league.",
+      });
+    }
+
+    await League.findByIdAndUpdate(leagueId, {
+      $pull: { teams: teamId },
+    });
+
+    await Standing.deleteOne({ league: leagueId, team: teamId, played: 0 });
+
+    return res.status(200).json({
+      success: true,
+      message: "Team removed from league successfully",
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+const recalculateLeagueStandings = async (leagueId) => {
+  const league = await League.findById(leagueId);
+  if (!league) return null;
+
+  const pointsForWin = league.pointsForWin !== undefined ? Number(league.pointsForWin) : 3;
+  const pointsForDraw = league.pointsForDraw !== undefined ? Number(league.pointsForDraw) : 1;
+
+  const fixtureTeamsHome = await Fixture.find({ league: leagueId }).distinct("homeTeam");
+  const fixtureTeamsAway = await Fixture.find({ league: leagueId }).distinct("awayTeam");
+  const combinedTeamIds = new Set([
+    ...(league.teams || []).map((t) => t.toString()),
+    ...fixtureTeamsHome.map((t) => t.toString()),
+    ...fixtureTeamsAway.map((t) => t.toString()),
+  ]);
+
+  const teamStats = {};
+  combinedTeamIds.forEach((tId) => {
+    teamStats[tId] = {
+      played: 0,
+      won: 0,
+      drawn: 0,
+      lost: 0,
+      goalsFor: 0,
+      goalsAgainst: 0,
+      goalDifference: 0,
+      points: 0,
+    };
+  });
+
+  const completedFixtures = await Fixture.find({
+    league: leagueId,
+    status: "COMPLETED",
+  });
+
+  completedFixtures.forEach((fix) => {
+    const hId = fix.homeTeam?.toString();
+    const aId = fix.awayTeam?.toString();
+    const hs = Number(fix.score?.homeScore || 0);
+    const as = Number(fix.score?.awayScore || 0);
+
+    if (hId) {
+      if (!teamStats[hId]) {
+        teamStats[hId] = { played: 0, won: 0, drawn: 0, lost: 0, goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 0 };
+      }
+      teamStats[hId].played += 1;
+      teamStats[hId].goalsFor += hs;
+      teamStats[hId].goalsAgainst += as;
+      teamStats[hId].goalDifference = teamStats[hId].goalsFor - teamStats[hId].goalsAgainst;
+
+      if (hs > as) {
+        teamStats[hId].won += 1;
+        teamStats[hId].points += pointsForWin;
+      } else if (hs === as) {
+        teamStats[hId].drawn += 1;
+        teamStats[hId].points += pointsForDraw;
+      } else {
+        teamStats[hId].lost += 1;
+      }
+    }
+
+    if (aId) {
+      if (!teamStats[aId]) {
+        teamStats[aId] = { played: 0, won: 0, drawn: 0, lost: 0, goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 0 };
+      }
+      teamStats[aId].played += 1;
+      teamStats[aId].goalsFor += as;
+      teamStats[aId].goalsAgainst += hs;
+      teamStats[aId].goalDifference = teamStats[aId].goalsFor - teamStats[aId].goalsAgainst;
+
+      if (as > hs) {
+        teamStats[aId].won += 1;
+        teamStats[aId].points += pointsForWin;
+      } else if (hs === as) {
+        teamStats[aId].drawn += 1;
+        teamStats[aId].points += pointsForDraw;
+      } else {
+        teamStats[aId].lost += 1;
+      }
+    }
+  });
+
+  const bulkOps = Object.keys(teamStats).map((tId) => ({
+    updateOne: {
+      filter: { league: leagueId, team: tId },
+      update: { $set: teamStats[tId] },
+      upsert: true,
+    },
+  }));
+
+  if (bulkOps.length > 0) {
+    await Standing.bulkWrite(bulkOps);
+  }
+
+  const teamBulkOps = Object.keys(teamStats).map((tId) => ({
+    updateOne: {
+      filter: { _id: tId },
+      update: { $set: { statistics: teamStats[tId] } },
+    },
+  }));
+  if (teamBulkOps.length > 0) {
+    await Team.bulkWrite(teamBulkOps);
+  }
+
+  return teamStats;
+};
+
+exports.recalculateLadder = async (req, res) => {
+  try {
+    const { leagueId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(leagueId)) {
+      return res.status(400).json({ success: false, message: "Invalid League ID format" });
+    }
+
+    const league = await League.findById(leagueId);
+    if (!league) {
+      return res.status(404).json({ success: false, message: "League not found" });
+    }
+
+    const teamStats = await recalculateLeagueStandings(leagueId);
+
+    return res.status(200).json({
+      success: true,
+      message: "League ladder and statistics recalculated successfully",
+      data: teamStats,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.updateFixture = async (req, res) => {
+  try {
+    const { matchId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(matchId)) {
+      return res.status(400).json({ success: false, message: "Invalid Match ID format" });
+    }
+
+    const match = await Fixture.findById(matchId);
+    if (!match) {
+      return res.status(404).json({ success: false, message: "Fixture not found" });
+    }
+
+    const {
+      homeScore,
+      awayScore,
+      score,
+      status,
+      round,
+      kickoffTime,
+      venue,
+      referee,
+      homeTeam,
+      awayTeam,
+      matchStatistics,
+    } = req.body;
+
+    let scoreChanged = false;
+    let statusChanged = false;
+
+    const newHomeScore = homeScore !== undefined
+      ? Number(homeScore)
+      : score?.homeScore !== undefined
+        ? Number(score.homeScore)
+        : undefined;
+
+    const newAwayScore = awayScore !== undefined
+      ? Number(awayScore)
+      : score?.awayScore !== undefined
+        ? Number(score.awayScore)
+        : undefined;
+
+    if (newHomeScore !== undefined && !isNaN(newHomeScore)) {
+      if (match.score.homeScore !== newHomeScore) scoreChanged = true;
+      match.score.homeScore = newHomeScore;
+    }
+
+    if (newAwayScore !== undefined && !isNaN(newAwayScore)) {
+      if (match.score.awayScore !== newAwayScore) scoreChanged = true;
+      match.score.awayScore = newAwayScore;
+    }
+
+    if (status && ["SCHEDULED", "LIVE", "COMPLETED", "POSTPONED"].includes(status.toUpperCase())) {
+      const parsedStatus = status.toUpperCase();
+      if (match.status !== parsedStatus) statusChanged = true;
+      match.status = parsedStatus;
+    } else if (scoreChanged && match.status === "SCHEDULED") {
+      match.status = "COMPLETED";
+      statusChanged = true;
+    }
+
+    if (round !== undefined && !isNaN(Number(round))) {
+      match.round = Math.max(1, parseInt(round, 10));
+    }
+    if (kickoffTime) match.kickoffTime = new Date(kickoffTime);
+    if (venue) match.venue = venue.trim();
+    if (referee !== undefined) match.referee = referee.trim();
+
+    if (homeTeam && mongoose.Types.ObjectId.isValid(homeTeam)) match.homeTeam = homeTeam;
+    if (awayTeam && mongoose.Types.ObjectId.isValid(awayTeam)) match.awayTeam = awayTeam;
+
+    if (matchStatistics && typeof matchStatistics === "object") {
+      const existing = match.matchStatistics?.toObject?.() || {};
+      match.matchStatistics = {
+        ...existing,
+        ...matchStatistics,
+      };
+    }
+
+    await match.save();
+
+    if (scoreChanged || statusChanged || match.status === "COMPLETED") {
+      await recalculateLeagueStandings(match.league);
+    }
+
+    const updatedMatch = await Fixture.findById(match._id)
+      .populate("league", "name season")
+      .populate("homeTeam", "teamName logo")
+      .populate("awayTeam", "teamName logo");
+
+    return res.status(200).json({
+      success: true,
+      message: "Fixture statistics updated successfully",
+      data: updatedMatch,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.deleteFixture = async (req, res) => {
+  try {
+    const { matchId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(matchId)) {
+      return res.status(400).json({ success: false, message: "Invalid Match ID format" });
+    }
+
+    const match = await Fixture.findById(matchId);
+    if (!match) {
+      return res.status(404).json({ success: false, message: "Fixture not found" });
+    }
+
+    const leagueId = match.league;
+    const wasCompleted = match.status === "COMPLETED";
+
+    await Fixture.findByIdAndDelete(matchId);
+
+    if (wasCompleted) {
+      await recalculateLeagueStandings(leagueId);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Fixture deleted successfully",
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.updateTeamStatistics = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    const {
+      played,
+      won,
+      drawn,
+      lost,
+      goalsFor,
+      goalsAgainst,
+      goalDifference,
+      points,
+    } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(teamId)) {
+      return res.status(400).json({ success: false, message: "Invalid Team ID format" });
+    }
+
+    const team = await Team.findById(teamId);
+    if (!team) {
+      return res.status(404).json({ success: false, message: "Team not found" });
+    }
+
+    if (!team.statistics) {
+      team.statistics = {
+        played: 0,
+        won: 0,
+        drawn: 0,
+        lost: 0,
+        goalsFor: 0,
+        goalsAgainst: 0,
+        goalDifference: 0,
+        points: 0,
+      };
+    }
+
+    if (played !== undefined) team.statistics.played = Number(played);
+    if (won !== undefined) team.statistics.won = Number(won);
+    if (drawn !== undefined) team.statistics.drawn = Number(drawn);
+    if (lost !== undefined) team.statistics.lost = Number(lost);
+    if (goalsFor !== undefined) team.statistics.goalsFor = Number(goalsFor);
+    if (goalsAgainst !== undefined) team.statistics.goalsAgainst = Number(goalsAgainst);
+
+    if (goalDifference !== undefined) {
+      team.statistics.goalDifference = Number(goalDifference);
+    } else if (goalsFor !== undefined || goalsAgainst !== undefined) {
+      team.statistics.goalDifference = team.statistics.goalsFor - team.statistics.goalsAgainst;
+    }
+
+    if (points !== undefined) team.statistics.points = Number(points);
+
+    await team.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Team statistics updated successfully",
+      data: {
+        teamId: team._id,
+        teamName: team.teamName,
+        statistics: team.statistics,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.updateLeagueTeamStatistics = async (req, res) => {
+  try {
+    const { leagueId, teamId } = req.params;
+    const {
+      played,
+      won,
+      drawn,
+      lost,
+      goalsFor,
+      goalsAgainst,
+      goalDifference,
+      points,
+    } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(leagueId) || !mongoose.Types.ObjectId.isValid(teamId)) {
+      return res.status(400).json({ success: false, message: "Invalid ID format" });
+    }
+
+    const [league, team] = await Promise.all([
+      League.findById(leagueId),
+      Team.findById(teamId),
+    ]);
+
+    if (!league) {
+      return res.status(404).json({ success: false, message: "League not found" });
+    }
+    if (!team) {
+      return res.status(404).json({ success: false, message: "Team not found" });
+    }
+
+    await League.findByIdAndUpdate(leagueId, {
+      $addToSet: { teams: teamId },
+    });
+
+    const updateFields = {};
+    if (played !== undefined) updateFields.played = Number(played);
+    if (won !== undefined) updateFields.won = Number(won);
+    if (drawn !== undefined) updateFields.drawn = Number(drawn);
+    if (lost !== undefined) updateFields.lost = Number(lost);
+    if (goalsFor !== undefined) updateFields.goalsFor = Number(goalsFor);
+    if (goalsAgainst !== undefined) updateFields.goalsAgainst = Number(goalsAgainst);
+
+    const gf = updateFields.goalsFor !== undefined ? updateFields.goalsFor : 0;
+    const ga = updateFields.goalsAgainst !== undefined ? updateFields.goalsAgainst : 0;
+    updateFields.goalDifference = goalDifference !== undefined ? Number(goalDifference) : gf - ga;
+
+    if (points !== undefined) {
+      updateFields.points = Number(points);
+    } else if (won !== undefined || drawn !== undefined) {
+      const winPts = league.pointsForWin !== undefined ? Number(league.pointsForWin) : 3;
+      const drawPts = league.pointsForDraw !== undefined ? Number(league.pointsForDraw) : 1;
+      updateFields.points = (Number(won || 0) * winPts) + (Number(drawn || 0) * drawPts);
+    }
+
+    const standing = await Standing.findOneAndUpdate(
+      { league: leagueId, team: teamId },
+      { $set: updateFields },
+      { upsert: true, new: true }
+    );
+
+    if (!team.statistics) team.statistics = {};
+    Object.assign(team.statistics, updateFields);
+    await team.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "League team statistics updated successfully",
+      data: {
+        leagueId,
+        teamId,
+        teamName: team.teamName,
+        standing,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+

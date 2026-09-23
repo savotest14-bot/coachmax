@@ -36,6 +36,41 @@ const leagueSchema = new mongoose.Schema(
       enum: ["INTERNATIONAL", "NATIONAL", "STATE", "LOCAL", "OTHERS"],
       default: "LOCAL",
     },
+    registrationStartDate: {
+      type: Date,
+      default: null,
+    },
+    registrationEndDate: {
+      type: Date,
+      default: null,
+    },
+    visibility: {
+      type: String,
+      enum: ["PUBLIC", "PRIVATE"],
+      default: "PUBLIC",
+    },
+    pointsForWin: {
+      type: Number,
+      default: 3,
+    },
+    pointsForDraw: {
+      type: Number,
+      default: 1,
+    },
+    allowDraws: {
+      type: Boolean,
+      default: true,
+    },
+    automaticLadderRecalculation: {
+      type: Boolean,
+      default: true,
+    },
+    teams: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Team",
+      },
+    ],
   },
   { timestamps: true }
 );

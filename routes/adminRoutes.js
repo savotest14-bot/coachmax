@@ -109,6 +109,15 @@ const {
   getTeamTemporaryPlayers,
   updateTeamTemporaryPlayer,
   deleteTeamTemporaryPlayer,
+  getAdminLeagueData,
+  updateLeague,
+  addTeamToLeague,
+  removeTeamFromLeague,
+  updateFixture,
+  deleteFixture,
+  updateTeamStatistics,
+  updateLeagueTeamStatistics,
+  recalculateLadder,
 } = require("../controllers/leagueController");
 
 const {
@@ -300,11 +309,18 @@ router.get(
   isAdmin,
   getAllLeagues
 );
+router.get("/leagues/:leagueId", auth, isAdmin, getAdminLeagueData);
+router.put("/leagues/:leagueId", auth, isAdmin, uploads.single("leagueLogo"), updateLeague);
+router.post("/leagues/:leagueId/teams", auth, isAdmin, addTeamToLeague);
+router.delete("/leagues/:leagueId/teams/:teamId", auth, isAdmin, removeTeamFromLeague);
+router.post("/leagues/:leagueId/recalculate-ladder", auth, isAdmin, recalculateLadder);
+router.put("/leagues/:leagueId/teams/:teamId/statistics", auth, isAdmin, updateLeagueTeamStatistics);
 
 router.post("/teams", auth, isAdmin, uploads.single("teamLogo"), createTeam);
 router.get("/getAllTeams", auth, isAdmin, getAllTeams)
 router.get("/teams/:teamId", auth, isAdmin, getTeamById);
 router.put("/teams/:teamId", auth, isAdmin, uploads.single("teamLogo"), updateTeam);
+router.put("/teams/:teamId/statistics", auth, isAdmin, updateTeamStatistics);
 router.delete("/teams/:teamId", auth, isAdmin, deleteTeam);
 router.post("/teams/:teamId/assign", auth, isAdmin, assignPlayerToTeam);
 router.post("/teams/:teamId/unassign", auth, isAdmin, unassignPlayerFromTeam);
@@ -314,6 +330,8 @@ router.put("/teams/:teamId/temporary-players/:tempPlayerId", auth, isAdmin, uplo
 router.delete("/teams/:teamId/temporary-players/:tempPlayerId", auth, isAdmin, deleteTeamTemporaryPlayer);
 router.get("/available-players", auth, isAdmin, getAvailablePlayers);
 router.post("/fixtures", auth, isAdmin, createFixture);
+router.put("/fixtures/:matchId", auth, isAdmin, updateFixture);
+router.delete("/fixtures/:matchId", auth, isAdmin, deleteFixture);
 router.post("/fixtures/:matchId/events", auth, recordMatchEvent);
 router.post("/fixtures/:matchId/complete", auth, completeMatch);
 router.put(
