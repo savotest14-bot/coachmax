@@ -15,9 +15,20 @@ const fixtureSchema = new mongoose.Schema(
       type: Date,
       required: true,
     },
+    endTime: {
+      type: Date,
+    },
     venue: {
       type: String,
       required: true,
+    },
+    field: {
+      type: String,
+      default: "",
+    },
+    group: {
+      type: String,
+      default: "",
     },
     referee: {
       type: String,
@@ -66,6 +77,15 @@ const fixtureSchema = new mongoose.Schema(
       type: String,
       enum: ["SCHEDULED", "LIVE", "COMPLETED", "POSTPONED"],
       default: "SCHEDULED",
+    },
+    fixtureSource: {
+      type: String,
+      enum: ["GENERATED", "MANUAL"],
+      default: "GENERATED",
+    },
+    isManuallyModified: {
+      type: Boolean,
+      default: false,
     },
     matchStatistics: {
       homePossession: { type: Number, default: 50 },

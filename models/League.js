@@ -71,6 +71,63 @@ const leagueSchema = new mongoose.Schema(
         ref: "Team",
       },
     ],
+    fixtureFormat: {
+      type: String,
+      enum: ["ROUND_ROBIN", "GROUP", "KNOCKOUT"],
+      default: "ROUND_ROBIN",
+    },
+    groupCount: {
+      type: Number,
+      default: 1,
+      min: 1,
+    },
+    numberOfRounds: {
+      type: Number,
+      default: 1,
+      min: 1,
+    },
+    matchDuration: {
+      type: Number,
+      default: 90,
+      min: 1,
+    },
+    breakBetweenMatches: {
+      type: Number,
+      default: 15,
+      min: 0,
+    },
+    numberOfFields: {
+      type: Number,
+      default: 1,
+      min: 1,
+    },
+    startTime: {
+      type: String,
+      default: "10:00",
+    },
+    fixtureGenerated: {
+      type: Boolean,
+      default: false,
+    },
+    generationType: {
+      type: String,
+      enum: ["AUTOMATIC", "MANUAL"],
+      default: "MANUAL",
+    },
+    groups: [
+      {
+        name: {
+          type: String,
+          required: true,
+        },
+        teams: [
+          {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "Team",
+          },
+        ],
+      },
+    ],
   },
   { timestamps: true }
 );

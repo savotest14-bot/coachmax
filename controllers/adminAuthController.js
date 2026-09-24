@@ -30,7 +30,7 @@ const CoachNote = require("../models/CoachNote");
 const TrainingSession = require("../models/TrainingSession");
 const Message = require("../models/Message");
 const AuditLog = require("../models/AuditLog");
-const { generateClassInvoice, generateTransferInvoice } = require("../services/invoiceService");
+const { generateClassInvoice, generateTransferInvoice, generateTeamInvoice } = require("../services/invoiceService");
 
 exports.adminLogin = async (req, res) => {
   try {
@@ -264,9 +264,11 @@ exports.updatePaymentStatus = async (req, res) => {
 
     if (paymentStatus === "UNPAID") {
       try {
-        if (classId) {
+        if (teamId) {
+          await generateTeamInvoice({ userId: user._id, teamId });
+        } else if (classId) {
           await generateClassInvoice({ userId: user._id, classId });
-        } else if (user.assignedClasses && user.assignedClasses.length > 0) {
+        } else if (!teamId && user.assignedClasses && user.assignedClasses.length > 0) {
           for (const cid of user.assignedClasses) {
             await generateClassInvoice({ userId: user._id, classId: cid });
           }
@@ -2207,6 +2209,15 @@ const DAY_MAP = {
 
 const generateClassSessions = (term, classObj) => {
   const sessions = [];
+  if (classObj && classObj.sessionDates && Array.isArray(classObj.sessionDates) && classObj.sessionDates.length > 0) {
+    return [...classObj.sessionDates]
+      .map((d) => {
+        const date = new Date(d);
+        date.setUTCHours(0, 0, 0, 0);
+        return date;
+      })
+      .sort((a, b) => a.getTime() - b.getTime());
+  }
   if (!term || !term.startDate || !term.endDate) return sessions;
 
   const start = new Date(term.startDate);
@@ -2240,6 +2251,29 @@ const generateClassSessions = (term, classObj) => {
 
 const generateClassSessionsEnriched = (term, classObj) => {
   const sessions = [];
+  const dayNames = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
+
+  if (classObj && classObj.sessionDates && Array.isArray(classObj.sessionDates) && classObj.sessionDates.length > 0) {
+    const sortedDates = [...classObj.sessionDates]
+      .map((d) => {
+        const date = new Date(d);
+        date.setUTCHours(0, 0, 0, 0);
+        return date;
+      })
+      .sort((a, b) => a.getTime() - b.getTime());
+
+    sortedDates.forEach((d, idx) => {
+      sessions.push({
+        date: d,
+        dayOfWeek: dayNames[d.getUTCDay()],
+        startTime: classObj.startTime || "",
+        endTime: classObj.endTime || "",
+        round: idx + 1,
+      });
+    });
+    return sessions;
+  }
+
   if (!term || !term.startDate || !term.endDate) return sessions;
 
   const start = new Date(term.startDate);
@@ -2247,7 +2281,6 @@ const generateClassSessionsEnriched = (term, classObj) => {
   const end = new Date(term.endDate);
   end.setUTCHours(0, 0, 0, 0);
 
-  const dayNames = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
   const scheduleType = classObj.scheduleType || "SINGLE_DAY";
   const schedule = classObj.schedule || [];
 
@@ -3164,6 +3197,7 @@ exports.getTeamSessions = async (req, res) => {
       dayOfWeek: s.dayOfWeek,
       startTime: s.startTime,
       endTime: s.endTime,
+      round: s.round,
     }));
 
     const grouped = {};
@@ -3176,6 +3210,7 @@ exports.getTeamSessions = async (req, res) => {
     });
 
     res.json({
+      round: teamData.round || null,
       totalSessions: enrichedSessions.length,
       scheduleType: teamData.scheduleType || "SINGLE_DAY",
       schedule: teamData.schedule || [],
@@ -3197,7 +3232,7 @@ exports.getTeamFullTable = async (req, res) => {
       .populate({
         path: "players.player",
         select:
-          "fullName email dob phone contactName isMedicalCondition medicalConditionDetails rating prefferedFoot parentId profileImage",
+          "fullName email dob phone contactName isMedicalCondition medicalConditionDetails rating prefferedFoot parentId profileImage statistics",
         populate: {
           path: "parentId",
           select: "fullName email phone profileImage",
@@ -3214,13 +3249,14 @@ exports.getTeamFullTable = async (req, res) => {
       if (termDoc) targetTerm = termDoc;
     }
 
+    const hasExplicitSessions = team.sessionDates && team.sessionDates.length > 0;
     const generatedSessions = generateClassSessions(targetTerm, team);
     const sessionDateSet = new Set(
       generatedSessions.map((d) => new Date(d).toISOString().split("T")[0])
     );
 
     const attendanceFilter = { team: teamId };
-    if (targetTerm && targetTerm.startDate && targetTerm.endDate) {
+    if (!hasExplicitSessions && targetTerm && targetTerm.startDate && targetTerm.endDate) {
       const start = new Date(targetTerm.startDate);
       start.setUTCHours(0, 0, 0, 0);
       const end = new Date(targetTerm.endDate);
@@ -3233,7 +3269,9 @@ exports.getTeamFullTable = async (req, res) => {
     const attendanceMap = {};
     attendanceData.forEach((att) => {
       const date = new Date(att.sessionDate).toISOString().split("T")[0];
-      sessionDateSet.add(date);
+      if (!hasExplicitSessions) {
+        sessionDateSet.add(date);
+      }
       attendanceMap[date] = {};
       att.records.forEach((r) => {
         attendanceMap[date][r.player.toString()] = r.status;
@@ -3249,6 +3287,24 @@ exports.getTeamFullTable = async (req, res) => {
         attendance[date] = attendanceMap[date]?.[player._id?.toString()] || "NOT_MARKED";
       });
 
+      const playerStats = item.statistics ? {
+        appearances: Number(item.statistics.appearances) || 0,
+        goals: Number(item.statistics.goals) || 0,
+        assists: Number(item.statistics.assists) || 0,
+        cleanSheets: Number(item.statistics.cleanSheets) || 0,
+        yellowCards: Number(item.statistics.yellowCards) || 0,
+        redCards: Number(item.statistics.redCards) || 0,
+        minutesPlayed: Number(item.statistics.minutesPlayed) || 0,
+      } : (player.statistics || {
+        appearances: 0,
+        goals: 0,
+        assists: 0,
+        cleanSheets: 0,
+        yellowCards: 0,
+        redCards: 0,
+        minutesPlayed: 0,
+      });
+
       return {
         playerId: player._id,
         name: player.fullName,
@@ -3262,6 +3318,7 @@ exports.getTeamFullTable = async (req, res) => {
         rating: player.rating,
         prefferedFoot: player.prefferedFoot,
         paymentStatus: item.paymentStatus || "TRIAL",
+        statistics: playerStats,
         parent: player.parentId
           ? {
             id: player.parentId._id,
@@ -3287,6 +3344,7 @@ exports.getTeamFullTable = async (req, res) => {
       broadcastChatRoomId: broadcastRoom ? broadcastRoom._id : null,
       broadcastRoomId: broadcastRoom ? broadcastRoom._id : null,
       term: targetTerm ? { _id: targetTerm._id, name: targetTerm.name, startDate: targetTerm.startDate, endDate: targetTerm.endDate } : null,
+      round: team.round || null,
       totalSessions: sessionDates.length,
       sessions: sessionDates,
       players,
@@ -3304,7 +3362,7 @@ exports.exportTeamCSV = async (req, res) => {
       .populate("term")
       .populate({
         path: "players.player",
-        select: "fullName email dob phone contactName",
+        select: "fullName email dob phone contactName statistics",
       });
 
     if (!team) {
@@ -3317,13 +3375,14 @@ exports.exportTeamCSV = async (req, res) => {
       if (termDoc) targetTerm = termDoc;
     }
 
+    const hasExplicitSessions = team.sessionDates && team.sessionDates.length > 0;
     const generatedSessions = generateClassSessions(targetTerm, team);
     const sessionDateSet = new Set(
       generatedSessions.map((d) => new Date(d).toISOString().split("T")[0])
     );
 
     const attendanceFilter = { team: teamId };
-    if (targetTerm && targetTerm.startDate && targetTerm.endDate) {
+    if (!hasExplicitSessions && targetTerm && targetTerm.startDate && targetTerm.endDate) {
       const start = new Date(targetTerm.startDate);
       start.setUTCHours(0, 0, 0, 0);
       const end = new Date(targetTerm.endDate);
@@ -3336,7 +3395,9 @@ exports.exportTeamCSV = async (req, res) => {
     const attendanceMap = {};
     attendanceData.forEach((att) => {
       const date = new Date(att.sessionDate).toISOString().split("T")[0];
-      sessionDateSet.add(date);
+      if (!hasExplicitSessions) {
+        sessionDateSet.add(date);
+      }
       attendanceMap[date] = {};
       att.records.forEach((r) => {
         attendanceMap[date][r.player.toString()] = r.status;
@@ -3347,6 +3408,24 @@ exports.exportTeamCSV = async (req, res) => {
 
     const rows = (team.players || []).map((item) => {
       const player = item.player && typeof item.player === "object" ? item.player : { _id: item.player };
+      const playerStats = item.statistics ? {
+        appearances: Number(item.statistics.appearances) || 0,
+        goals: Number(item.statistics.goals) || 0,
+        assists: Number(item.statistics.assists) || 0,
+        cleanSheets: Number(item.statistics.cleanSheets) || 0,
+        yellowCards: Number(item.statistics.yellowCards) || 0,
+        redCards: Number(item.statistics.redCards) || 0,
+        minutesPlayed: Number(item.statistics.minutesPlayed) || 0,
+      } : (player.statistics || {
+        appearances: 0,
+        goals: 0,
+        assists: 0,
+        cleanSheets: 0,
+        yellowCards: 0,
+        redCards: 0,
+        minutesPlayed: 0,
+      });
+
       const row = {
         Name: player.fullName,
         Email: player.email,
@@ -3354,6 +3433,9 @@ exports.exportTeamCSV = async (req, res) => {
         Phone: player.phone,
         Guardian: player.contactName,
         "Payment Status": item.paymentStatus || "TRIAL",
+        Goals: playerStats.goals,
+        Assists: playerStats.assists,
+        Appearances: playerStats.appearances,
       };
 
       sessionDates.forEach((date) => {

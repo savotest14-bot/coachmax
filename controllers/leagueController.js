@@ -7,11 +7,23 @@ const PlayerStatistics = require("../models/PlayerStatistics");
 const User = require("../models/User");
 const Admin = require("../models/Admin");
 const { generateTeamInvoice } = require("../services/invoiceService");
+const {
+  validateTournamentConfig,
+  generateAndSaveLeagueFixtures,
+  reconcileAndSaveLeagueFixtures,
+  parseDateToMidnight,
+} = require("../services/fixtureGenerationService");
 const mongoose = require("mongoose");
 const fs = require("fs");
 const path = require("path");
 
+const activeLeagueGenerationLocks = new Set();
+
 exports.createLeague = async (req, res) => {
+  let session = null;
+  let useSession = false;
+  let createdLeagueId = null;
+
   try {
     const {
       name,
@@ -31,6 +43,17 @@ exports.createLeague = async (req, res) => {
       allowDraws,
       automaticLadderRecalculation,
       teams,
+      venue,
+      // Generation mode
+      generationType,
+      // Tournament & Scheduling configuration
+      fixtureFormat,
+      groupCount,
+      numberOfRounds,
+      matchDuration,
+      breakBetweenMatches,
+      numberOfFields,
+      startTime,
     } = req.body;
 
     if (!name || !season || !startDate || !endDate) {
@@ -52,60 +75,452 @@ exports.createLeague = async (req, res) => {
       });
     }
 
+    // Determine generation mode (AUTOMATIC vs MANUAL)
+    const isAutoGenerate =
+      generationType === "AUTOMATIC";
+
+    // Parse teams safely (supports array, JSON string from multipart/form-data, or comma-separated)
+    let rawTeams = teams;
+    if (typeof rawTeams === "string") {
+      try {
+        rawTeams = JSON.parse(rawTeams);
+      } catch (e) {
+        rawTeams = rawTeams
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+    }
+
+    let norm = null;
+    let verifiedTeamIds = [];
+
+    if (isAutoGenerate) {
+      // Validate tournament and scheduling configuration (requires >= 2 teams)
+      const validation = validateTournamentConfig({
+        teams: rawTeams,
+        fixtureFormat,
+        groupCount,
+        numberOfRounds,
+        matchDuration,
+        breakBetweenMatches,
+        numberOfFields,
+        startTime,
+        startDate,
+        endDate,
+      });
+
+      if (!validation.isValid) {
+        return res.status(400).json({
+          success: false,
+          message: validation.message,
+        });
+      }
+
+      norm = validation.normalized;
+      verifiedTeamIds = norm.teamIds;
+
+      // Verify all selected teams exist in the database
+      const existingTeamsCount = await Team.countDocuments({
+        _id: { $in: verifiedTeamIds },
+      });
+      if (existingTeamsCount !== verifiedTeamIds.length) {
+        return res.status(404).json({
+          success: false,
+          message: "One or more selected teams do not exist in the database.",
+        });
+      }
+    } else {
+      // Manual mode: validate dates and sanitize any provided teams without requiring minimum 2 teams
+      const parsedStartDate = parseDateToMidnight(startDate);
+      const parsedEndDate = parseDateToMidnight(endDate);
+      if (!parsedStartDate || !parsedEndDate) {
+        return res.status(400).json({
+          success: false,
+          message: "Valid start date and end date are required.",
+        });
+      }
+      if (parsedEndDate < parsedStartDate) {
+        return res.status(400).json({
+          success: false,
+          message: "End date cannot be earlier than start date.",
+        });
+      }
+
+      if (Array.isArray(rawTeams) && rawTeams.length > 0) {
+        const rawIds = rawTeams.map((id) => (id ? id.toString().trim() : "")).filter(Boolean);
+        const invalidId = rawIds.find((id) => !mongoose.Types.ObjectId.isValid(id));
+        if (invalidId) {
+          return res.status(400).json({
+            success: false,
+            message: `Invalid team ID format: "${invalidId}".`,
+          });
+        }
+        verifiedTeamIds = [...new Set(rawIds)];
+        const existingCount = await Team.countDocuments({ _id: { $in: verifiedTeamIds } });
+        if (existingCount !== verifiedTeamIds.length) {
+          return res.status(404).json({
+            success: false,
+            message: "One or more selected teams do not exist in the database.",
+          });
+        }
+      }
+
+      const validFormats = ["ROUND_ROBIN", "GROUP", "KNOCKOUT"];
+      const parsedFmt = (fixtureFormat || "ROUND_ROBIN").toString().toUpperCase().trim();
+
+      norm = {
+        teamIds: verifiedTeamIds,
+        fixtureFormat: validFormats.includes(parsedFmt) ? parsedFmt : "ROUND_ROBIN",
+        groupCount: groupCount ? Math.max(1, parseInt(groupCount, 10)) : 1,
+        numberOfRounds: numberOfRounds ? Math.max(1, parseInt(numberOfRounds, 10)) : 1,
+        matchDuration: matchDuration ? Math.max(1, parseInt(matchDuration, 10)) : 90,
+        breakBetweenMatches:
+          breakBetweenMatches !== undefined ? Math.max(0, parseInt(breakBetweenMatches, 10)) : 15,
+        numberOfFields: numberOfFields ? Math.max(1, parseInt(numberOfFields, 10)) : 1,
+        startTime: startTime && typeof startTime === "string" ? startTime.trim() : "10:00",
+        startDate: parsedStartDate,
+        endDate: parsedEndDate,
+      };
+    }
+
     const rawType = (type || leagueType || competitionScope || "").toUpperCase();
     const VALID_TYPES = ["INTERNATIONAL", "NATIONAL", "STATE", "LOCAL", "OTHERS"];
     const parsedType = VALID_TYPES.includes(rawType) ? rawType : "LOCAL";
 
-    const parsedStatus = status && ["UPCOMING", "ACTIVE", "COMPLETED"].includes(status.toUpperCase())
-      ? status.toUpperCase()
-      : "ACTIVE";
+    const parsedStatus =
+      status && ["UPCOMING", "ACTIVE", "COMPLETED"].includes(status.toUpperCase())
+        ? status.toUpperCase()
+        : "ACTIVE";
 
-    const parsedVisibility = visibility && ["PUBLIC", "PRIVATE"].includes(visibility.toUpperCase())
-      ? visibility.toUpperCase()
-      : "PUBLIC";
+    const parsedVisibility =
+      visibility && ["PUBLIC", "PRIVATE"].includes(visibility.toUpperCase())
+        ? visibility.toUpperCase()
+        : "PUBLIC";
 
-    const logo = req.file
-      ? `/uploads/leaguelogos/${req.file.filename}`
-      : "";
+    const logo = req.file ? `/uploads/leaguelogos/${req.file.filename}` : "";
 
-    let parsedTeams = [];
-    if (Array.isArray(teams)) {
-      parsedTeams = teams.filter((id) => mongoose.Types.ObjectId.isValid(id));
+    // Attempt to start MongoDB transaction if supported
+    try {
+      session = await mongoose.startSession();
+      session.startTransaction();
+      useSession = true;
+    } catch (sessionErr) {
+      useSession = false;
+      session = null;
     }
 
-    const league = await League.create({
-      name: name.trim(),
-      season: season.trim(),
-      logo,
-      description: description || "",
-      startDate,
-      endDate,
-      registrationStartDate: registrationStartDate || null,
-      registrationEndDate: registrationEndDate || null,
-      status: parsedStatus,
-      type: parsedType,
-      visibility: parsedVisibility,
-      pointsForWin: pointsForWin !== undefined ? Number(pointsForWin) : 3,
-      pointsForDraw: pointsForDraw !== undefined ? Number(pointsForDraw) : 1,
-      allowDraws: allowDraws !== undefined ? Boolean(allowDraws === "true" || allowDraws === true) : true,
-      automaticLadderRecalculation: automaticLadderRecalculation !== undefined
-        ? Boolean(automaticLadderRecalculation === "true" || automaticLadderRecalculation === true)
-        : true,
-      teams: parsedTeams,
-    });
+    const sessionOption = useSession ? { session } : {};
 
-    return res.status(201).json({
-      success: true,
-      message: "League created successfully",
-      data: league,
-    });
+    // 1. Create League document
+    const [league] = await League.create(
+      [
+        {
+          name: name.trim(),
+          season: season.trim(),
+          logo,
+          description: description || "",
+          startDate: norm.startDate,
+          endDate: norm.endDate,
+          registrationStartDate: registrationStartDate
+            ? parseDateToMidnight(registrationStartDate)
+            : null,
+          registrationEndDate: registrationEndDate
+            ? parseDateToMidnight(registrationEndDate)
+            : null,
+          status: parsedStatus,
+          type: parsedType,
+          visibility: parsedVisibility,
+          pointsForWin: pointsForWin !== undefined ? Number(pointsForWin) : 3,
+          pointsForDraw: pointsForDraw !== undefined ? Number(pointsForDraw) : 1,
+          allowDraws:
+            allowDraws !== undefined
+              ? Boolean(allowDraws === "true" || allowDraws === true)
+              : true,
+          automaticLadderRecalculation:
+            automaticLadderRecalculation !== undefined
+              ? Boolean(
+                automaticLadderRecalculation === "true" ||
+                automaticLadderRecalculation === true
+              )
+              : true,
+          teams: norm.teamIds,
+          fixtureFormat: norm.fixtureFormat,
+          groupCount: norm.groupCount,
+          numberOfRounds: norm.numberOfRounds,
+          matchDuration: norm.matchDuration,
+          breakBetweenMatches: norm.breakBetweenMatches,
+          numberOfFields: norm.numberOfFields,
+          startTime: norm.startTime,
+          fixtureGenerated: isAutoGenerate,
+          generationType: isAutoGenerate ? "AUTOMATIC" : "MANUAL",
+          groups: [],
+        },
+      ],
+      sessionOption
+    );
+
+    createdLeagueId = league._id;
+
+    if (isAutoGenerate) {
+      // 2. Automatically generate and schedule fixtures & standings
+      const fixtureResult = await generateAndSaveLeagueFixtures({
+        league,
+        teams: norm.teamIds,
+        config: {
+          fixtureFormat: norm.fixtureFormat,
+          groupCount: norm.groupCount,
+          numberOfRounds: norm.numberOfRounds,
+          matchDuration: norm.matchDuration,
+          breakBetweenMatches: norm.breakBetweenMatches,
+          numberOfFields: norm.numberOfFields,
+          startTime: norm.startTime,
+          startDate: norm.startDate,
+          endDate: norm.endDate,
+          venue: venue || "",
+        },
+        session: useSession ? session : null,
+      });
+
+      if (useSession && session) {
+        await session.commitTransaction();
+        session.endSession();
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: "League and fixtures created successfully",
+        data: {
+          league,
+          groupsCreated: fixtureResult.groupsCreated,
+          groups: fixtureResult.groups,
+          teamsCount: fixtureResult.teamsCount,
+          roundsCreated: fixtureResult.roundsCreated,
+          fixturesCreated: fixtureResult.fixturesCreated,
+          fixtures: fixtureResult.fixtures,
+          byes: fixtureResult.byes,
+          daysUsed: fixtureResult.daysUsed,
+        },
+      });
+    } else {
+      // Manual Mode: initialize standings for provided teams (if any), no fixtures generated yet
+      if (verifiedTeamIds.length > 0) {
+        const standingOps = verifiedTeamIds.map((tId) => ({
+          updateOne: {
+            filter: { league: league._id, team: tId },
+            update: {
+              $setOnInsert: {
+                league: league._id,
+                team: tId,
+                group: "",
+                played: 0,
+                won: 0,
+                drawn: 0,
+                lost: 0,
+                goalsFor: 0,
+                goalsAgainst: 0,
+                goalDifference: 0,
+                points: 0,
+              },
+            },
+            upsert: true,
+          },
+        }));
+        await Standing.bulkWrite(standingOps, sessionOption);
+      }
+
+      if (useSession && session) {
+        await session.commitTransaction();
+        session.endSession();
+      }
+
+      return res.status(201).json({
+        success: true,
+        message:
+          "League created successfully in manual mode. You can now add fixtures manually or generate them automatically.",
+        data: {
+          league,
+          fixtures: [],
+          teamsCount: verifiedTeamIds.length,
+          roundsCreated: 0,
+          fixturesCreated: 0,
+          byes: [],
+          daysUsed: 0,
+        },
+      });
+    }
   } catch (err) {
-    return res.status(500).json({
+    if (useSession && session) {
+      try {
+        await session.abortTransaction();
+        session.endSession();
+      } catch (abortErr) {
+        console.error("[League] Error aborting transaction:", abortErr.message);
+      }
+    } else if (createdLeagueId) {
+      // Standalone cleanup fallback to guarantee consistency
+      try {
+        await League.findByIdAndDelete(createdLeagueId);
+        await Fixture.deleteMany({ league: createdLeagueId });
+        await Standing.deleteMany({ league: createdLeagueId });
+      } catch (cleanupErr) {
+        console.error("[League] Cleanup error after failure:", cleanupErr.message);
+      }
+    }
+
+    const statusCode = err.statusCode || (err.message.includes("cannot fit") ? 400 : 500);
+
+    return res.status(statusCode).json({
       success: false,
       message: err.message,
     });
   }
 };
+
+exports.generateRandomFixtures = async (req, res) => {
+  const { leagueId } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(leagueId)) {
+    return res.status(400).json({ success: false, message: "Invalid League ID format" });
+  }
+
+  const leagueKey = leagueId.toString();
+  if (activeLeagueGenerationLocks.has(leagueKey)) {
+    return res.status(409).json({
+      success: false,
+      message: "Fixture generation is already in progress for this league. Please wait.",
+    });
+  }
+
+  activeLeagueGenerationLocks.add(leagueKey);
+
+  let session = null;
+  let useSession = false;
+
+  try {
+    const league = await League.findById(leagueId);
+    if (!league) {
+      return res.status(404).json({ success: false, message: "League not found" });
+    }
+
+    if (!Array.isArray(league.teams) || league.teams.length < 2) {
+      return res.status(400).json({
+        success: false,
+        message: "League must contain at least 2 teams to generate fixtures.",
+      });
+    }
+
+    const {
+      forceRegenerate = false,
+      round,
+      targetRound,
+      fixtureFormat,
+      groupCount,
+      numberOfRounds,
+      matchDuration,
+      breakBetweenMatches,
+      numberOfFields,
+      startTime,
+      startDate,
+      endDate,
+      venue,
+    } = req.body || {};
+
+    const config = {
+      fixtureFormat: fixtureFormat || league.fixtureFormat || "ROUND_ROBIN",
+      groupCount: groupCount !== undefined ? groupCount : (league.groupCount || 1),
+      numberOfRounds: numberOfRounds !== undefined ? numberOfRounds : (league.numberOfRounds || 1),
+      matchDuration: matchDuration !== undefined ? matchDuration : (league.matchDuration || 90),
+      breakBetweenMatches:
+        breakBetweenMatches !== undefined
+          ? breakBetweenMatches
+          : league.breakBetweenMatches !== undefined
+            ? league.breakBetweenMatches
+            : 15,
+      numberOfFields:
+        numberOfFields !== undefined ? numberOfFields : (league.numberOfFields || 1),
+      startTime: startTime || league.startTime || "10:00",
+      startDate: startDate || league.startDate,
+      endDate: endDate || league.endDate,
+      venue: venue || league.name || "",
+      round: round !== undefined ? round : targetRound,
+    };
+
+    try {
+      session = await mongoose.startSession();
+      session.startTransaction();
+      useSession = true;
+    } catch (sessionErr) {
+      useSession = false;
+      session = null;
+    }
+
+    const result = await reconcileAndSaveLeagueFixtures({
+      league,
+      teams: league.teams,
+      config,
+      randomize: true,
+      forceRegenerate: Boolean(forceRegenerate === "true" || forceRegenerate === true),
+      session: useSession ? session : null,
+    });
+
+    // Update league generationType to AUTOMATIC after successful generation
+    if (league.generationType !== "AUTOMATIC") {
+      league.generationType = "AUTOMATIC";
+      league.fixtureGenerated = true;
+      if (useSession && session) {
+        await league.save({ session });
+      } else {
+        await league.save();
+      }
+    }
+
+    if (useSession && session) {
+      await session.commitTransaction();
+      session.endSession();
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: result.round
+        ? `Random fixtures for Round ${result.round} generated successfully`
+        : "Random fixtures generated successfully",
+      data: {
+        leagueId: league._id,
+        teams: result.teams,
+        rounds: result.rounds,
+        round: result.round || null,
+        fixtures: result.fixtures,
+        created: result.created,
+        updated: result.updated,
+        deleted: result.deleted,
+        manualFixturesPreserved: result.manualFixturesPreserved,
+        byes: result.byes,
+        daysUsed: result.daysUsed,
+      },
+    });
+  } catch (err) {
+    if (useSession && session) {
+      try {
+        await session.abortTransaction();
+        session.endSession();
+      } catch (abortErr) {
+        console.error("[League] Abort error in generateRandomFixtures:", abortErr.message);
+      }
+    }
+
+    const statusCode = err.statusCode || (err.message.includes("cannot fit") ? 400 : 500);
+
+    return res.status(statusCode).json({
+      success: false,
+      message: err.message,
+      ...(err.protectedFixtures ? { protectedFixtures: err.protectedFixtures } : {}),
+    });
+  } finally {
+    activeLeagueGenerationLocks.delete(leagueKey);
+  }
+};
+
 
 exports.getAllLeagues = async (req, res) => {
   try {
@@ -141,6 +556,27 @@ exports.getAllLeagues = async (req, res) => {
 
     const [leagues, total] = await Promise.all([
       League.find(filter)
+        .populate({
+          path: "teams",
+          populate: [
+            {
+              path: "players.player",
+              select: "firstName lastName fullName email phone profileImage jerseyNumber position role gender dob",
+            },
+            {
+              path: "coach",
+              select: "name fullName email phone",
+            },
+            {
+              path: "captain",
+              select: "firstName lastName fullName email phone profileImage jerseyNumber",
+            },
+            {
+              path: "viceCaptain",
+              select: "firstName lastName fullName email phone profileImage jerseyNumber",
+            },
+          ],
+        })
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit),
@@ -169,6 +605,82 @@ exports.getAllLeagues = async (req, res) => {
   }
 };
 
+const parseDateString = (input) => {
+  if (!input) return null;
+  if (input instanceof Date && !isNaN(input.getTime())) {
+    const d = new Date(input);
+    d.setUTCHours(0, 0, 0, 0);
+    return d;
+  }
+  const str = String(input).trim();
+  // Check DD-MM-YYYY or DD/MM/YYYY
+  const dmyMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+  if (dmyMatch) {
+    const day = parseInt(dmyMatch[1], 10);
+    const month = parseInt(dmyMatch[2], 10);
+    const year = parseInt(dmyMatch[3], 10);
+    return new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+  }
+  // Check YYYY-MM-DD
+  const ymdMatch = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  if (ymdMatch) {
+    const year = parseInt(ymdMatch[1], 10);
+    const month = parseInt(ymdMatch[2], 10);
+    const day = parseInt(ymdMatch[3], 10);
+    return new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+  }
+  const parsed = new Date(str);
+  if (!isNaN(parsed.getTime())) {
+    parsed.setUTCHours(0, 0, 0, 0);
+    return parsed;
+  }
+  return null;
+};
+
+const extractRawDates = (body) => {
+  let raw = body.date !== undefined ? body.date : (body.dates !== undefined ? body.dates : body.sessionDates);
+  if (raw === undefined || raw === null || raw === "") return [];
+  if (typeof raw === "string") {
+    raw = raw.trim();
+    if (raw.startsWith("[") && raw.endsWith("]")) {
+      try {
+        raw = JSON.parse(raw);
+      } catch (e) {
+        raw = raw.slice(1, -1).split(",").map(s => s.trim().replace(/^['"]|['"]$/g, ""));
+      }
+    } else if (raw.includes(",")) {
+      raw = raw.split(",").map(s => s.trim());
+    } else {
+      raw = [raw];
+    }
+  }
+  if (!Array.isArray(raw)) raw = [raw];
+  return raw;
+};
+
+const parseRoundAndDates = (body) => {
+  const rawDates = extractRawDates(body);
+  let parsedDates = rawDates.map(parseDateString).filter(Boolean);
+
+  let parsedRound = body.round !== undefined && body.round !== null && String(body.round).trim() !== ""
+    ? Math.max(1, parseInt(body.round, 10))
+    : null;
+
+  if (parsedRound && parsedDates.length > 0) {
+    if (parsedDates.length > parsedRound) {
+      parsedDates = parsedDates.slice(0, parsedRound);
+    }
+  } else if (!parsedRound && parsedDates.length > 0) {
+    parsedRound = parsedDates.length;
+  }
+
+  return {
+    round: parsedRound,
+    sessionDates: parsedDates,
+    hasRoundsOrDates: parsedRound !== null || parsedDates.length > 0,
+  };
+};
+
 exports.createTeam = async (req, res) => {
   try {
     const {
@@ -187,6 +699,7 @@ exports.createTeam = async (req, res) => {
       location,
       scheduleType,
       schedule,
+      players,
     } = req.body;
 
     if (!teamName) {
@@ -218,6 +731,44 @@ exports.createTeam = async (req, res) => {
 
     const logo = req.file ? `uploads/teamlogos/${req.file.filename}` : "";
 
+    const { round: parsedRound, sessionDates: parsedDates } = parseRoundAndDates(req.body);
+
+    let parsedPlayers = [];
+    if (players) {
+      let rawPlayers = players;
+      if (typeof rawPlayers === "string") {
+        try {
+          rawPlayers = JSON.parse(rawPlayers);
+        } catch (e) {
+          rawPlayers = [];
+        }
+      }
+      if (Array.isArray(rawPlayers)) {
+        parsedPlayers = rawPlayers.map((p) => {
+          const pid = p && p.player ? p.player : p;
+          const status = p && p.paymentStatus ? p.paymentStatus : "UNPAID";
+          const stats = p && p.statistics ? {
+            appearances: Number(p.statistics.appearances) || 0,
+            goals: Number(p.statistics.goals) || 0,
+            assists: Number(p.statistics.assists) || 0,
+            cleanSheets: Number(p.statistics.cleanSheets) || 0,
+            yellowCards: Number(p.statistics.yellowCards) || 0,
+            redCards: Number(p.statistics.redCards) || 0,
+            minutesPlayed: Number(p.statistics.minutesPlayed) || 0,
+          } : {
+            appearances: 0,
+            goals: 0,
+            assists: 0,
+            cleanSheets: 0,
+            yellowCards: 0,
+            redCards: 0,
+            minutesPlayed: 0,
+          };
+          return { player: pid, paymentStatus: status, statistics: stats };
+        });
+      }
+    }
+
     const team = await Team.create({
       teamName: teamName.trim(),
       logo,
@@ -234,6 +785,9 @@ exports.createTeam = async (req, res) => {
       location: location || venue || "",
       scheduleType: scheduleType || "SINGLE_DAY",
       schedule: schedule || [],
+      round: parsedRound,
+      sessionDates: parsedDates,
+      players: parsedPlayers,
     });
 
     return res.status(201).json({
@@ -313,16 +867,59 @@ exports.getAllTeams = async (req, res) => {
 exports.assignPlayerToTeam = async (req, res) => {
   try {
     const { teamId } = req.params;
-    const { playerId, playerIds } = req.body;
+    const { players } = req.body;
 
-    const rawIds = playerId || playerIds;
-    if (!rawIds) {
-      return res.status(400).json({ success: false, message: "Player ID(s) required" });
+    const VALID_PAYMENT_STATUSES = [
+      "TRIAL",
+      "UNPAID",
+      "PAID",
+      "OVER_DUE",
+      "EXTRA",
+      "SUBSTITUTE",
+      "TBC",
+      "HANDSHAKE",
+    ];
+
+    if (!players) {
+      return res.status(400).json({ success: false, message: "players array is required" });
     }
 
-    const normalizedIds = Array.isArray(rawIds) ? rawIds : [rawIds];
+    let rawPlayers = players;
+    if (typeof rawPlayers === "string") {
+      try {
+        rawPlayers = JSON.parse(rawPlayers);
+      } catch (e) {
+        return res.status(400).json({ success: false, message: "Invalid players JSON format" });
+      }
+    }
 
-    const isValid = normalizedIds.every(id => mongoose.Types.ObjectId.isValid(id));
+    if (!Array.isArray(rawPlayers) || rawPlayers.length === 0) {
+      return res.status(400).json({ success: false, message: "players must be a non-empty array" });
+    }
+
+    // Normalize incoming players into a list of { id, paymentStatus }
+    const playerEntries = rawPlayers
+      .map((item) => {
+        if (item && typeof item === "object") {
+          const id = (item.playerId || item.player || item._id || "").toString().trim();
+          const rawStatus = (item.paymentStatus || "TRIAL")
+            .toString()
+            .toUpperCase()
+            .trim();
+          const status = VALID_PAYMENT_STATUSES.includes(rawStatus) ? rawStatus : "TRIAL";
+          return { id, paymentStatus: status };
+        } else {
+          const id = (item || "").toString().trim();
+          return { id, paymentStatus: "TRIAL" };
+        }
+      })
+      .filter((entry) => entry.id);
+
+    if (playerEntries.length === 0) {
+      return res.status(400).json({ success: false, message: "No valid player(s) provided in players array" });
+    }
+
+    const isValid = playerEntries.every((entry) => mongoose.Types.ObjectId.isValid(entry.id));
     if (!isValid) {
       return res.status(400).json({ success: false, message: "Invalid player ID format" });
     }
@@ -332,7 +929,7 @@ exports.assignPlayerToTeam = async (req, res) => {
       return res.status(404).json({ success: false, message: "Team not found" });
     }
 
-    const uniqueIds = [...new Set(normalizedIds)];
+    const uniqueIds = [...new Set(playerEntries.map((e) => e.id))];
     const existingPlayersCount = await User.countDocuments({ _id: { $in: uniqueIds } });
     if (existingPlayersCount !== uniqueIds.length) {
       return res.status(404).json({ success: false, message: "One or more players not found" });
@@ -341,12 +938,48 @@ exports.assignPlayerToTeam = async (req, res) => {
     const existingPlayerMap = new Map();
     (team.players || []).forEach((p) => {
       const pid = p.player ? p.player.toString() : p.toString();
-      existingPlayerMap.set(pid, p.paymentStatus || "TRIAL");
+      existingPlayerMap.set(pid, {
+        paymentStatus: p.paymentStatus || "TRIAL",
+        statistics: p.statistics
+          ? {
+            appearances: Number(p.statistics.appearances) || 0,
+            goals: Number(p.statistics.goals) || 0,
+            assists: Number(p.statistics.assists) || 0,
+            cleanSheets: Number(p.statistics.cleanSheets) || 0,
+            yellowCards: Number(p.statistics.yellowCards) || 0,
+            redCards: Number(p.statistics.redCards) || 0,
+            minutesPlayed: Number(p.statistics.minutesPlayed) || 0,
+          }
+          : {
+            appearances: 0,
+            goals: 0,
+            assists: 0,
+            cleanSheets: 0,
+            yellowCards: 0,
+            redCards: 0,
+            minutesPlayed: 0,
+          },
+      });
     });
 
-    uniqueIds.forEach((pid) => {
-      if (!existingPlayerMap.has(pid)) {
-        existingPlayerMap.set(pid, "TRIAL");
+    // Update existing players with their passed paymentStatus, or insert new ones
+    playerEntries.forEach(({ id, paymentStatus }) => {
+      if (existingPlayerMap.has(id)) {
+        const existing = existingPlayerMap.get(id);
+        existing.paymentStatus = paymentStatus;
+      } else {
+        existingPlayerMap.set(id, {
+          paymentStatus,
+          statistics: {
+            appearances: 0,
+            goals: 0,
+            assists: 0,
+            cleanSheets: 0,
+            yellowCards: 0,
+            redCards: 0,
+            minutesPlayed: 0,
+          },
+        });
       }
     });
 
@@ -357,18 +990,24 @@ exports.assignPlayerToTeam = async (req, res) => {
       });
     }
 
-    team.players = Array.from(existingPlayerMap.entries()).map(([pId, status]) => ({
+    team.players = Array.from(existingPlayerMap.entries()).map(([pId, data]) => ({
       player: pId,
-      paymentStatus: status,
+      paymentStatus: data.paymentStatus,
+      statistics: data.statistics,
     }));
     await team.save();
 
+    // Generate invoice ONLY if team.teamFee > 0 AND player's paymentStatus is "UNPAID"
     if (team.teamFee > 0) {
-      for (const pId of uniqueIds) {
-        try {
-          await generateTeamInvoice({ userId: pId, teamId });
-        } catch (invErr) {
-          console.error(`[Team] Failed to generate team invoice for player ${pId}:`, invErr.message);
+      const processedInvoices = new Set();
+      for (const { id: pId, paymentStatus } of playerEntries) {
+        if (paymentStatus === "UNPAID" && !processedInvoices.has(pId)) {
+          processedInvoices.add(pId);
+          try {
+            await generateTeamInvoice({ userId: pId, teamId });
+          } catch (invErr) {
+            console.error(`[Team] Failed to generate team invoice for player ${pId}:`, invErr.message);
+          }
         }
       }
     }
@@ -436,9 +1075,14 @@ exports.createFixture = async (req, res) => {
       referee,
       homeTeam,
       awayTeam,
+      field,
+      endTime,
+      group,
     } = req.body;
 
-    if (!league || !kickoffTime || !venue || !homeTeam || !awayTeam) {
+    const targetLeague = req.params?.leagueId || league;
+
+    if (!targetLeague || !kickoffTime || !venue || !homeTeam || !awayTeam) {
       return res.status(400).json({
         success: false,
         message:
@@ -447,7 +1091,7 @@ exports.createFixture = async (req, res) => {
     }
 
     if (
-      !mongoose.Types.ObjectId.isValid(league) ||
+      !mongoose.Types.ObjectId.isValid(targetLeague) ||
       !mongoose.Types.ObjectId.isValid(homeTeam) ||
       !mongoose.Types.ObjectId.isValid(awayTeam)
     ) {
@@ -465,7 +1109,7 @@ exports.createFixture = async (req, res) => {
     }
 
     const [leagueExists, homeTeamExists, awayTeamExists] = await Promise.all([
-      League.findById(league),
+      League.findById(targetLeague),
       Team.findById(homeTeam),
       Team.findById(awayTeam),
     ]);
@@ -485,7 +1129,7 @@ exports.createFixture = async (req, res) => {
     }
 
     const existingFixture = await Fixture.findOne({
-      league,
+      league: targetLeague,
       kickoffTime: new Date(kickoffTime),
       $or: [
         { homeTeam, awayTeam },
@@ -503,18 +1147,23 @@ exports.createFixture = async (req, res) => {
     const roundNumber = req.body.round ? Math.max(1, parseInt(req.body.round, 10)) : 1;
 
     const fixture = await Fixture.create({
-      league,
+      league: targetLeague,
       round: roundNumber,
       kickoffTime: new Date(kickoffTime),
+      endTime: endTime ? new Date(endTime) : undefined,
       venue: venue.trim(),
+      field: field ? String(field).trim() : "",
+      group: group ? String(group).trim() : "",
       referee: referee || "",
       homeTeam,
       awayTeam,
       status: "SCHEDULED",
+      fixtureSource: "MANUAL",
+      isManuallyModified: true,
     });
 
     // Auto-enroll teams into the league's teams roster if not already present
-    await League.findByIdAndUpdate(league, {
+    await League.findByIdAndUpdate(targetLeague, {
       $addToSet: { teams: { $each: [homeTeam, awayTeam] } },
     });
 
@@ -946,6 +1595,25 @@ exports.getTeamById = async (req, res) => {
       teamObj.players = teamObj.players.map((item) => {
         const pObj = item.player && typeof item.player === "object" ? { ...item.player } : { _id: item.player };
         pObj.paymentStatus = item.paymentStatus || "TRIAL";
+        const playerStats = item.statistics ? {
+          appearances: Number(item.statistics.appearances) || 0,
+          goals: Number(item.statistics.goals) || 0,
+          assists: Number(item.statistics.assists) || 0,
+          cleanSheets: Number(item.statistics.cleanSheets) || 0,
+          yellowCards: Number(item.statistics.yellowCards) || 0,
+          redCards: Number(item.statistics.redCards) || 0,
+          minutesPlayed: Number(item.statistics.minutesPlayed) || 0,
+        } : (pObj.statistics || {
+          appearances: 0,
+          goals: 0,
+          assists: 0,
+          cleanSheets: 0,
+          yellowCards: 0,
+          redCards: 0,
+          minutesPlayed: 0,
+        });
+        pObj.statistics = playerStats;
+        pObj.teamStatistics = playerStats;
         return pObj;
       });
     }
@@ -1051,6 +1719,21 @@ exports.updateTeam = async (req, res) => {
     if (location !== undefined) team.location = location;
     if (scheduleType !== undefined) team.scheduleType = scheduleType;
     if (schedule !== undefined) team.schedule = schedule;
+
+    if (
+      req.body.round !== undefined ||
+      req.body.date !== undefined ||
+      req.body.dates !== undefined ||
+      req.body.sessionDates !== undefined
+    ) {
+      const { round: parsedRound, sessionDates: parsedDates, hasRoundsOrDates } = parseRoundAndDates(req.body);
+      if (hasRoundsOrDates) {
+        if (req.body.round !== undefined) team.round = parsedRound;
+        if (req.body.date !== undefined || req.body.dates !== undefined || req.body.sessionDates !== undefined) {
+          team.sessionDates = parsedDates;
+        }
+      }
+    }
 
     if (teamName !== undefined) {
       const trimmedName = teamName.trim();
@@ -1161,11 +1844,20 @@ exports.updateTeam = async (req, res) => {
       }
     }
     if (players !== undefined) {
-      const playerIds = Array.isArray(players) ? players : [players];
-      if (playerIds.length > 20) {
+      let rawPlayerList = players;
+      if (typeof rawPlayerList === "string") {
+        try {
+          rawPlayerList = JSON.parse(rawPlayerList);
+        } catch (e) {
+          rawPlayerList = [];
+        }
+      }
+      const playerList = Array.isArray(rawPlayerList) ? rawPlayerList : [rawPlayerList];
+      if (playerList.length > 20) {
         return res.status(400).json({ success: false, message: "A team cannot have more than 20 players" });
       }
 
+      const playerIds = playerList.map(item => item && item.player ? item.player : item);
       const isValid = playerIds.every(id => mongoose.Types.ObjectId.isValid(id));
       if (!isValid) {
         return res.status(400).json({ success: false, message: "Invalid player ID format inside players array" });
@@ -1179,13 +1871,57 @@ exports.updateTeam = async (req, res) => {
       const existingMap = new Map();
       (team.players || []).forEach((p) => {
         const pid = p.player ? p.player.toString() : p.toString();
-        existingMap.set(pid, p.paymentStatus || "TRIAL");
+        existingMap.set(pid, {
+          paymentStatus: p.paymentStatus || "TRIAL",
+          statistics: p.statistics ? {
+            appearances: Number(p.statistics.appearances) || 0,
+            goals: Number(p.statistics.goals) || 0,
+            assists: Number(p.statistics.assists) || 0,
+            cleanSheets: Number(p.statistics.cleanSheets) || 0,
+            yellowCards: Number(p.statistics.yellowCards) || 0,
+            redCards: Number(p.statistics.redCards) || 0,
+            minutesPlayed: Number(p.statistics.minutesPlayed) || 0,
+          } : {
+            appearances: 0,
+            goals: 0,
+            assists: 0,
+            cleanSheets: 0,
+            yellowCards: 0,
+            redCards: 0,
+            minutesPlayed: 0,
+          },
+        });
       });
 
-      team.players = playerIds.map((id) => ({
-        player: id,
-        paymentStatus: existingMap.get(id.toString()) || "TRIAL",
-      }));
+      team.players = playerList.map((item) => {
+        const id = item && item.player ? item.player : item;
+        const idStr = id.toString();
+        const prev = existingMap.get(idStr);
+        const paymentStatus = (item && item.paymentStatus) || prev?.paymentStatus || "TRIAL";
+        const stats = (item && item.statistics) ? {
+          appearances: Number(item.statistics.appearances) || 0,
+          goals: Number(item.statistics.goals) || 0,
+          assists: Number(item.statistics.assists) || 0,
+          cleanSheets: Number(item.statistics.cleanSheets) || 0,
+          yellowCards: Number(item.statistics.yellowCards) || 0,
+          redCards: Number(item.statistics.redCards) || 0,
+          minutesPlayed: Number(item.statistics.minutesPlayed) || 0,
+        } : (prev?.statistics || {
+          appearances: 0,
+          goals: 0,
+          assists: 0,
+          cleanSheets: 0,
+          yellowCards: 0,
+          redCards: 0,
+          minutesPlayed: 0,
+        });
+
+        return {
+          player: id,
+          paymentStatus,
+          statistics: stats,
+        };
+      });
     }
 
     await team.save();
@@ -1541,15 +2277,15 @@ exports.getAdminLeagueData = async (req, res) => {
         : (tStat.played > 0 || tStat.points > 0 || tStat.won > 0 || tStat.drawn > 0 || tStat.lost > 0)
           ? tStat
           : (s || tStat || {
-              played: 0,
-              won: 0,
-              drawn: 0,
-              lost: 0,
-              goalsFor: 0,
-              goalsAgainst: 0,
-              goalDifference: 0,
-              points: 0,
-            });
+            played: 0,
+            won: 0,
+            drawn: 0,
+            lost: 0,
+            goalsFor: 0,
+            goalsAgainst: 0,
+            goalDifference: 0,
+            points: 0,
+          });
 
       const playersCount =
         (Array.isArray(t.players) ? t.players.length : 0) +
@@ -1563,19 +2299,19 @@ exports.getAdminLeagueData = async (req, res) => {
         teamType: t.teamType || "INTERNAL",
         coach: t.coach
           ? {
-              _id: t.coach._id,
-              name: t.coach.name,
-              email: t.coach.email,
-              mobile: t.coach.mobile,
-              profileImage: t.coach.profileImage,
-            }
+            _id: t.coach._id,
+            name: t.coach.name,
+            email: t.coach.email,
+            mobile: t.coach.mobile,
+            profileImage: t.coach.profileImage,
+          }
           : null,
         assistantCoach: t.assistantCoach
           ? {
-              _id: t.assistantCoach._id,
-              name: t.assistantCoach.name,
-              email: t.assistantCoach.email,
-            }
+            _id: t.assistantCoach._id,
+            name: t.assistantCoach.name,
+            email: t.assistantCoach.email,
+          }
           : null,
         playersCount,
         status: "ACTIVE",
@@ -1670,6 +2406,11 @@ exports.getAdminLeagueData = async (req, res) => {
           : null,
         score: fix.score || { homeScore: 0, awayScore: 0 },
         matchStatistics: fix.matchStatistics || {},
+        field: fix.field || "Field 1",
+        endTime: fix.endTime || null,
+        group: fix.group || "",
+        fixtureSource: fix.fixtureSource || "GENERATED",
+        isManuallyModified: !!fix.isManuallyModified,
       });
     });
     const scheduleByRound = Object.values(roundsMap).sort((a, b) => a.round - b.round);
@@ -1817,6 +2558,16 @@ exports.getAdminLeagueData = async (req, res) => {
         pointsForDraw: league.pointsForDraw,
         allowDraws: league.allowDraws,
         automaticLadderRecalculation: league.automaticLadderRecalculation,
+        fixtureFormat: league.fixtureFormat || "ROUND_ROBIN",
+        numberOfRounds: league.numberOfRounds || 1,
+        matchDuration: league.matchDuration || 90,
+        breakBetweenMatches: league.breakBetweenMatches || 15,
+        numberOfFields: league.numberOfFields || 1,
+        startTime: league.startTime || "10:00",
+        fixtureGenerated: !!league.fixtureGenerated,
+        generationType: league.generationType || "MANUAL",
+        groupCount: league.groupCount || 1,
+        groups: league.groups || [],
       },
       kpis: {
         totalTeams,
@@ -2225,7 +2976,7 @@ exports.recalculateLadder = async (req, res) => {
 
 exports.updateFixture = async (req, res) => {
   try {
-    const { matchId } = req.params;
+    const matchId = req.params.fixtureId || req.params.matchId;
 
     if (!mongoose.Types.ObjectId.isValid(matchId)) {
       return res.status(400).json({ success: false, message: "Invalid Match ID format" });
@@ -2243,7 +2994,10 @@ exports.updateFixture = async (req, res) => {
       status,
       round,
       kickoffTime,
+      endTime,
       venue,
+      field,
+      group,
       referee,
       homeTeam,
       awayTeam,
@@ -2252,6 +3006,7 @@ exports.updateFixture = async (req, res) => {
 
     let scoreChanged = false;
     let statusChanged = false;
+    let isScheduleModified = false;
 
     const newHomeScore = homeScore !== undefined
       ? Number(homeScore)
@@ -2286,13 +3041,43 @@ exports.updateFixture = async (req, res) => {
 
     if (round !== undefined && !isNaN(Number(round))) {
       match.round = Math.max(1, parseInt(round, 10));
+      isScheduleModified = true;
     }
-    if (kickoffTime) match.kickoffTime = new Date(kickoffTime);
-    if (venue) match.venue = venue.trim();
+    if (kickoffTime) {
+      match.kickoffTime = new Date(kickoffTime);
+      isScheduleModified = true;
+    }
+    if (endTime !== undefined) {
+      match.endTime = new Date(endTime);
+      isScheduleModified = true;
+    }
+    if (venue) {
+      match.venue = venue.trim();
+      isScheduleModified = true;
+    }
+    if (field !== undefined) {
+      match.field = String(field).trim();
+      isScheduleModified = true;
+    }
+    if (group !== undefined) {
+      match.group = String(group).trim();
+      isScheduleModified = true;
+    }
     if (referee !== undefined) match.referee = referee.trim();
 
-    if (homeTeam && mongoose.Types.ObjectId.isValid(homeTeam)) match.homeTeam = homeTeam;
-    if (awayTeam && mongoose.Types.ObjectId.isValid(awayTeam)) match.awayTeam = awayTeam;
+    if (homeTeam && mongoose.Types.ObjectId.isValid(homeTeam)) {
+      match.homeTeam = homeTeam;
+      isScheduleModified = true;
+    }
+    if (awayTeam && mongoose.Types.ObjectId.isValid(awayTeam)) {
+      match.awayTeam = awayTeam;
+      isScheduleModified = true;
+    }
+
+    if (isScheduleModified) {
+      match.fixtureSource = "MANUAL";
+      match.isManuallyModified = true;
+    }
 
     if (matchStatistics && typeof matchStatistics === "object") {
       const existing = match.matchStatistics?.toObject?.() || {};
@@ -2315,7 +3100,7 @@ exports.updateFixture = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Fixture statistics updated successfully",
+      message: "Fixture updated successfully",
       data: updatedMatch,
     });
   } catch (err) {
@@ -2325,7 +3110,7 @@ exports.updateFixture = async (req, res) => {
 
 exports.deleteFixture = async (req, res) => {
   try {
-    const { matchId } = req.params;
+    const matchId = req.params.fixtureId || req.params.matchId;
 
     if (!mongoose.Types.ObjectId.isValid(matchId)) {
       return res.status(400).json({ success: false, message: "Invalid Match ID format" });
@@ -2418,6 +3203,118 @@ exports.updateTeamStatistics = async (req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.updateTeamPlayerStatistics = async (req, res) => {
+  try {
+    const { teamId, playerId } = req.params;
+    const {
+      appearances,
+      goals,
+      assists,
+      cleanSheets,
+      yellowCards,
+      redCards,
+      minutesPlayed,
+    } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(teamId) || !mongoose.Types.ObjectId.isValid(playerId)) {
+      return res.status(400).json({ success: false, message: "Invalid team ID or player ID format" });
+    }
+
+    const team = await Team.findById(teamId);
+    if (!team) {
+      return res.status(404).json({ success: false, message: "Team not found" });
+    }
+
+    const playerEntry = (team.players || []).find(
+      (p) => (p.player?._id || p.player || "").toString() === playerId.toString()
+    );
+
+    if (!playerEntry) {
+      return res.status(404).json({ success: false, message: "Player not found in this team" });
+    }
+
+    if (!playerEntry.statistics) {
+      playerEntry.statistics = {
+        appearances: 0,
+        goals: 0,
+        assists: 0,
+        cleanSheets: 0,
+        yellowCards: 0,
+        redCards: 0,
+        minutesPlayed: 0,
+      };
+    }
+
+    if (appearances !== undefined) playerEntry.statistics.appearances = Number(appearances);
+    if (goals !== undefined) playerEntry.statistics.goals = Number(goals);
+    if (assists !== undefined) playerEntry.statistics.assists = Number(assists);
+    if (cleanSheets !== undefined) playerEntry.statistics.cleanSheets = Number(cleanSheets);
+    if (yellowCards !== undefined) playerEntry.statistics.yellowCards = Number(yellowCards);
+    if (redCards !== undefined) playerEntry.statistics.redCards = Number(redCards);
+    if (minutesPlayed !== undefined) playerEntry.statistics.minutesPlayed = Number(minutesPlayed);
+
+    await team.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Player statistics updated successfully in team",
+      data: {
+        teamId: team._id,
+        playerId,
+        statistics: playerEntry.statistics,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getTeamPlayerStatistics = async (req, res) => {
+  try {
+    const { teamId, playerId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(teamId) || !mongoose.Types.ObjectId.isValid(playerId)) {
+      return res.status(400).json({ success: false, message: "Invalid team ID or player ID format" });
+    }
+
+    const team = await Team.findById(teamId).populate("players.player", "fullName email profileImage jerseyNumber statistics");
+    if (!team) {
+      return res.status(404).json({ success: false, message: "Team not found" });
+    }
+
+    const playerEntry = (team.players || []).find(
+      (p) => (p.player?._id || p.player || "").toString() === playerId.toString()
+    );
+
+    if (!playerEntry) {
+      return res.status(404).json({ success: false, message: "Player not found in this team" });
+    }
+
+    const playerDoc = playerEntry.player && typeof playerEntry.player === "object" ? playerEntry.player : null;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        teamId: team._id,
+        playerId,
+        player: playerDoc,
+        teamStatistics: playerEntry.statistics || {
+          appearances: 0,
+          goals: 0,
+          assists: 0,
+          cleanSheets: 0,
+          yellowCards: 0,
+          redCards: 0,
+          minutesPlayed: 0,
+        },
+        overallStatistics: playerDoc?.statistics || null,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 

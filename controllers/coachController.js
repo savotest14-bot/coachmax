@@ -30,6 +30,15 @@ const DAY_MAP_COACH = {
 
 const generateClassSessions = (term, classObj) => {
   const sessions = [];
+  if (classObj && classObj.sessionDates && Array.isArray(classObj.sessionDates) && classObj.sessionDates.length > 0) {
+    return [...classObj.sessionDates]
+      .map((d) => {
+        const date = new Date(d);
+        date.setUTCHours(0, 0, 0, 0);
+        return date;
+      })
+      .sort((a, b) => a.getTime() - b.getTime());
+  }
   if (!term || !term.startDate || !term.endDate || !classObj) {
     return sessions;
   }

@@ -853,6 +853,15 @@ const DAY_MAP_USER = {
 
 const generateClassSessions = (term, classObj) => {
   const sessions = [];
+  if (classObj && classObj.sessionDates && Array.isArray(classObj.sessionDates) && classObj.sessionDates.length > 0) {
+    return [...classObj.sessionDates]
+      .map((d) => {
+        const date = new Date(d);
+        date.setUTCHours(0, 0, 0, 0);
+        return date;
+      })
+      .sort((a, b) => a.getTime() - b.getTime());
+  }
   if (!term || !term.startDate || !term.endDate || !classObj) return sessions;
 
   const start = new Date(term.startDate);
@@ -1289,6 +1298,24 @@ exports.getMyTeams = async (req, res) => {
         const isViceCaptain = (team.viceCaptain?._id || team.viceCaptain)?.toString() === pId?.toString();
         const isCurrentPlayer = pId?.toString() === playerId.toString();
 
+        const playerStats = item.statistics ? {
+          appearances: Number(item.statistics.appearances) || 0,
+          goals: Number(item.statistics.goals) || 0,
+          assists: Number(item.statistics.assists) || 0,
+          cleanSheets: Number(item.statistics.cleanSheets) || 0,
+          yellowCards: Number(item.statistics.yellowCards) || 0,
+          redCards: Number(item.statistics.redCards) || 0,
+          minutesPlayed: Number(item.statistics.minutesPlayed) || 0,
+        } : (p?.statistics || {
+          appearances: 0,
+          goals: 0,
+          assists: 0,
+          cleanSheets: 0,
+          yellowCards: 0,
+          redCards: 0,
+          minutesPlayed: 0,
+        });
+
         return {
           _id: pId,
           playerId: pId,
@@ -1301,6 +1328,7 @@ exports.getMyTeams = async (req, res) => {
           dob: p?.dob || null,
           rating: p?.rating || 1,
           paymentStatus: item.paymentStatus || "UNPAID",
+          statistics: playerStats,
           isCaptain,
           isViceCaptain,
           isCurrentPlayer,
@@ -1347,10 +1375,13 @@ exports.getMyTeams = async (req, res) => {
       const fixtureWithLeague = fixtures.find((f) => f.league);
       const league = fixtureWithLeague ? fixtureWithLeague.league : null;
 
-      // Generate sessions from term & schedule
-      const generatedSessions = team.term ? generateClassSessions(team.term, team) : [];
+      // Generate sessions from explicit round dates or term & schedule
+      const hasExplicitSessions = team.sessionDates && team.sessionDates.length > 0;
+      const generatedSessions = hasExplicitSessions
+        ? team.sessionDates.map((d) => new Date(d))
+        : (team.term ? generateClassSessions(team.term, team) : []);
 
-      // Also collect any dates from existing attendance records so they aren't missed
+      // Also collect any dates from existing attendance records so they aren't missed (if not explicit)
       const sessionDateMap = new Map();
       generatedSessions.forEach((s) => {
         const d = new Date(s);
@@ -1358,14 +1389,16 @@ exports.getMyTeams = async (req, res) => {
         sessionDateMap.set(d.toISOString().split("T")[0], d);
       });
 
-      teamAttendance.forEach((att) => {
-        const d = new Date(att.sessionDate);
-        d.setUTCHours(0, 0, 0, 0);
-        const iso = d.toISOString().split("T")[0];
-        if (!sessionDateMap.has(iso)) {
-          sessionDateMap.set(iso, d);
-        }
-      });
+      if (!hasExplicitSessions) {
+        teamAttendance.forEach((att) => {
+          const d = new Date(att.sessionDate);
+          d.setUTCHours(0, 0, 0, 0);
+          const iso = d.toISOString().split("T")[0];
+          if (!sessionDateMap.has(iso)) {
+            sessionDateMap.set(iso, d);
+          }
+        });
+      }
 
       const sortedSessionDates = Array.from(sessionDateMap.values()).sort(
         (a, b) => a.getTime() - b.getTime()
@@ -1438,6 +1471,7 @@ exports.getMyTeams = async (req, res) => {
         teamFee: team.teamFee || 0,
         paymentStatus,
         term: team.term,
+        round: team.round || null,
         league,
         fixtures,
         upcomingFixtures,
@@ -1607,7 +1641,7 @@ exports.getMyAttendanceByTeam = async (req, res) => {
       })
       .populate({
         path: "players.player",
-        select: "firstName lastName fullName profileImage jerseyNumber dob gender rating contactName relationship",
+        select: "firstName lastName fullName profileImage jerseyNumber dob gender rating contactName relationship statistics",
       })
       .populate("coach", "name email phone")
       .populate("assistantCoach", "name email phone")
@@ -1621,6 +1655,24 @@ exports.getMyAttendanceByTeam = async (req, res) => {
     const teamMembers = (team.players || []).map((item) => {
       const p = item.player && typeof item.player === "object" ? item.player : null;
       const pId = p ? p._id : item.player;
+      const playerStats = item.statistics ? {
+        appearances: Number(item.statistics.appearances) || 0,
+        goals: Number(item.statistics.goals) || 0,
+        assists: Number(item.statistics.assists) || 0,
+        cleanSheets: Number(item.statistics.cleanSheets) || 0,
+        yellowCards: Number(item.statistics.yellowCards) || 0,
+        redCards: Number(item.statistics.redCards) || 0,
+        minutesPlayed: Number(item.statistics.minutesPlayed) || 0,
+      } : (p?.statistics || {
+        appearances: 0,
+        goals: 0,
+        assists: 0,
+        cleanSheets: 0,
+        yellowCards: 0,
+        redCards: 0,
+        minutesPlayed: 0,
+      });
+
       return {
         _id: pId,
         playerId: pId,
@@ -1633,13 +1685,17 @@ exports.getMyAttendanceByTeam = async (req, res) => {
         dob: p?.dob || null,
         rating: p?.rating || 1,
         paymentStatus: item.paymentStatus || "UNPAID",
+        statistics: playerStats,
         isCaptain: (team.captain?._id || team.captain)?.toString() === pId?.toString(),
         isViceCaptain: (team.viceCaptain?._id || team.viceCaptain)?.toString() === pId?.toString(),
         isCurrentPlayer: pId?.toString() === playerId.toString(),
       };
     });
 
-    const generatedSessions = team.term ? generateClassSessions(team.term, team) : [];
+    const hasExplicitSessions = team.sessionDates && team.sessionDates.length > 0;
+    const generatedSessions = hasExplicitSessions
+      ? team.sessionDates.map((d) => new Date(d))
+      : (team.term ? generateClassSessions(team.term, team) : []);
     const attendanceData = await Attendance.find({ team: teamId }).select("sessionDate records");
 
     const sessionDateMap = new Map();
@@ -1654,7 +1710,7 @@ exports.getMyAttendanceByTeam = async (req, res) => {
       const d = new Date(att.sessionDate);
       d.setUTCHours(0, 0, 0, 0);
       const dateIso = d.toISOString().split("T")[0];
-      if (!sessionDateMap.has(dateIso)) {
+      if (!hasExplicitSessions && !sessionDateMap.has(dateIso)) {
         sessionDateMap.set(dateIso, d);
       }
       const record = att.records.find((r) => r.player.toString() === playerId.toString());
@@ -1727,6 +1783,7 @@ exports.getMyAttendanceByTeam = async (req, res) => {
       data: {
         teamId,
         teamName: team.teamName,
+        round: team.round || null,
         league,
         fixtures: formattedFixtures,
         upcomingFixtures,

@@ -12,6 +12,10 @@ const standingSchema = new mongoose.Schema(
       ref: "Team",
       required: true,
     },
+    group: {
+      type: String,
+      default: "",
+    },
     played: { type: Number, default: 0 },
     won: { type: Number, default: 0 },
     drawn: { type: Number, default: 0 },

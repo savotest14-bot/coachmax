@@ -116,8 +116,11 @@ const {
   updateFixture,
   deleteFixture,
   updateTeamStatistics,
+  updateTeamPlayerStatistics,
+  getTeamPlayerStatistics,
   updateLeagueTeamStatistics,
   recalculateLadder,
+  generateRandomFixtures,
 } = require("../controllers/leagueController");
 
 const {
@@ -315,12 +318,18 @@ router.post("/leagues/:leagueId/teams", auth, isAdmin, addTeamToLeague);
 router.delete("/leagues/:leagueId/teams/:teamId", auth, isAdmin, removeTeamFromLeague);
 router.post("/leagues/:leagueId/recalculate-ladder", auth, isAdmin, recalculateLadder);
 router.put("/leagues/:leagueId/teams/:teamId/statistics", auth, isAdmin, updateLeagueTeamStatistics);
+router.post("/leagues/:leagueId/generate-random-fixtures", auth, isAdmin, generateRandomFixtures);
+router.post("/leagues/:leagueId/fixtures", auth, isAdmin, createFixture);
+router.put("/leagues/:leagueId/fixtures/:fixtureId", auth, isAdmin, updateFixture);
+router.delete("/leagues/:leagueId/fixtures/:fixtureId", auth, isAdmin, deleteFixture);
 
 router.post("/teams", auth, isAdmin, uploads.single("teamLogo"), createTeam);
 router.get("/getAllTeams", auth, isAdmin, getAllTeams)
 router.get("/teams/:teamId", auth, isAdmin, getTeamById);
 router.put("/teams/:teamId", auth, isAdmin, uploads.single("teamLogo"), updateTeam);
 router.put("/teams/:teamId/statistics", auth, isAdmin, updateTeamStatistics);
+router.get("/teams/:teamId/players/:playerId/statistics", auth, isAdmin, getTeamPlayerStatistics);
+router.put("/teams/:teamId/players/:playerId/statistics", auth, isAdmin, updateTeamPlayerStatistics);
 router.delete("/teams/:teamId", auth, isAdmin, deleteTeam);
 router.post("/teams/:teamId/assign", auth, isAdmin, assignPlayerToTeam);
 router.post("/teams/:teamId/unassign", auth, isAdmin, unassignPlayerFromTeam);

@@ -42,6 +42,15 @@ const teamSchema = new mongoose.Schema(
           enum: ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "EXTRA", "SUBSTITUTE", "TBC", "HANDSHAKE"],
           default: "UNPAID",
         },
+        statistics: {
+          appearances: { type: Number, default: 0 },
+          goals: { type: Number, default: 0 },
+          assists: { type: Number, default: 0 },
+          cleanSheets: { type: Number, default: 0 },
+          yellowCards: { type: Number, default: 0 },
+          redCards: { type: Number, default: 0 },
+          minutesPlayed: { type: Number, default: 0 },
+        },
       },
     ],
     teamType: {
@@ -75,6 +84,15 @@ const teamSchema = new mongoose.Schema(
         dayOfWeek: { type: String },
         startTime: { type: String },
         endTime: { type: String },
+      },
+    ],
+    round: {
+      type: Number,
+      default: null,
+    },
+    sessionDates: [
+      {
+        type: Date,
       },
     ],
     temporaryPlayers: [teamTemporaryPlayerSchema],
