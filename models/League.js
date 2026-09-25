@@ -86,6 +86,16 @@ const leagueSchema = new mongoose.Schema(
       default: 1,
       min: 1,
     },
+    fee: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    sessionDates: [
+      {
+        type: Date,
+      },
+    ],
     matchDuration: {
       type: Number,
       default: 90,

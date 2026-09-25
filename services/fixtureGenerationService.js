@@ -389,6 +389,7 @@ function scheduleFixturesAcrossSlotsAndFields(params) {
     startTime,
     startDate,
     endDate,
+    sessionDates = [],
     venueName = "",
   } = params;
 
@@ -423,7 +424,14 @@ function scheduleFixturesAcrossSlotsAndFields(params) {
     const matchesInRound = roundMatchesMap.get(r) || [];
     if (matchesInRound.length === 0) continue;
 
-    if (spreadOneRoundPerDay) {
+    const roundExplicitDate =
+      Array.isArray(sessionDates) && sessionDates.length >= r && sessionDates[r - 1]
+        ? new Date(sessionDates[r - 1])
+        : null;
+
+    if (roundExplicitDate) {
+      currentSlotIndex = 0;
+    } else if (spreadOneRoundPerDay) {
       // Round r starts on day (r - 1)
       currentDayIndex = r - 1;
       currentSlotIndex = 0;
@@ -435,16 +443,15 @@ function scheduleFixturesAcrossSlotsAndFields(params) {
     let matchIdx = 0;
     while (matchIdx < matchesInRound.length) {
       // If current slot doesn't fit on current day, advance day
-      if (currentSlotIndex >= maxSlotsPerDay) {
+      if (!roundExplicitDate && currentSlotIndex >= maxSlotsPerDay) {
         currentDayIndex++;
         currentSlotIndex = 0;
       }
 
       // Check if currentDayIndex exceeds totalDays
-      if (currentDayIndex >= totalDays) {
+      if (!roundExplicitDate && currentDayIndex >= totalDays) {
         throw new Error(
-          `Generated fixtures cannot fit inside the available date range (${totalDays} day${
-            totalDays > 1 ? "s" : ""
+          `Generated fixtures cannot fit inside the available date range (${totalDays} day${totalDays > 1 ? "s" : ""
           } between ${startDate.toISOString().slice(0, 10)} and ${endDate
             .toISOString()
             .slice(
@@ -454,7 +461,7 @@ function scheduleFixturesAcrossSlotsAndFields(params) {
         );
       }
 
-      const matchDate = new Date(startDate.getTime() + currentDayIndex * msPerDay);
+      const matchDate = roundExplicitDate || new Date(startDate.getTime() + currentDayIndex * msPerDay);
       const slotStartMinutes = minutesFromStartOfDay + currentSlotIndex * slotDurationMinutes;
       const slotHour = Math.floor(slotStartMinutes / 60);
       const slotMin = slotStartMinutes % 60;
@@ -485,6 +492,7 @@ function scheduleFixturesAcrossSlotsAndFields(params) {
           homeTeam: match.homeTeam,
           awayTeam: match.awayTeam,
           kickoffTime,
+          sessionDate: roundExplicitDate || parseDateToMidnight(kickoffTime),
           endTime,
           field: fieldName,
           venue: venueDisplay,
@@ -582,6 +590,7 @@ async function generateAndSaveLeagueFixtures({ league, teams, config = {}, sessi
     startTime: norm.startTime,
     startDate: norm.startDate,
     endDate: norm.endDate,
+    sessionDates: config.sessionDates || league.sessionDates || [],
     venueName: venue || league.name || "",
   });
 
@@ -714,8 +723,8 @@ async function reconcileAndSaveLeagueFixtures({
     config.round !== undefined && config.round !== null && config.round !== ""
       ? parseInt(config.round, 10)
       : (config.targetRound !== undefined && config.targetRound !== null && config.targetRound !== ""
-          ? parseInt(config.targetRound, 10)
-          : null);
+        ? parseInt(config.targetRound, 10)
+        : null);
 
   // 2. Fetch all existing fixtures for this league
   const existingFixtures = await Fixture.find({ league: league._id }).sort({
@@ -800,6 +809,7 @@ async function reconcileAndSaveLeagueFixtures({
     startTime: norm.startTime,
     startDate: norm.startDate,
     endDate: norm.endDate,
+    sessionDates: config.sessionDates || league.sessionDates || [],
     venueName: venue || league.name || "",
   });
 

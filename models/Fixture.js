@@ -15,6 +15,9 @@ const fixtureSchema = new mongoose.Schema(
       type: Date,
       required: true,
     },
+    sessionDate: {
+      type: Date,
+    },
     endTime: {
       type: Date,
     },

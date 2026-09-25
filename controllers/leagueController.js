@@ -6,7 +6,10 @@ const Standing = require("../models/Standing");
 const PlayerStatistics = require("../models/PlayerStatistics");
 const User = require("../models/User");
 const Admin = require("../models/Admin");
-const { generateTeamInvoice } = require("../services/invoiceService");
+const {
+  generateTeamInvoice,
+  processLeagueInvoicesForTeam,
+} = require("../services/invoiceService");
 const {
   validateTournamentConfig,
   generateAndSaveLeagueFixtures,
@@ -23,7 +26,6 @@ exports.createLeague = async (req, res) => {
   let session = null;
   let useSession = false;
   let createdLeagueId = null;
-
   try {
     const {
       name,
@@ -54,6 +56,9 @@ exports.createLeague = async (req, res) => {
       breakBetweenMatches,
       numberOfFields,
       startTime,
+      // League Fee and Session Dates
+      fee,
+      sessionDates
     } = req.body;
 
     if (!name || !season || !startDate || !endDate) {
@@ -79,6 +84,46 @@ exports.createLeague = async (req, res) => {
     const isAutoGenerate =
       generationType === "AUTOMATIC";
 
+    // Parse fee safely (number, default 0, min 0)
+    const parsedFee =
+      fee !== undefined && fee !== null && !isNaN(Number(fee))
+        ? Math.max(0, Number(fee))
+        : 0;
+
+    // Parse sessionDates safely (supports array, JSON string from multipart/form-data, or comma-separated)
+    let rawSessionDates = sessionDates || [];
+
+    if (typeof rawSessionDates === "string") {
+      try {
+        rawSessionDates = JSON.parse(rawSessionDates);
+      } catch (e) {
+        rawSessionDates = rawSessionDates
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+    }
+
+    let parsedSessionDates = [];
+    if (Array.isArray(rawSessionDates)) {
+      parsedSessionDates = rawSessionDates
+        .map((d) => parseDateToMidnight(d))
+        .filter(Boolean);
+    }
+
+    // Determine number of rounds (supports numberOfRounds or round or matching sessionDates length)
+    const rawRounds = numberOfRounds;
+    let totalRounds = rawRounds
+      ? Math.max(1, parseInt(rawRounds, 10))
+      : parsedSessionDates.length > 0
+        ? parsedSessionDates.length
+        : 1;
+
+    // If sessionDates are provided according to numberOfRounds, sync length
+    if (parsedSessionDates.length > 0 && totalRounds) {
+      parsedSessionDates = parsedSessionDates.slice(0, totalRounds);
+    }
+
     // Parse teams safely (supports array, JSON string from multipart/form-data, or comma-separated)
     let rawTeams = teams;
     if (typeof rawTeams === "string") {
@@ -96,18 +141,34 @@ exports.createLeague = async (req, res) => {
     let verifiedTeamIds = [];
 
     if (isAutoGenerate) {
+      // Ensure effective dates encompass explicit sessionDates if provided
+      let effectiveStartDate = startDate;
+      let effectiveEndDate = endDate;
+      if (parsedSessionDates.length > 0) {
+        const minSessionDate = parsedSessionDates[0];
+        const maxSessionDate = parsedSessionDates[parsedSessionDates.length - 1];
+        const pStart = parseDateToMidnight(startDate);
+        const pEnd = parseDateToMidnight(endDate);
+        if (pStart && minSessionDate < pStart) {
+          effectiveStartDate = minSessionDate;
+        }
+        if (pEnd && maxSessionDate > pEnd) {
+          effectiveEndDate = maxSessionDate;
+        }
+      }
+
       // Validate tournament and scheduling configuration (requires >= 2 teams)
       const validation = validateTournamentConfig({
         teams: rawTeams,
         fixtureFormat,
         groupCount,
-        numberOfRounds,
+        numberOfRounds: totalRounds,
         matchDuration,
         breakBetweenMatches,
         numberOfFields,
         startTime,
-        startDate,
-        endDate,
+        startDate: effectiveStartDate,
+        endDate: effectiveEndDate,
       });
 
       if (!validation.isValid) {
@@ -118,6 +179,9 @@ exports.createLeague = async (req, res) => {
       }
 
       norm = validation.normalized;
+      norm.sessionDates = parsedSessionDates;
+      norm.fee = parsedFee;
+      norm.numberOfRounds = totalRounds;
       verifiedTeamIds = norm.teamIds;
 
       // Verify all selected teams exist in the database
@@ -132,15 +196,25 @@ exports.createLeague = async (req, res) => {
       }
     } else {
       // Manual mode: validate dates and sanitize any provided teams without requiring minimum 2 teams
-      const parsedStartDate = parseDateToMidnight(startDate);
-      const parsedEndDate = parseDateToMidnight(endDate);
-      if (!parsedStartDate || !parsedEndDate) {
+      let effectiveStartDate = parseDateToMidnight(startDate);
+      let effectiveEndDate = parseDateToMidnight(endDate);
+      if (!effectiveStartDate || !effectiveEndDate) {
         return res.status(400).json({
           success: false,
           message: "Valid start date and end date are required.",
         });
       }
-      if (parsedEndDate < parsedStartDate) {
+      if (parsedSessionDates.length > 0) {
+        const minSessionDate = parsedSessionDates[0];
+        const maxSessionDate = parsedSessionDates[parsedSessionDates.length - 1];
+        if (minSessionDate < effectiveStartDate) {
+          effectiveStartDate = minSessionDate;
+        }
+        if (maxSessionDate > effectiveEndDate) {
+          effectiveEndDate = maxSessionDate;
+        }
+      }
+      if (effectiveEndDate < effectiveStartDate) {
         return res.status(400).json({
           success: false,
           message: "End date cannot be earlier than start date.",
@@ -173,14 +247,16 @@ exports.createLeague = async (req, res) => {
         teamIds: verifiedTeamIds,
         fixtureFormat: validFormats.includes(parsedFmt) ? parsedFmt : "ROUND_ROBIN",
         groupCount: groupCount ? Math.max(1, parseInt(groupCount, 10)) : 1,
-        numberOfRounds: numberOfRounds ? Math.max(1, parseInt(numberOfRounds, 10)) : 1,
+        numberOfRounds: totalRounds,
+        fee: parsedFee,
+        sessionDates: parsedSessionDates,
         matchDuration: matchDuration ? Math.max(1, parseInt(matchDuration, 10)) : 90,
         breakBetweenMatches:
           breakBetweenMatches !== undefined ? Math.max(0, parseInt(breakBetweenMatches, 10)) : 15,
         numberOfFields: numberOfFields ? Math.max(1, parseInt(numberOfFields, 10)) : 1,
         startTime: startTime && typeof startTime === "string" ? startTime.trim() : "10:00",
-        startDate: parsedStartDate,
-        endDate: parsedEndDate,
+        startDate: effectiveStartDate,
+        endDate: effectiveEndDate,
       };
     }
 
@@ -248,6 +324,8 @@ exports.createLeague = async (req, res) => {
           fixtureFormat: norm.fixtureFormat,
           groupCount: norm.groupCount,
           numberOfRounds: norm.numberOfRounds,
+          fee: norm.fee,
+          sessionDates: norm.sessionDates,
           matchDuration: norm.matchDuration,
           breakBetweenMatches: norm.breakBetweenMatches,
           numberOfFields: norm.numberOfFields,
@@ -277,14 +355,41 @@ exports.createLeague = async (req, res) => {
           startTime: norm.startTime,
           startDate: norm.startDate,
           endDate: norm.endDate,
+          sessionDates: parsedSessionDates,
           venue: venue || "",
         },
         session: useSession ? session : null,
       });
 
+      // 3. Synchronize team model with fee, sessionDates, and numberOfRounds
+      if (verifiedTeamIds.length > 0) {
+        await Team.updateMany(
+          { _id: { $in: verifiedTeamIds } },
+          {
+            $set: {
+              teamFee: parsedFee,
+              sessionDates: parsedSessionDates,
+              round: norm.numberOfRounds,
+            },
+          },
+          sessionOption
+        );
+      }
+
       if (useSession && session) {
         await session.commitTransaction();
         session.endSession();
+      }
+
+      // 4. Generate league fee invoices for all UNPAID players across assigned teams
+      if (parsedFee > 0 && verifiedTeamIds.length > 0) {
+        for (const tId of verifiedTeamIds) {
+          try {
+            await processLeagueInvoicesForTeam({ leagueId: league._id, teamId: tId });
+          } catch (invErr) {
+            console.error(`[League] Error processing invoices for team ${tId}:`, invErr.message);
+          }
+        }
       }
 
       return res.status(201).json({
@@ -327,11 +432,35 @@ exports.createLeague = async (req, res) => {
           },
         }));
         await Standing.bulkWrite(standingOps, sessionOption);
+
+        // Synchronize team model with fee, sessionDates, and numberOfRounds
+        await Team.updateMany(
+          { _id: { $in: verifiedTeamIds } },
+          {
+            $set: {
+              teamFee: parsedFee,
+              sessionDates: parsedSessionDates,
+              round: norm.numberOfRounds,
+            },
+          },
+          sessionOption
+        );
       }
 
       if (useSession && session) {
         await session.commitTransaction();
         session.endSession();
+      }
+
+      // Generate league fee invoices for all UNPAID players across assigned teams
+      if (parsedFee > 0 && verifiedTeamIds.length > 0) {
+        for (const tId of verifiedTeamIds) {
+          try {
+            await processLeagueInvoicesForTeam({ leagueId: league._id, teamId: tId });
+          } catch (invErr) {
+            console.error(`[League] Error processing invoices for team ${tId}:`, invErr.message);
+          }
+        }
       }
 
       return res.status(201).json({
@@ -681,6 +810,128 @@ const parseRoundAndDates = (body) => {
   };
 };
 
+// exports.createTeam = async (req, res) => {
+//   try {
+//     const {
+//       teamName,
+//       coach,
+//       assistantCoach,
+//       ageGroup,
+//       teamType,
+//       teamFee,
+//       fee,
+//       term,
+//       dayOfWeek,
+//       startTime,
+//       endTime,
+//       venue,
+//       location,
+//       scheduleType,
+//       schedule,
+//       players,
+//     } = req.body;
+
+//     if (!teamName) {
+//       return res.status(400).json({
+//         success: false,
+//         message: "Team name is required",
+//       });
+//     }
+
+//     const existingTeam = await Team.findOne({
+//       teamName: teamName.trim(),
+//     });
+
+//     if (existingTeam) {
+//       return res.status(409).json({
+//         success: false,
+//         message: "Team already exists",
+//       });
+//     }
+
+//     const parsedType = teamType && ["INTERNAL", "EXTERNAL"].includes(teamType.toUpperCase())
+//       ? teamType.toUpperCase()
+//       : "INTERNAL";
+
+//     const parsedFee = fee !== undefined ? Number(fee) : teamFee !== undefined ? Number(teamFee) : 0;
+//     if (isNaN(parsedFee) || parsedFee < 0) {
+//       return res.status(400).json({ success: false, message: "Team fee must be a non-negative number" });
+//     }
+
+//     const logo = req.file ? `uploads/teamlogos/${req.file.filename}` : "";
+
+//     const { round: parsedRound, sessionDates: parsedDates } = parseRoundAndDates(req.body);
+
+//     let parsedPlayers = [];
+//     if (players) {
+//       let rawPlayers = players;
+//       if (typeof rawPlayers === "string") {
+//         try {
+//           rawPlayers = JSON.parse(rawPlayers);
+//         } catch (e) {
+//           rawPlayers = [];
+//         }
+//       }
+//       if (Array.isArray(rawPlayers)) {
+//         parsedPlayers = rawPlayers.map((p) => {
+//           const pid = p && p.player ? p.player : p;
+//           const status = p && p.paymentStatus ? p.paymentStatus : "UNPAID";
+//           const stats = p && p.statistics ? {
+//             appearances: Number(p.statistics.appearances) || 0,
+//             goals: Number(p.statistics.goals) || 0,
+//             assists: Number(p.statistics.assists) || 0,
+//             cleanSheets: Number(p.statistics.cleanSheets) || 0,
+//             yellowCards: Number(p.statistics.yellowCards) || 0,
+//             redCards: Number(p.statistics.redCards) || 0,
+//             minutesPlayed: Number(p.statistics.minutesPlayed) || 0,
+//           } : {
+//             appearances: 0,
+//             goals: 0,
+//             assists: 0,
+//             cleanSheets: 0,
+//             yellowCards: 0,
+//             redCards: 0,
+//             minutesPlayed: 0,
+//           };
+//           return { player: pid, paymentStatus: status, statistics: stats };
+//         });
+//       }
+//     }
+
+//     const team = await Team.create({
+//       teamName: teamName.trim(),
+//       logo,
+//       coach: coach || null,
+//       assistantCoach: assistantCoach || null,
+//       ageGroup: ageGroup || "",
+//       teamType: parsedType,
+//       teamFee: parsedFee,
+//       term: term || null,
+//       dayOfWeek: dayOfWeek || "",
+//       startTime: startTime || "",
+//       endTime: endTime || "",
+//       venue: venue || "",
+//       location: location || venue || "",
+//       scheduleType: scheduleType || "SINGLE_DAY",
+//       schedule: schedule || [],
+//       round: parsedRound,
+//       sessionDates: parsedDates,
+//       players: parsedPlayers,
+//     });
+
+//     return res.status(201).json({
+//       success: true,
+//       message: "Team created successfully",
+//       data: team,
+//     });
+//   } catch (err) {
+//     return res.status(500).json({
+//       success: false,
+//       message: err.message,
+//     });
+//   }
+// };
+
 exports.createTeam = async (req, res) => {
   try {
     const {
@@ -689,8 +940,6 @@ exports.createTeam = async (req, res) => {
       assistantCoach,
       ageGroup,
       teamType,
-      teamFee,
-      fee,
       term,
       dayOfWeek,
       startTime,
@@ -720,22 +969,22 @@ exports.createTeam = async (req, res) => {
       });
     }
 
-    const parsedType = teamType && ["INTERNAL", "EXTERNAL"].includes(teamType.toUpperCase())
-      ? teamType.toUpperCase()
-      : "INTERNAL";
+    const parsedType =
+      teamType &&
+        ["INTERNAL", "EXTERNAL"].includes(teamType.toUpperCase())
+        ? teamType.toUpperCase()
+        : "INTERNAL";
 
-    const parsedFee = fee !== undefined ? Number(fee) : teamFee !== undefined ? Number(teamFee) : 0;
-    if (isNaN(parsedFee) || parsedFee < 0) {
-      return res.status(400).json({ success: false, message: "Team fee must be a non-negative number" });
-    }
+    const logo = req.file
+      ? `uploads/teamlogos/${req.file.filename}`
+      : "";
 
-    const logo = req.file ? `uploads/teamlogos/${req.file.filename}` : "";
-
-    const { round: parsedRound, sessionDates: parsedDates } = parseRoundAndDates(req.body);
-
+    // Parse players
     let parsedPlayers = [];
+
     if (players) {
       let rawPlayers = players;
+
       if (typeof rawPlayers === "string") {
         try {
           rawPlayers = JSON.parse(rawPlayers);
@@ -743,28 +992,49 @@ exports.createTeam = async (req, res) => {
           rawPlayers = [];
         }
       }
+
       if (Array.isArray(rawPlayers)) {
         parsedPlayers = rawPlayers.map((p) => {
           const pid = p && p.player ? p.player : p;
-          const status = p && p.paymentStatus ? p.paymentStatus : "UNPAID";
-          const stats = p && p.statistics ? {
-            appearances: Number(p.statistics.appearances) || 0,
-            goals: Number(p.statistics.goals) || 0,
-            assists: Number(p.statistics.assists) || 0,
-            cleanSheets: Number(p.statistics.cleanSheets) || 0,
-            yellowCards: Number(p.statistics.yellowCards) || 0,
-            redCards: Number(p.statistics.redCards) || 0,
-            minutesPlayed: Number(p.statistics.minutesPlayed) || 0,
-          } : {
-            appearances: 0,
-            goals: 0,
-            assists: 0,
-            cleanSheets: 0,
-            yellowCards: 0,
-            redCards: 0,
-            minutesPlayed: 0,
+
+          const status =
+            p && p.paymentStatus
+              ? p.paymentStatus
+              : "UNPAID";
+
+          const stats =
+            p && p.statistics
+              ? {
+                appearances:
+                  Number(p.statistics.appearances) || 0,
+                goals:
+                  Number(p.statistics.goals) || 0,
+                assists:
+                  Number(p.statistics.assists) || 0,
+                cleanSheets:
+                  Number(p.statistics.cleanSheets) || 0,
+                yellowCards:
+                  Number(p.statistics.yellowCards) || 0,
+                redCards:
+                  Number(p.statistics.redCards) || 0,
+                minutesPlayed:
+                  Number(p.statistics.minutesPlayed) || 0,
+              }
+              : {
+                appearances: 0,
+                goals: 0,
+                assists: 0,
+                cleanSheets: 0,
+                yellowCards: 0,
+                redCards: 0,
+                minutesPlayed: 0,
+              };
+
+          return {
+            player: pid,
+            paymentStatus: status,
+            statistics: stats,
           };
-          return { player: pid, paymentStatus: status, statistics: stats };
         });
       }
     }
@@ -772,21 +1042,26 @@ exports.createTeam = async (req, res) => {
     const team = await Team.create({
       teamName: teamName.trim(),
       logo,
+
       coach: coach || null,
       assistantCoach: assistantCoach || null,
+
       ageGroup: ageGroup || "",
+
       teamType: parsedType,
-      teamFee: parsedFee,
+
       term: term || null,
+
       dayOfWeek: dayOfWeek || "",
       startTime: startTime || "",
       endTime: endTime || "",
+
       venue: venue || "",
       location: location || venue || "",
-      scheduleType: scheduleType || "SINGLE_DAY",
+
+      scheduleType: scheduleType || "CUSTOM",
       schedule: schedule || [],
-      round: parsedRound,
-      sessionDates: parsedDates,
+
       players: parsedPlayers,
     });
 
@@ -802,6 +1077,7 @@ exports.createTeam = async (req, res) => {
     });
   }
 };
+
 
 exports.getAllTeams = async (req, res) => {
   try {
@@ -1146,10 +1422,18 @@ exports.createFixture = async (req, res) => {
 
     const roundNumber = req.body.round ? Math.max(1, parseInt(req.body.round, 10)) : 1;
 
+    const explicitSessionDate = req.body.sessionDate ? parseDateToMidnight(req.body.sessionDate) : null;
+    const leagueSessionDate =
+      leagueExists.sessionDates && Array.isArray(leagueExists.sessionDates) && leagueExists.sessionDates[roundNumber - 1]
+        ? leagueExists.sessionDates[roundNumber - 1]
+        : null;
+    const fixtureSessionDate = explicitSessionDate || leagueSessionDate || parseDateToMidnight(kickoffTime);
+
     const fixture = await Fixture.create({
       league: targetLeague,
       round: roundNumber,
       kickoffTime: new Date(kickoffTime),
+      sessionDate: fixtureSessionDate,
       endTime: endTime ? new Date(endTime) : undefined,
       venue: venue.trim(),
       field: field ? String(field).trim() : "",
@@ -1166,6 +1450,28 @@ exports.createFixture = async (req, res) => {
     await League.findByIdAndUpdate(targetLeague, {
       $addToSet: { teams: { $each: [homeTeam, awayTeam] } },
     });
+
+    // Synchronize team fee, sessionDates, and round to homeTeam and awayTeam
+    await Team.updateMany(
+      { _id: { $in: [homeTeam, awayTeam] } },
+      {
+        $set: {
+          teamFee: leagueExists.fee || 0,
+          sessionDates: leagueExists.sessionDates || [],
+          round: leagueExists.numberOfRounds || null,
+        },
+      }
+    );
+
+    if (leagueExists.fee > 0) {
+      for (const tId of [homeTeam, awayTeam]) {
+        try {
+          await processLeagueInvoicesForTeam({ leagueId: targetLeague, teamId: tId });
+        } catch (invErr) {
+          console.error(`[League] Error processing invoices for enrolled team ${tId}:`, invErr.message);
+        }
+      }
+    }
 
     // Ensure initial standings exist for both teams in this league
     await Promise.all([
@@ -2770,6 +3076,29 @@ exports.addTeamToLeague = async (req, res) => {
       $addToSet: { teams: { $each: foundIds } },
     });
 
+    // Synchronize enrolled teams with league fee, sessionDates, and numberOfRounds
+    await Team.updateMany(
+      { _id: { $in: foundIds } },
+      {
+        $set: {
+          teamFee: league.fee || 0,
+          sessionDates: league.sessionDates || [],
+          round: league.numberOfRounds || null,
+        },
+      }
+    );
+
+    // Generate league fee invoices for UNPAID players in newly enrolled teams
+    if (league.fee > 0) {
+      for (const tId of foundIds) {
+        try {
+          await processLeagueInvoicesForTeam({ leagueId: league._id, teamId: tId });
+        } catch (invErr) {
+          console.error(`[League] Error processing invoices for enrolled team ${tId}:`, invErr.message);
+        }
+      }
+    }
+
     const standingPromises = foundIds.map((tId) =>
       Standing.findOneAndUpdate(
         { league: leagueId, team: tId },
@@ -3071,6 +3400,11 @@ exports.updateFixture = async (req, res) => {
     }
     if (awayTeam && mongoose.Types.ObjectId.isValid(awayTeam)) {
       match.awayTeam = awayTeam;
+      isScheduleModified = true;
+    }
+
+    if (req.body.sessionDate) {
+      match.sessionDate = parseDateToMidnight(req.body.sessionDate);
       isScheduleModified = true;
     }
 

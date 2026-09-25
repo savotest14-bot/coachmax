@@ -316,9 +316,120 @@ const generateTeamInvoice = async ({ userId, teamId }) => {
   return { invoice, isDuplicate: false };
 };
 
+const generateLeagueInvoice = async ({ userId, leagueId, teamId }) => {
+  if (!userId || !leagueId) {
+    return { invoice: null, isDuplicate: false, error: "userId and leagueId are required" };
+  }
+
+  const player = await User.findById(userId);
+  if (!player || !player.parentId) {
+    return { invoice: null, isDuplicate: false, error: "Player or associated parent not found" };
+  }
+
+  const League = require("../models/League");
+  const leagueDoc = await League.findById(leagueId);
+  if (!leagueDoc) {
+    return { invoice: null, isDuplicate: false, error: "League not found" };
+  }
+
+  const fee = Number(leagueDoc.fee || 0);
+  if (fee <= 0) {
+    return { invoice: null, isDuplicate: false };
+  }
+
+  // Duplicate Invoice Check
+  const existingInvoice = await Invoice.findOne({
+    parent: player.parentId,
+    players: userId,
+    league: leagueId,
+    status: { $ne: "CANCELLED" },
+  });
+
+  if (existingInvoice) {
+    return { invoice: existingInvoice, isDuplicate: true };
+  }
+
+  const invoiceNumber = await generateInvoiceNumber();
+
+  const dueDate = new Date();
+  dueDate.setDate(dueDate.getDate() + 30);
+
+  const invoice = await Invoice.create({
+    invoiceNumber,
+    parent: player.parentId,
+    players: [userId],
+    team: teamId || undefined,
+    league: leagueId,
+    items: [
+      {
+        title: leagueDoc.name,
+        description: `League fee for ${leagueDoc.name}`,
+        amount: fee,
+      },
+    ],
+    subtotal: fee,
+    discount: 0,
+    totalAmount: fee,
+    amount: fee,
+    dueDate,
+    type: "TOURNAMENT_FEE",
+    description: `Invoice for league participation: ${leagueDoc.name}`,
+    notes: "",
+    paymentStatus: "UNPAID",
+    status: "ACTIVE",
+  });
+
+  try {
+    await sendNotification({
+      recipientType: "PARENT",
+      parentId: player.parentId,
+      title: "New League Fee Invoice Issued 📄",
+      message: `An invoice #${invoiceNumber} for league "${leagueDoc.name}" ($${fee}) has been generated.`,
+      type: "INVOICE_CREATED",
+      data: {
+        parentId: String(player.parentId),
+        invoiceId: String(invoice._id),
+        invoiceNumber: String(invoiceNumber),
+        leagueId: String(leagueId),
+        teamId: String(teamId || ""),
+        totalAmount: String(fee),
+        dueDate: dueDate.toISOString(),
+      },
+    });
+  } catch (notifErr) {
+    console.error("[InvoiceService] Failed to send league invoice notification:", notifErr.message);
+  }
+
+  return { invoice, isDuplicate: false };
+};
+
+const processLeagueInvoicesForTeam = async ({ leagueId, teamId }) => {
+  const Team = require("../models/Team");
+  const team = await Team.findById(teamId);
+  if (!team || !Array.isArray(team.players)) return;
+
+  const processed = new Set();
+  for (const pItem of team.players) {
+    const playerStatus = pItem.paymentStatus || pItem.status;
+    if (playerStatus === "UNPAID") {
+      const pId = pItem.player ? pItem.player.toString() : pItem.toString();
+      if (!processed.has(pId)) {
+        processed.add(pId);
+        try {
+          await generateLeagueInvoice({ userId: pId, leagueId, teamId });
+        } catch (invErr) {
+          console.error(`[League] Failed to generate invoice for player ${pId}:`, invErr.message);
+        }
+      }
+    }
+  }
+};
+
 module.exports = {
   generateInvoiceNumber,
   generateClassInvoice,
   generateTransferInvoice,
   generateTeamInvoice,
+  generateLeagueInvoice,
+  processLeagueInvoicesForTeam,
 };
