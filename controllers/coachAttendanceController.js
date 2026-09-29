@@ -366,7 +366,7 @@ exports.getAttendanceHistory = async (req, res) => {
 exports.markTeamAttendance = async (req, res) => {
   try {
     const { teamId } = req.params;
-    const { sessionDate, records } = req.body;
+    const { sessionDate, records, leagueId } = req.body;
     const coachId = req.admin ? req.admin._id : null;
 
     if (!sessionDate || !records || !Array.isArray(records) || records.length === 0) {
@@ -379,15 +379,40 @@ exports.markTeamAttendance = async (req, res) => {
     const date = new Date(sessionDate);
     date.setUTCHours(0, 0, 0, 0);
 
-    let attendance = await Attendance.findOne({
-      team: teamId,
-      sessionDate: date,
-    });
+    const filter = { team: teamId, sessionDate: date };
+    if (leagueId) filter.league = leagueId;
+
+    let attendance = await Attendance.findOne(filter);
+    if (!attendance && leagueId) {
+      attendance = await Attendance.findOne({ team: teamId, sessionDate: date, league: null });
+      if (attendance) attendance.league = leagueId;
+    }
+
+    const notMarkedPlayerIds = records
+      .filter((r) => r.status === "NOT_MARKED")
+      .map((r) => r.player.toString());
+
+    const activeRecords = records.filter(
+      (r) => r.status && r.status !== "NOT_MARKED"
+    );
 
     if (attendance) {
-      for (const newRecord of records) {
+      if (leagueId && !attendance.league) {
+        attendance.league = leagueId;
+      }
+
+      if (notMarkedPlayerIds.length > 0) {
+        await AttendanceHistory.deleteMany({
+          $or: [
+            { attendanceId: attendance._id, playerId: { $in: notMarkedPlayerIds } },
+            { teamId, sessionDate: date, playerId: { $in: notMarkedPlayerIds }, ...(leagueId ? { leagueId } : {}) },
+          ],
+        });
+      }
+
+      for (const newRecord of activeRecords) {
         const existingRecord = attendance.records.find(
-          (r) => r.player.toString() === newRecord.player
+          (r) => r.player.toString() === newRecord.player.toString()
         );
 
         const previousStatus = existingRecord ? existingRecord.status : "NONE";
@@ -399,6 +424,7 @@ exports.markTeamAttendance = async (req, res) => {
           await AttendanceHistory.create({
             attendanceId: attendance._id,
             teamId,
+            leagueId: leagueId || attendance.league || null,
             sessionDate: date,
             playerId: newRecord.player,
             previousStatus,
@@ -411,7 +437,7 @@ exports.markTeamAttendance = async (req, res) => {
         }
       }
 
-      attendance.records = records.map((r) => ({
+      attendance.records = activeRecords.map((r) => ({
         player: r.player,
         status: r.status || "ABSENT",
         comment: r.comment || "",
@@ -421,6 +447,17 @@ exports.markTeamAttendance = async (req, res) => {
         markedByParent: false,
         lateArrival: r.status === "LATE",
       }));
+
+      if (attendance.records.length === 0) {
+        await Attendance.deleteOne({ _id: attendance._id });
+        await AttendanceHistory.deleteMany({ attendanceId: attendance._id });
+
+        return res.json({
+          success: true,
+          message: "Team attendance deleted as all records are NOT_MARKED",
+          data: null,
+        });
+      }
 
       attendance.markedBy = coachId;
       await attendance.save();
@@ -433,7 +470,7 @@ exports.markTeamAttendance = async (req, res) => {
           entityType: "Attendance",
           entityId: attendance._id,
           ipAddress: req.ip || "",
-          deviceInfo: req.headers["user-agent"] || "",
+          deviceInfo: req.headers ? (req.headers["user-agent"] || "") : "",
           description: `Team attendance updated for team ${teamId} on ${date.toISOString().split("T")[0]}`,
         });
       }
@@ -445,26 +482,63 @@ exports.markTeamAttendance = async (req, res) => {
       });
     }
 
-    attendance = await Attendance.create({
-      team: teamId,
-      sessionDate: date,
-      records: records.map((r) => ({
-        player: r.player,
-        status: r.status || "ABSENT",
-        comment: r.comment || "",
-        remarks: r.remarks || "",
-        reason: r.reason || "",
-        attendanceType: r.attendanceType || "REGULAR",
-        markedByParent: false,
-        lateArrival: r.status === "LATE",
-      })),
-      markedBy: coachId,
-    });
+    if (activeRecords.length === 0) {
+      return res.json({
+        success: true,
+        message: "No attendance records to create (all NOT_MARKED)",
+        data: null,
+      });
+    }
 
-    for (const record of records) {
+    try {
+      attendance = await Attendance.create({
+        team: teamId,
+        league: leagueId || null,
+        sessionDate: date,
+        records: activeRecords.map((r) => ({
+          player: r.player,
+          status: r.status || "ABSENT",
+          comment: r.comment || "",
+          remarks: r.remarks || "",
+          reason: r.reason || "",
+          attendanceType: r.attendanceType || "REGULAR",
+          markedByParent: false,
+          lateArrival: r.status === "LATE",
+        })),
+        markedBy: coachId,
+      });
+    } catch (createErr) {
+      if (createErr.code === 11000) {
+        attendance = (await Attendance.findOne(filter)) || (await Attendance.findOne({ team: teamId, sessionDate: date }));
+        if (attendance) {
+          if (leagueId && !attendance.league) attendance.league = leagueId;
+          attendance.records = activeRecords.map((r) => ({
+            player: r.player,
+            status: r.status || "ABSENT",
+            comment: r.comment || "",
+            remarks: r.remarks || "",
+            reason: r.reason || "",
+            attendanceType: r.attendanceType || "REGULAR",
+            markedByParent: false,
+            lateArrival: r.status === "LATE",
+          }));
+          attendance.markedBy = coachId;
+          await attendance.save();
+          return res.json({
+            success: true,
+            message: "Team attendance updated successfully",
+            data: attendance,
+          });
+        }
+      }
+      throw createErr;
+    }
+
+    for (const record of activeRecords) {
       await AttendanceHistory.create({
         attendanceId: attendance._id,
         teamId,
+        leagueId: leagueId || null,
         sessionDate: date,
         playerId: record.player,
         previousStatus: "NONE",
@@ -483,7 +557,7 @@ exports.markTeamAttendance = async (req, res) => {
         entityType: "Attendance",
         entityId: attendance._id,
         ipAddress: req.ip || "",
-        deviceInfo: req.headers["user-agent"] || "",
+        deviceInfo: req.headers ? (req.headers["user-agent"] || "") : "",
         description: `Team attendance marked for team ${teamId} on ${date.toISOString().split("T")[0]}`,
       });
     }
@@ -495,10 +569,39 @@ exports.markTeamAttendance = async (req, res) => {
     });
   } catch (err) {
     if (err.code === 11000) {
-      return res.status(400).json({
-        success: false,
-        message: "Attendance already exists for this team session",
-      });
+      try {
+        const date = new Date(req.body.sessionDate);
+        date.setUTCHours(0, 0, 0, 0);
+        const { leagueId, records = [] } = req.body;
+        const filter = { team: req.params.teamId, sessionDate: date };
+        if (leagueId) filter.league = leagueId;
+
+        const existing = (await Attendance.findOne(filter)) || (await Attendance.findOne({ team: req.params.teamId, sessionDate: date }));
+        if (existing) {
+          if (leagueId && !existing.league) existing.league = leagueId;
+          const activeRecords = records.filter((r) => r.status && r.status !== "NOT_MARKED");
+          existing.records = activeRecords.map((r) => ({
+            player: r.player,
+            status: r.status || "ABSENT",
+            comment: r.comment || "",
+            remarks: r.remarks || "",
+            reason: r.reason || "",
+            attendanceType: r.attendanceType || "REGULAR",
+            markedByParent: false,
+            lateArrival: r.status === "LATE",
+          }));
+          existing.markedBy = req.admin ? req.admin._id : null;
+          await existing.save();
+
+          return res.json({
+            success: true,
+            message: "Team attendance updated successfully",
+            data: existing,
+          });
+        }
+      } catch (retryErr) {
+        return res.status(500).json({ success: false, message: retryErr.message });
+      }
     }
     res.status(500).json({ success: false, message: err.message });
   }
@@ -507,7 +610,7 @@ exports.markTeamAttendance = async (req, res) => {
 exports.markSingleTeamAttendance = async (req, res) => {
   try {
     const { teamId } = req.params;
-    const { sessionDate, playerId, status, comment } = req.body;
+    const { sessionDate, playerId, status, comment, leagueId } = req.body;
     const coachId = req.admin ? req.admin._id : null;
 
     if (!sessionDate || !playerId || !status) {
@@ -517,7 +620,7 @@ exports.markSingleTeamAttendance = async (req, res) => {
       });
     }
 
-    const validStatuses = ["PRESENT", "ABSENT", "LATE", "TRIAL"];
+    const validStatuses = ["PRESENT", "ABSENT", "LATE", "TRIAL", "NOT_MARKED"];
     if (!validStatuses.includes(status)) {
       return res.status(400).json({
         success: false,
@@ -528,18 +631,83 @@ exports.markSingleTeamAttendance = async (req, res) => {
     const date = new Date(sessionDate);
     date.setUTCHours(0, 0, 0, 0);
 
-    let attendance = await Attendance.findOne({
-      team: teamId,
-      sessionDate: date,
-    });
+    const filter = { team: teamId, sessionDate: date };
+    if (leagueId) filter.league = leagueId;
 
-    if (!attendance) {
-      attendance = await Attendance.create({
-        team: teamId,
-        sessionDate: date,
-        records: [],
-        markedBy: coachId,
+    let attendance = await Attendance.findOne(filter);
+    if (!attendance && leagueId) {
+      attendance = await Attendance.findOne({ team: teamId, sessionDate: date, league: null });
+      if (attendance) attendance.league = leagueId;
+    }
+
+    // If status is NOT_MARKED
+    if (status === "NOT_MARKED") {
+      if (!attendance) {
+        return res.json({
+          success: true,
+          message: "Attendance marked as NOT_MARKED (no record existed)",
+          data: { teamId, sessionDate: date, playerId, status: "NOT_MARKED", leagueId: leagueId || null },
+        });
+      }
+
+      // Remove the player's record from attendance.records
+      attendance.records = (attendance.records || []).filter(
+        (r) => r.player.toString() !== playerId.toString()
+      );
+
+      // Delete attendance history records for this player in this session
+      await AttendanceHistory.deleteMany({
+        $or: [
+          { attendanceId: attendance._id, playerId },
+          { teamId, sessionDate: date, playerId, ...(leagueId ? { leagueId } : {}) },
+        ],
       });
+
+      // If no records remain, delete the entire attendance document and any remaining history
+      if (attendance.records.length === 0) {
+        await Attendance.deleteOne({ _id: attendance._id });
+        await AttendanceHistory.deleteMany({ attendanceId: attendance._id });
+
+        return res.json({
+          success: true,
+          message: "Attendance record removed and document deleted as no records remain",
+          data: { teamId, sessionDate: date, playerId, status: "NOT_MARKED", leagueId: attendance.league, deleted: true },
+        });
+      }
+
+      // If other records remain, save the document
+      attendance.markedBy = coachId;
+      await attendance.save();
+
+      return res.json({
+        success: true,
+        message: "Player attendance unmarked successfully",
+        data: { teamId, sessionDate: date, playerId, status: "NOT_MARKED", leagueId: attendance.league },
+      });
+    }
+
+    // Normal statuses: PRESENT, ABSENT, LATE, TRIAL
+    if (!attendance) {
+      try {
+        attendance = await Attendance.create({
+          team: teamId,
+          league: leagueId || null,
+          sessionDate: date,
+          records: [],
+          markedBy: coachId,
+        });
+      } catch (createErr) {
+        if (createErr.code === 11000) {
+          attendance = (await Attendance.findOne(filter)) || (await Attendance.findOne({ team: teamId, sessionDate: date }));
+          if (attendance && leagueId && !attendance.league) {
+            attendance.league = leagueId;
+          }
+        } else {
+          throw createErr;
+        }
+      }
+    } else if (leagueId && !attendance.league) {
+      attendance.league = leagueId;
     }
 
     const existingRecord = attendance.records.find(
@@ -553,6 +721,7 @@ exports.markSingleTeamAttendance = async (req, res) => {
       await AttendanceHistory.create({
         attendanceId: attendance._id,
         teamId,
+        leagueId: leagueId || attendance.league || null,
         sessionDate: date,
         playerId,
         previousStatus,
@@ -582,9 +751,46 @@ exports.markSingleTeamAttendance = async (req, res) => {
     res.json({
       success: true,
       message: "Team attendance updated successfully",
-      data: { teamId, sessionDate: date, playerId, status, comment: comment || "" },
+      data: { teamId, sessionDate: date, playerId, status, comment: comment || "", leagueId: attendance.league },
     });
   } catch (err) {
+    if (err.code === 11000) {
+      try {
+        const date = new Date(req.body.sessionDate);
+        date.setUTCHours(0, 0, 0, 0);
+        const { leagueId, playerId, status, comment } = req.body;
+        const filter = { team: req.params.teamId, sessionDate: date };
+        if (leagueId) filter.league = leagueId;
+
+        const existing = (await Attendance.findOne(filter)) || (await Attendance.findOne({ team: req.params.teamId, sessionDate: date }));
+        if (existing) {
+          if (leagueId && !existing.league) existing.league = leagueId;
+          const rec = existing.records.find((r) => r.player.toString() === playerId.toString());
+          if (rec) {
+            rec.status = status;
+            rec.comment = comment || "";
+            rec.lateArrival = status === "LATE";
+          } else {
+            existing.records.push({
+              player: playerId,
+              status,
+              comment: comment || "",
+              lateArrival: status === "LATE",
+            });
+          }
+          existing.markedBy = req.admin ? req.admin._id : null;
+          await existing.save();
+
+          return res.json({
+            success: true,
+            message: "Team attendance updated successfully",
+            data: { teamId: req.params.teamId, sessionDate: date, playerId, status, comment: comment || "", leagueId: existing.league },
+          });
+        }
+      } catch (retryErr) {
+        return res.status(500).json({ success: false, message: retryErr.message });
+      }
+    }
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -592,20 +798,24 @@ exports.markSingleTeamAttendance = async (req, res) => {
 exports.getAttendanceByTeam = async (req, res) => {
   try {
     const { teamId } = req.params;
-    let { page = 1, limit = 50 } = req.query;
+    let { page = 1, limit = 50, leagueId } = req.query;
 
     page = Number(page);
     limit = Number(limit);
 
-    const total = await Attendance.countDocuments({ team: teamId });
+    const filter = { team: teamId };
+    if (leagueId) filter.league = leagueId;
 
-    const data = await Attendance.find({ team: teamId })
-      .select("sessionDate records markedBy createdAt updatedAt")
+    const total = await Attendance.countDocuments(filter);
+
+    const data = await Attendance.find(filter)
+      .select("sessionDate records markedBy league createdAt updatedAt")
       .populate({
         path: "records.player",
         select: "fullName profileImage isMedicalCondition",
       })
       .populate("markedBy", "name")
+      .populate("league", "name season")
       .sort({ sessionDate: -1 })
       .skip((page - 1) * limit)
       .limit(limit);
@@ -625,7 +835,7 @@ exports.getAttendanceByTeam = async (req, res) => {
 exports.getAttendanceByTeamDate = async (req, res) => {
   try {
     const { teamId } = req.params;
-    const { date } = req.query;
+    const { date, leagueId } = req.query;
 
     if (!date) {
       return res.status(400).json({ success: false, message: "date query parameter is required" });
@@ -634,13 +844,17 @@ exports.getAttendanceByTeamDate = async (req, res) => {
     const sessionDate = new Date(date);
     sessionDate.setUTCHours(0, 0, 0, 0);
 
-    const attendance = await Attendance.findOne({
+    const query = {
       team: teamId,
       sessionDate,
-    }).populate({
+    };
+    if (leagueId) query.league = leagueId;
+
+    const attendance = await Attendance.findOne(query).populate({
       path: "records.player",
       select: "fullName profileImage email phone isMedicalCondition medicalConditionDetails",
-    }).populate("markedBy", "name");
+    }).populate("markedBy", "name")
+      .populate("league", "name season");
 
     if (!attendance) {
       return res.json({
@@ -662,7 +876,7 @@ exports.getAttendanceByTeamDate = async (req, res) => {
 exports.getTeamAttendanceHistory = async (req, res) => {
   try {
     const { teamId } = req.params;
-    let { page = 1, limit = 50, playerId, sessionDate } = req.query;
+    let { page = 1, limit = 50, playerId, sessionDate, leagueId } = req.query;
 
     page = Number(page);
     limit = Number(limit);
@@ -670,6 +884,7 @@ exports.getTeamAttendanceHistory = async (req, res) => {
     const query = { teamId };
 
     if (playerId) query.playerId = playerId;
+    if (leagueId) query.leagueId = leagueId;
     if (sessionDate) {
       const date = new Date(sessionDate);
       date.setUTCHours(0, 0, 0, 0);
@@ -681,6 +896,7 @@ exports.getTeamAttendanceHistory = async (req, res) => {
     const history = await AttendanceHistory.find(query)
       .populate("playerId", "fullName")
       .populate("modifiedBy", "name role")
+      .populate("leagueId", "name season")
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit);

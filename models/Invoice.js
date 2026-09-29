@@ -60,6 +60,10 @@ const invoiceSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Team",
     },
+    league: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "League",
+    },
     dueDate: {
       type: Date,
       required: true,

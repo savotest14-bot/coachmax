@@ -169,7 +169,7 @@ router.get("/leagues/:leagueId/fixtures", getFixtures);
 // Bank Details & Payment Settings
 router.get("/bank-details", getBankDetails);
 router.get("/payment-settings", auth, getPaymentSettings);
- 
+
 // Payments & Invoicing (Parent)
 router.get("/invoices", auth, getParentInvoices);
 router.get("/parent/invoices", auth, getParentInvoices);

@@ -42,26 +42,12 @@ const teamSchema = new mongoose.Schema(
           enum: ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "EXTRA", "SUBSTITUTE", "TBC", "HANDSHAKE"],
           default: "UNPAID",
         },
-        statistics: {
-          appearances: { type: Number, default: 0 },
-          goals: { type: Number, default: 0 },
-          assists: { type: Number, default: 0 },
-          cleanSheets: { type: Number, default: 0 },
-          yellowCards: { type: Number, default: 0 },
-          redCards: { type: Number, default: 0 },
-          minutesPlayed: { type: Number, default: 0 },
-        },
       },
     ],
     teamType: {
       type: String,
       enum: ["INTERNAL", "EXTERNAL"],
       default: "INTERNAL",
-    },
-    teamFee: {
-      type: Number,
-      default: 0,
-      min: 0,
     },
     term: {
       type: mongoose.Schema.Types.ObjectId,
@@ -86,13 +72,69 @@ const teamSchema = new mongoose.Schema(
         endTime: { type: String },
       },
     ],
-    round: {
-      type: Number,
-      default: null,
-    },
-    sessionDates: [
+    // Multiple leagues & per-league attendance sessions
+    leagues: [
       {
-        type: Date,
+        league: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "League",
+          required: true,
+        },
+        teamFee: {
+          type: Number,
+          default: 0,
+          min: 0,
+        },
+        round: {
+          type: Number,
+          default: null,
+        },
+        sessionDates: [
+          {
+            type: Date,
+          },
+        ],
+        group: {
+          type: String,
+          default: "",
+        },
+        status: {
+          type: String,
+          enum: ["ACTIVE", "COMPLETED", "WITHDRAWN"],
+          default: "ACTIVE",
+        },
+        enrolledAt: {
+          type: Date,
+          default: Date.now,
+        },
+        players: [
+          {
+            player: {
+              type: mongoose.Schema.Types.ObjectId,
+              ref: "User",
+            },
+            paymentStatus: {
+              type: String,
+              enum: ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "EXTRA", "SUBSTITUTE", "TBC", "HANDSHAKE"],
+              default: "UNPAID",
+            },
+            status: {
+              type: String,
+              enum: ["ACTIVE", "INACTIVE", "SUSPENDED"],
+              default: "ACTIVE",
+            },
+          },
+        ],
+        statistics: {
+          played: { type: Number, default: 0 },
+          won: { type: Number, default: 0 },
+          drawn: { type: Number, default: 0 },
+          lost: { type: Number, default: 0 },
+          goalsFor: { type: Number, default: 0 },
+          goalsAgainst: { type: Number, default: 0 },
+          goalDifference: { type: Number, default: 0 },
+          points: { type: Number, default: 0 },
+        },
       },
     ],
     temporaryPlayers: [teamTemporaryPlayerSchema],
@@ -110,4 +152,7 @@ const teamSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+teamSchema.index({ "leagues.league": 1 });
+
 module.exports = mongoose.model("Team", teamSchema);
+

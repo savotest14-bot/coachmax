@@ -12,6 +12,11 @@ const attendanceSchema = new mongoose.Schema(
       ref: "Team",
     },
 
+    league: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "League",
+    },
+
     sessionDate: {
       type: Date,
       required: true,
@@ -31,7 +36,7 @@ const attendanceSchema = new mongoose.Schema(
         },
         status: {
           type: String,
-          enum: ["PRESENT", "ABSENT", "LATE", "TRIAL"],
+          enum: ["PRESENT", "ABSENT", "LATE", "NOT_MARKED"],
           default: "ABSENT",
         },
         comment: {
@@ -70,9 +75,20 @@ const attendanceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-attendanceSchema.index({ class: 1, sessionDate: 1 }, { unique: true, sparse: true });
-attendanceSchema.index({ team: 1, sessionDate: 1 }, { unique: true, sparse: true });
-
+attendanceSchema.index(
+  { class: 1, sessionDate: 1 },
+  { unique: true, partialFilterExpression: { class: { $type: "objectId" } } }
+);
+attendanceSchema.index(
+  { team: 1, league: 1, sessionDate: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      team: { $type: "objectId" },
+      league: { $type: "objectId" },
+    },
+  }
+);
 attendanceSchema.index({ trainingSessionId: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model("Attendance", attendanceSchema);

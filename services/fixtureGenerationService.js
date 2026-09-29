@@ -233,12 +233,19 @@ function distributeTeamsIntoGroups(teamIds, groupCount, randomize = false) {
 }
 
 /**
- * Standard circle / Berger algorithm to generate round-robin pairings for a list of teams.
- * Supports even and odd team counts (virtual BYE).
- * For multiple cycles (numberOfRounds >= 2), inverts home and away in even cycles (cycle 2, 4...).
- * Supports optional schedule randomization while strictly preserving tournament validity.
+ * Generates round-robin rounds and rotating pairings for a given list of team IDs.
+ * Supports even and odd team counts (using a rotating virtual BYE).
+ * Generates exactly numberOfRounds rounds.
+ * When numberOfRounds exceeds the unique rounds in a single cycle (N-1 for even, N for odd),
+ * it cycles through the schedule, inverting home/away in odd cycles.
+ *
+ * @param {Array<string|mongoose.Types.ObjectId>} teamIds - Array of team IDs
+ * @param {number} numberOfRounds - Exact number of rounds to generate
+ * @param {string} groupName - Optional group name label (e.g. "Group A")
+ * @param {boolean} randomize - Whether to randomize team order, initial home/away, and match order
+ * @returns {{ rounds: Array<{ roundNumber: number, group: string, matches: Array }>, byes: Array<{ round: number, team: any, group: string }>, roundsPerCycle: number, totalMatches: number }}
  */
-function generateRoundRobinPairings(teamIds, numberOfRounds = 1, groupName = "", randomize = false) {
+function generateRoundRobinRounds(teamIds, numberOfRounds = 1, groupName = "", randomize = false) {
   const n = teamIds.length;
   if (n < 2) {
     return { rounds: [], byes: [], roundsPerCycle: 0, totalMatches: 0 };
@@ -328,52 +335,65 @@ function generateRoundRobinPairings(teamIds, numberOfRounds = 1, groupName = "",
     rotating = [rotating[rotating.length - 1], ...rotating.slice(0, rotating.length - 1)];
   }
 
-  // 2. Expand across numberOfRounds cycles
-  // In return cycles (odd cycle index, i.e. cycle 1, 3...), invert home and away
-  for (let cycle = 0; cycle < numberOfRounds; cycle++) {
-    for (let r = 0; r < roundsPerCycle; r++) {
-      const overallRoundNumber = cycle * roundsPerCycle + r + 1;
-      const baseMatches = baseRounds[r];
-      const matchesInThisRound = baseMatches.map((m) => {
-        if (cycle % 2 === 1) {
-          return {
-            round: overallRoundNumber,
-            homeTeam: m.awayTeam,
-            awayTeam: m.homeTeam,
-            group: m.group,
-            cycle: cycle + 1,
-          };
-        } else {
-          return {
-            round: overallRoundNumber,
-            homeTeam: m.homeTeam,
-            awayTeam: m.awayTeam,
-            group: m.group,
-            cycle: cycle + 1,
-          };
-        }
-      });
+  // 2. Generate exactly numberOfRounds rounds
+  const totalRoundsToGenerate = Math.max(1, parseInt(numberOfRounds, 10) || 1);
 
-      rounds.push({
-        roundNumber: overallRoundNumber,
-        group: groupName,
-        matches: matchesInThisRound,
-      });
+  for (let roundIdx = 0; roundIdx < totalRoundsToGenerate; roundIdx++) {
+    const cycle = Math.floor(roundIdx / roundsPerCycle);
+    const r = roundIdx % roundsPerCycle;
+    const overallRoundNumber = roundIdx + 1;
+    const baseMatches = baseRounds[r];
 
-      totalMatches += matchesInThisRound.length;
-
-      const byeForThisRound = baseByes.find((b) => b.roundInCycle === r + 1);
-      if (byeForThisRound) {
-        byes.push({
+    const matchesInThisRound = baseMatches.map((m) => {
+      if (cycle % 2 === 1) {
+        return {
           round: overallRoundNumber,
-          team: byeForThisRound.team,
-          group: groupName,
-        });
+          homeTeam: m.awayTeam,
+          awayTeam: m.homeTeam,
+          group: m.group,
+          cycle: cycle + 1,
+        };
+      } else {
+        return {
+          round: overallRoundNumber,
+          homeTeam: m.homeTeam,
+          awayTeam: m.awayTeam,
+          group: m.group,
+          cycle: cycle + 1,
+        };
       }
+    });
+
+    rounds.push({
+      roundNumber: overallRoundNumber,
+      group: groupName,
+      matches: matchesInThisRound,
+    });
+
+    totalMatches += matchesInThisRound.length;
+
+    const byeForThisRound = baseByes.find((b) => b.roundInCycle === r + 1);
+    if (byeForThisRound) {
+      byes.push({
+        round: overallRoundNumber,
+        team: byeForThisRound.team,
+        group: groupName,
+      });
     }
   }
 
   return { rounds, byes, roundsPerCycle, totalMatches };
+}
+
+/**
+ * Standard circle / Berger algorithm to generate round-robin pairings for a list of teams.
+ * Supports even and odd team counts (virtual BYE).
+ * Generates exactly numberOfRounds rounds using proper circle rotation.
+ * Inverts home and away across repeating cycles when numberOfRounds exceeds a single cycle.
+ * Supports optional schedule randomization while strictly preserving tournament validity.
+ */
+function generateRoundRobinPairings(teamIds, numberOfRounds = 1, groupName = "", randomize = false) {
+  return generateRoundRobinRounds(teamIds, numberOfRounds, groupName, randomize);
 }
 
 /**
@@ -426,7 +446,7 @@ function scheduleFixturesAcrossSlotsAndFields(params) {
 
     const roundExplicitDate =
       Array.isArray(sessionDates) && sessionDates.length >= r && sessionDates[r - 1]
-        ? new Date(sessionDates[r - 1])
+        ? parseDateToMidnight(sessionDates[r - 1]) || new Date(sessionDates[r - 1])
         : null;
 
     if (roundExplicitDate) {
@@ -958,6 +978,7 @@ module.exports = {
   validateTournamentConfig,
   distributeTeamsIntoGroups,
   generateRoundRobinPairings,
+  generateRoundRobinRounds,
   scheduleFixturesAcrossSlotsAndFields,
   generateAndSaveLeagueFixtures,
   reconcileAndSaveLeagueFixtures,

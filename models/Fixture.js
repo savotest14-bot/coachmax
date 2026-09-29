@@ -57,6 +57,30 @@ const fixtureSchema = new mongoose.Schema(
         default: 0,
       },
     },
+    goals: [
+      {
+        team: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Team",
+          required: true,
+        },
+        scorer: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          required: true,
+        },
+        assist: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          default: null,
+        },
+        minute: {
+          type: Number,
+          required: true,
+          min: 0,
+        },
+      },
+    ],
     events: [
       {
         type: mongoose.Schema.Types.ObjectId,

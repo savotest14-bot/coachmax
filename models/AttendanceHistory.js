@@ -15,6 +15,10 @@ const attendanceHistorySchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Team",
     },
+    leagueId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "League",
+    },
     sessionDate: {
       type: Date,
       required: true,
@@ -58,6 +62,8 @@ const attendanceHistorySchema = new mongoose.Schema(
 attendanceHistorySchema.index({ attendanceId: 1, playerId: 1 });
 attendanceHistorySchema.index({ classId: 1, sessionDate: 1 });
 attendanceHistorySchema.index({ teamId: 1, sessionDate: 1 });
+attendanceHistorySchema.index({ teamId: 1, leagueId: 1, sessionDate: 1 });
+attendanceHistorySchema.index({ leagueId: 1 });
 attendanceHistorySchema.index({ modifiedBy: 1 });
 
 module.exports = mongoose.model("AttendanceHistory", attendanceHistorySchema);

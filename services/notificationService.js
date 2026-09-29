@@ -20,12 +20,19 @@ try {
     isFirebaseInitialized = true;
     console.log(" Firebase Admin initialized from environment JSON");
   } else if (fs.existsSync(serviceAccountPath)) {
-    const serviceAccount = require(serviceAccountPath);
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
-    isFirebaseInitialized = true;
-    console.log(" Firebase Admin initialized from serviceAccountKey.json");
+    const rawContent = fs.readFileSync(serviceAccountPath, "utf8").trim();
+    if (rawContent.length > 0) {
+      const serviceAccount = JSON.parse(rawContent);
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+      });
+      isFirebaseInitialized = true;
+      console.log(" Firebase Admin initialized from serviceAccountKey.json");
+    } else {
+      console.warn(
+        " Push Notification Warning: serviceAccountKey.json is empty. FCM Push Notifications will be skipped."
+      );
+    }
   } else {
     console.warn(
       " Push Notification Warning: No Firebase Service Account key found. DB Notifications will be created, but FCM Push Notifications will be skipped until credentials are provided."

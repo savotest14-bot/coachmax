@@ -102,6 +102,7 @@ const {
   updatePlayerStatistics,
   getAvailablePlayers,
   getTeamById,
+  getTeamPlayers,
   unassignPlayerFromTeam,
   updateTeam,
   deleteTeam,
@@ -111,6 +112,7 @@ const {
   deleteTeamTemporaryPlayer,
   getAdminLeagueData,
   updateLeague,
+  deleteLeague,
   addTeamToLeague,
   removeTeamFromLeague,
   updateFixture,
@@ -314,6 +316,7 @@ router.get(
 );
 router.get("/leagues/:leagueId", auth, isAdmin, getAdminLeagueData);
 router.put("/leagues/:leagueId", auth, isAdmin, uploads.single("leagueLogo"), updateLeague);
+router.delete("/leagues/:leagueId", auth, isAdmin, deleteLeague);
 router.post("/leagues/:leagueId/teams", auth, isAdmin, addTeamToLeague);
 router.delete("/leagues/:leagueId/teams/:teamId", auth, isAdmin, removeTeamFromLeague);
 router.post("/leagues/:leagueId/recalculate-ladder", auth, isAdmin, recalculateLadder);
@@ -326,6 +329,8 @@ router.delete("/leagues/:leagueId/fixtures/:fixtureId", auth, isAdmin, deleteFix
 router.post("/teams", auth, isAdmin, uploads.single("teamLogo"), createTeam);
 router.get("/getAllTeams", auth, isAdmin, getAllTeams)
 router.get("/teams/:teamId", auth, isAdmin, getTeamById);
+router.get("/getTeamPlayers/:teamId", auth, isAdmin, getTeamPlayers);
+
 router.put("/teams/:teamId", auth, isAdmin, uploads.single("teamLogo"), updateTeam);
 router.put("/teams/:teamId/statistics", auth, isAdmin, updateTeamStatistics);
 router.get("/teams/:teamId/players/:playerId/statistics", auth, isAdmin, getTeamPlayerStatistics);

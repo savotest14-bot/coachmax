@@ -854,13 +854,19 @@ const DAY_MAP_USER = {
 const generateClassSessions = (term, classObj) => {
   const sessions = [];
   if (classObj && classObj.sessionDates && Array.isArray(classObj.sessionDates) && classObj.sessionDates.length > 0) {
-    return [...classObj.sessionDates]
+    let sorted = [...classObj.sessionDates]
       .map((d) => {
         const date = new Date(d);
         date.setUTCHours(0, 0, 0, 0);
         return date;
       })
       .sort((a, b) => a.getTime() - b.getTime());
+
+    const roundLimit = Number(classObj.round || classObj.rounds || classObj.numberOfRounds);
+    if (roundLimit && roundLimit > 0) {
+      sorted = sorted.slice(0, roundLimit);
+    }
+    return sorted;
   }
   if (!term || !term.startDate || !term.endDate || !classObj) return sessions;
 
@@ -884,6 +890,11 @@ const generateClassSessions = (term, classObj) => {
     const targetDay = DAY_MAP_USER[classObj.dayOfWeek.toUpperCase()];
     if (targetDay === undefined) return sessions;
     sessions.push(..._generateDatesForDayUser(start, end, targetDay));
+  }
+
+  const roundLimit = Number(classObj?.round || classObj?.rounds || classObj?.numberOfRounds);
+  if (roundLimit && roundLimit > 0) {
+    return sessions.slice(0, roundLimit);
   }
 
   return sessions;
@@ -1358,10 +1369,10 @@ exports.getMyTeams = async (req, res) => {
             isHome,
             opponent: opponent
               ? {
-                  _id: opponent._id,
-                  teamName: opponent.teamName,
-                  logo: opponent.logo || "",
-                }
+                _id: opponent._id,
+                teamName: opponent.teamName,
+                logo: opponent.logo || "",
+              }
               : null,
           };
         });
@@ -1376,9 +1387,17 @@ exports.getMyTeams = async (req, res) => {
       const league = fixtureWithLeague ? fixtureWithLeague.league : null;
 
       // Generate sessions from explicit round dates or term & schedule
-      const hasExplicitSessions = team.sessionDates && team.sessionDates.length > 0;
+      const teamLeagueSessions = (team.leagues && team.leagues.length > 0)
+        ? (league
+            ? (team.leagues.find((l) => l.league && l.league.toString() === (league._id || league).toString())?.sessionDates || [])
+            : team.leagues.flatMap((l) => l.sessionDates || []))
+        : [];
+      const explicitDates = (team.sessionDates && team.sessionDates.length > 0)
+        ? team.sessionDates
+        : teamLeagueSessions;
+      const hasExplicitSessions = explicitDates && explicitDates.length > 0;
       const generatedSessions = hasExplicitSessions
-        ? team.sessionDates.map((d) => new Date(d))
+        ? explicitDates.map((d) => new Date(d))
         : (team.term ? generateClassSessions(team.term, team) : []);
 
       // Also collect any dates from existing attendance records so they aren't missed (if not explicit)
@@ -1692,9 +1711,15 @@ exports.getMyAttendanceByTeam = async (req, res) => {
       };
     });
 
-    const hasExplicitSessions = team.sessionDates && team.sessionDates.length > 0;
+    const teamLeagueSessions = (team.leagues && team.leagues.length > 0)
+      ? team.leagues.flatMap((l) => l.sessionDates || [])
+      : [];
+    const explicitDates = (team.sessionDates && team.sessionDates.length > 0)
+      ? team.sessionDates
+      : teamLeagueSessions;
+    const hasExplicitSessions = explicitDates && explicitDates.length > 0;
     const generatedSessions = hasExplicitSessions
-      ? team.sessionDates.map((d) => new Date(d))
+      ? explicitDates.map((d) => new Date(d))
       : (team.term ? generateClassSessions(team.term, team) : []);
     const attendanceData = await Attendance.find({ team: teamId }).select("sessionDate records");
 
@@ -1763,10 +1788,10 @@ exports.getMyAttendanceByTeam = async (req, res) => {
         isHome,
         opponent: opponent
           ? {
-              _id: opponent._id,
-              teamName: opponent.teamName,
-              logo: opponent.logo || "",
-            }
+            _id: opponent._id,
+            teamName: opponent.teamName,
+            logo: opponent.logo || "",
+          }
           : null,
       };
     });
@@ -2037,10 +2062,10 @@ exports.getPlayerProfile = async (req, res) => {
             isHome,
             opponent: opponent
               ? {
-                  _id: opponent._id,
-                  teamName: opponent.teamName,
-                  logo: opponent.logo || "",
-                }
+                _id: opponent._id,
+                teamName: opponent.teamName,
+                logo: opponent.logo || "",
+              }
               : null,
           };
         });

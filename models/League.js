@@ -36,6 +36,10 @@ const leagueSchema = new mongoose.Schema(
       enum: ["INTERNATIONAL", "NATIONAL", "STATE", "LOCAL", "OTHERS"],
       default: "LOCAL",
     },
+    term: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Term",
+    },
     registrationStartDate: {
       type: Date,
       default: null,

@@ -30,7 +30,7 @@ const CoachNote = require("../models/CoachNote");
 const TrainingSession = require("../models/TrainingSession");
 const Message = require("../models/Message");
 const AuditLog = require("../models/AuditLog");
-const { generateClassInvoice, generateTransferInvoice, generateTeamInvoice } = require("../services/invoiceService");
+const { generateClassInvoice, generateTransferInvoice, generateTeamInvoice, generateLeagueInvoice } = require("../services/invoiceService");
 
 exports.adminLogin = async (req, res) => {
   try {
@@ -200,6 +200,10 @@ exports.updatePaymentStatus = async (req, res) => {
     const userId = req.params.userId;
     const { paymentStatus, classId, teamId } = req.body;
 
+    const leagueId =
+      req.body?.leagueId ||
+      req.query?.leagueId;
+
     if (!userId) {
       return res.status(400).json({
         success: false,
@@ -207,7 +211,16 @@ exports.updatePaymentStatus = async (req, res) => {
       });
     }
 
-    const validStatus = ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "EXTRA", "SUBSTITUTE", "TBC", "HANDSHAKE"];
+    const validStatus = [
+      "TRIAL",
+      "UNPAID",
+      "PAID",
+      "OVER_DUE",
+      "EXTRA",
+      "SUBSTITUTE",
+      "TBC",
+      "HANDSHAKE",
+    ];
 
     if (!paymentStatus || !validStatus.includes(paymentStatus)) {
       return res.status(400).json({
@@ -225,72 +238,338 @@ exports.updatePaymentStatus = async (req, res) => {
       });
     }
 
+    /*
+    |--------------------------------------------------------------------------
+    | TEAM + LEAGUE PAYMENT STATUS
+    |--------------------------------------------------------------------------
+    */
+
+    let leagueTeamFee = 0;
+
     if (teamId) {
       const TeamModel = require("../models/Team");
+
       const teamDoc = await TeamModel.findById(teamId);
-      if (teamDoc && teamDoc.players) {
-        const pEntry = teamDoc.players.find((item) => {
-          const itemPid = item.player ? item.player.toString() : item.toString();
-          return itemPid === userId.toString();
+
+      if (!teamDoc) {
+        return res.status(404).json({
+          success: false,
+          message: "Team not found",
         });
+      }
+
+      /*
+      |--------------------------------------------------------------------------
+      | TEAM + LEAGUE
+      |--------------------------------------------------------------------------
+      | When both teamId and leagueId are supplied:
+      |
+      | 1. Find the league inside team.leagues
+      | 2. Update player paymentStatus there
+      | 3. Get invoice amount from team.leagues[].teamFee
+      | 4. Never use League.fee for the invoice amount
+      |--------------------------------------------------------------------------
+      */
+
+      if (leagueId) {
+        if (!mongoose.Types.ObjectId.isValid(leagueId)) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid League ID format",
+          });
+        }
+
+        if (!Array.isArray(teamDoc.leagues)) {
+          teamDoc.leagues = [];
+        }
+
+        let leagueEntry = teamDoc.leagues.find(
+          (l) =>
+            (l.league?._id || l.league)?.toString() ===
+            leagueId.toString()
+        );
+
+        /*
+        |--------------------------------------------------------------------------
+        | CREATE TEAM-LEAGUE ENTRY IF IT DOES NOT EXIST
+        |--------------------------------------------------------------------------
+        */
+
+        if (!leagueEntry) {
+          const LeagueModel = require("../models/League");
+
+          const leagueDoc = await LeagueModel.findById(leagueId);
+
+          if (!leagueDoc) {
+            return res.status(404).json({
+              success: false,
+              message: "League not found",
+            });
+          }
+
+          teamDoc.leagues.push({
+            league: leagueId,
+
+            // Initial team fee when team joins league
+            teamFee: Number(leagueDoc.fee || 0),
+
+            status: "ACTIVE",
+            enrolledAt: new Date(),
+
+            players: [],
+
+            statistics: {
+              played: 0,
+              won: 0,
+              drawn: 0,
+              lost: 0,
+              goalsFor: 0,
+              goalsAgainst: 0,
+              goalDifference: 0,
+              points: 0,
+            },
+          });
+
+          leagueEntry =
+            teamDoc.leagues[teamDoc.leagues.length - 1];
+        }
+
+        if (!Array.isArray(leagueEntry.players)) {
+          leagueEntry.players = [];
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | UPDATE PLAYER PAYMENT STATUS INSIDE THIS LEAGUE
+        |--------------------------------------------------------------------------
+        */
+
+        const lpEntry = leagueEntry.players.find(
+          (p) =>
+            (p.player?._id || p.player)?.toString() ===
+            userId.toString()
+        );
+
+        if (lpEntry) {
+          lpEntry.paymentStatus = paymentStatus;
+        } else {
+          leagueEntry.players.push({
+            player: userId,
+            paymentStatus,
+            status: "ACTIVE",
+          });
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | ENSURE PLAYER EXISTS IN TEAM MASTER PLAYERS
+        |--------------------------------------------------------------------------
+        */
+
+        if (!Array.isArray(teamDoc.players)) {
+          teamDoc.players = [];
+        }
+
+        const hasTeamPlayer = teamDoc.players.some(
+          (p) =>
+            (p.player?._id || p.player)?.toString() ===
+            userId.toString()
+        );
+
+        if (!hasTeamPlayer) {
+          teamDoc.players.push({
+            player: userId,
+            paymentStatus: "TRIAL",
+          });
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | IMPORTANT:
+        | INVOICE AMOUNT COMES ONLY FROM team.leagues[].teamFee
+        |--------------------------------------------------------------------------
+        */
+
+        leagueTeamFee = Number(leagueEntry.teamFee || 0);
+
+        teamDoc.markModified("leagues");
+
+        await teamDoc.save();
+      }
+
+      /*
+      |--------------------------------------------------------------------------
+      | TEAM ONLY
+      |--------------------------------------------------------------------------
+      */
+
+      else {
+        if (!Array.isArray(teamDoc.players)) {
+          teamDoc.players = [];
+        }
+
+        const pEntry = teamDoc.players.find(
+          (item) =>
+            (item.player?._id || item.player)?.toString() ===
+            userId.toString()
+        );
+
         if (pEntry) {
           pEntry.paymentStatus = paymentStatus;
-          await teamDoc.save();
+        } else {
+          teamDoc.players.push({
+            player: userId,
+            paymentStatus,
+          });
         }
+
+        await teamDoc.save();
       }
-    } else {
-      user.classPaymentStatuses = user.classPaymentStatuses || [];
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | CLASS PAYMENT STATUS
+    |--------------------------------------------------------------------------
+    */
+
+    else {
+      user.classPaymentStatuses =
+        user.classPaymentStatuses || [];
+
       const targetClassIds = classId
         ? [classId.toString()]
-        : (user.assignedClasses || []).map((id) => id.toString());
+        : (user.assignedClasses || []).map((id) =>
+          id.toString()
+        );
 
       if (targetClassIds.length > 0) {
         for (const cidStr of targetClassIds) {
-          const existingEntry = user.classPaymentStatuses.find(
-            (cps) => cps.class && cps.class.toString() === cidStr
-          );
+          const existingEntry =
+            user.classPaymentStatuses.find(
+              (cps) =>
+                cps.class &&
+                cps.class.toString() === cidStr
+            );
+
           if (existingEntry) {
-            existingEntry.paymentStatus = paymentStatus;
+            existingEntry.paymentStatus =
+              paymentStatus;
           } else {
             user.classPaymentStatuses.push({
               class: cidStr,
-              paymentStatus: paymentStatus,
+              paymentStatus,
             });
           }
         }
       }
+
       await user.save();
     }
 
+    /*
+    |--------------------------------------------------------------------------
+    | AUTO INVOICE GENERATION
+    |--------------------------------------------------------------------------
+    */
+
     if (paymentStatus === "UNPAID") {
       try {
-        if (teamId) {
-          await generateTeamInvoice({ userId: user._id, teamId });
-        } else if (classId) {
-          await generateClassInvoice({ userId: user._id, classId });
-        } else if (!teamId && user.assignedClasses && user.assignedClasses.length > 0) {
+        /*
+        |--------------------------------------------------------------------------
+        | TEAM + LEAGUE INVOICE
+        |--------------------------------------------------------------------------
+        |
+        | Amount = team.leagues[].teamFee
+        |
+        */
+
+        if (teamId && leagueId) {
+          if (leagueTeamFee <= 0) {
+            console.warn(
+              `[League Invoice] No valid teamFee found for team=${teamId}, league=${leagueId}`
+            );
+          } else {
+            await generateLeagueInvoice({
+              userId: user._id,
+              leagueId,
+              teamId,
+
+              // IMPORTANT:
+              // Use team.leagues[].teamFee
+              amount: leagueTeamFee,
+            });
+
+            console.log(
+              `[League Invoice] Generated for player=${user._id}, team=${teamId}, league=${leagueId}, amount=${leagueTeamFee}`
+            );
+          }
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | CLASS INVOICE
+        |--------------------------------------------------------------------------
+        */
+
+        else if (classId) {
+          await generateClassInvoice({
+            userId: user._id,
+            classId,
+          });
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | ALL ASSIGNED CLASS INVOICES
+        |--------------------------------------------------------------------------
+        */
+
+        else if (
+          !teamId &&
+          user.assignedClasses &&
+          user.assignedClasses.length > 0
+        ) {
           for (const cid of user.assignedClasses) {
-            await generateClassInvoice({ userId: user._id, classId: cid });
+            await generateClassInvoice({
+              userId: user._id,
+              classId: cid,
+            });
           }
         }
       } catch (invErr) {
-        console.error("Auto invoice generation error in updatePaymentStatus:", invErr.message);
+        console.error(
+          "Auto invoice generation error in updatePaymentStatus:",
+          invErr.message
+        );
       }
     }
 
-    res.status(200).json({
+    /*
+    |--------------------------------------------------------------------------
+    | RESPONSE
+    |--------------------------------------------------------------------------
+    */
+
+    return res.status(200).json({
       success: true,
       message: `Payment status updated to ${paymentStatus} successfully`,
       data: user,
     });
-
   } catch (err) {
-    res.status(500).json({
+    console.error(
+      "updatePaymentStatus error:",
+      err
+    );
+
+    return res.status(500).json({
       success: false,
       message: err.message,
     });
   }
 };
+
+
 
 
 exports.updatePlayerRating = async (req, res) => {
@@ -2210,13 +2489,19 @@ const DAY_MAP = {
 const generateClassSessions = (term, classObj) => {
   const sessions = [];
   if (classObj && classObj.sessionDates && Array.isArray(classObj.sessionDates) && classObj.sessionDates.length > 0) {
-    return [...classObj.sessionDates]
+    let sorted = [...classObj.sessionDates]
       .map((d) => {
         const date = new Date(d);
         date.setUTCHours(0, 0, 0, 0);
         return date;
       })
       .sort((a, b) => a.getTime() - b.getTime());
+
+    const roundLimit = Number(classObj.round || classObj.rounds || classObj.numberOfRounds);
+    if (roundLimit && roundLimit > 0) {
+      sorted = sorted.slice(0, roundLimit);
+    }
+    return sorted;
   }
   if (!term || !term.startDate || !term.endDate) return sessions;
 
@@ -2246,6 +2531,11 @@ const generateClassSessions = (term, classObj) => {
     sessions.push(...dates);
   }
 
+  const roundLimit = Number(classObj?.round || classObj?.rounds || classObj?.numberOfRounds);
+  if (roundLimit && roundLimit > 0) {
+    return sessions.slice(0, roundLimit);
+  }
+
   return sessions;
 };
 
@@ -2254,13 +2544,18 @@ const generateClassSessionsEnriched = (term, classObj) => {
   const dayNames = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
 
   if (classObj && classObj.sessionDates && Array.isArray(classObj.sessionDates) && classObj.sessionDates.length > 0) {
-    const sortedDates = [...classObj.sessionDates]
+    let sortedDates = [...classObj.sessionDates]
       .map((d) => {
         const date = new Date(d);
         date.setUTCHours(0, 0, 0, 0);
         return date;
       })
       .sort((a, b) => a.getTime() - b.getTime());
+
+    const roundLimit = Number(classObj.round || classObj.rounds || classObj.numberOfRounds);
+    if (roundLimit && roundLimit > 0) {
+      sortedDates = sortedDates.slice(0, roundLimit);
+    }
 
     sortedDates.forEach((d, idx) => {
       sessions.push({
@@ -2313,6 +2608,19 @@ const generateClassSessionsEnriched = (term, classObj) => {
       });
     }
   }
+
+  const roundLimit = Number(classObj?.round || classObj?.rounds || classObj?.numberOfRounds);
+  if (roundLimit && roundLimit > 0) {
+    const limited = sessions.slice(0, roundLimit);
+    limited.forEach((s, idx) => {
+      s.round = idx + 1;
+    });
+    return limited;
+  }
+
+  sessions.forEach((s, idx) => {
+    s.round = idx + 1;
+  });
 
   return sessions;
 };
@@ -3170,12 +3478,50 @@ exports.exportClassCSV = async (req, res) => {
   res.send(csv);
 };
 
+const resolveTeamSessionConfig = (team, leagueId) => {
+  let selectedLeague = null;
+  if (leagueId) {
+    selectedLeague = (team.leagues || []).find(
+      (l) => (l.league?._id || l.league)?.toString() === leagueId.toString()
+    );
+  } else if (team.leagues && team.leagues.length > 0) {
+    selectedLeague = team.leagues.find((l) => l.status === "ACTIVE") || team.leagues[0];
+  }
+
+  const explicitLeagueDates = selectedLeague?.sessionDates && selectedLeague.sessionDates.length > 0
+    ? selectedLeague.sessionDates
+    : (selectedLeague?.league?.sessionDates || []);
+
+  const effectiveSessionDates = explicitLeagueDates.length > 0
+    ? explicitLeagueDates
+    : (team.sessionDates || []);
+
+  const effectiveRound = selectedLeague?.round != null
+    ? selectedLeague.round
+    : (selectedLeague?.league?.numberOfRounds != null
+      ? selectedLeague.league.numberOfRounds
+      : (team.round != null ? team.round : null));
+
+  return {
+    selectedLeague,
+    effectiveSessionDates,
+    effectiveRound,
+    sessionConfig: {
+      ...(team.toObject ? team.toObject() : team),
+      sessionDates: effectiveSessionDates,
+      round: effectiveRound,
+    },
+  };
+};
+
 exports.getTeamSessions = async (req, res) => {
   try {
     const { teamId } = req.params;
-    const { termId } = req.query;
+    const { termId, leagueId } = req.query;
 
-    const teamData = await Team.findById(teamId).populate("term");
+    const teamData = await Team.findById(teamId)
+      .populate("term")
+      .populate("leagues.league", "name season fee sessionDates numberOfRounds");
 
     if (!teamData) {
       return res.status(404).json({ message: "Team not found" });
@@ -3187,7 +3533,9 @@ exports.getTeamSessions = async (req, res) => {
       if (termDoc) targetTerm = termDoc;
     }
 
-    const enrichedSessions = generateClassSessionsEnriched(targetTerm, teamData);
+    const { selectedLeague, effectiveRound, sessionConfig } = resolveTeamSessionConfig(teamData, leagueId);
+
+    const enrichedSessions = generateClassSessionsEnriched(targetTerm, sessionConfig);
 
     const formatted = enrichedSessions.map((s) => ({
       fullDate: s.date,
@@ -3210,7 +3558,14 @@ exports.getTeamSessions = async (req, res) => {
     });
 
     res.json({
-      round: teamData.round || null,
+      round: effectiveRound || null,
+      league: selectedLeague ? {
+        _id: selectedLeague.league?._id || selectedLeague.league,
+        name: selectedLeague.league?.name || "",
+        season: selectedLeague.league?.season || "",
+        teamFee: selectedLeague.teamFee,
+        round: selectedLeague.round,
+      } : null,
       totalSessions: enrichedSessions.length,
       scheduleType: teamData.scheduleType || "SINGLE_DAY",
       schedule: teamData.schedule || [],
@@ -3224,18 +3579,28 @@ exports.getTeamSessions = async (req, res) => {
 
 exports.getTeamFullTable = async (req, res) => {
   try {
-    const { teamId, termId } = req.query;
+    const { teamId, termId, leagueId } = req.query;
 
     const team = await Team.findById(teamId)
       .populate("term")
       .populate("coach", "name")
+      .populate("leagues.league", "name season fee sessionDates numberOfRounds")
       .populate({
         path: "players.player",
         select:
-          "fullName email dob phone contactName isMedicalCondition medicalConditionDetails rating prefferedFoot parentId profileImage statistics",
+          "firstName lastName fullName email dob phone contactName isMedicalCondition medicalConditionDetails rating prefferedFoot parentId profileImage statistics",
         populate: {
           path: "parentId",
-          select: "fullName email phone profileImage",
+          select: "firstName lastName fullName email phone profileImage",
+        },
+      })
+      .populate({
+        path: "leagues.players.player",
+        select:
+          "firstName lastName fullName email dob phone contactName isMedicalCondition medicalConditionDetails rating prefferedFoot parentId profileImage statistics",
+        populate: {
+          path: "parentId",
+          select: "firstName lastName fullName email phone profileImage",
         },
       });
 
@@ -3249,13 +3614,18 @@ exports.getTeamFullTable = async (req, res) => {
       if (termDoc) targetTerm = termDoc;
     }
 
-    const hasExplicitSessions = team.sessionDates && team.sessionDates.length > 0;
-    const generatedSessions = generateClassSessions(targetTerm, team);
+    const { selectedLeague, effectiveSessionDates, effectiveRound, sessionConfig } = resolveTeamSessionConfig(team, leagueId);
+
+    const hasExplicitSessions = effectiveSessionDates && effectiveSessionDates.length > 0;
+    const generatedSessions = generateClassSessions(targetTerm, sessionConfig);
     const sessionDateSet = new Set(
       generatedSessions.map((d) => new Date(d).toISOString().split("T")[0])
     );
 
     const attendanceFilter = { team: teamId };
+    if (leagueId || selectedLeague?.league) {
+      attendanceFilter.league = leagueId || (selectedLeague.league?._id || selectedLeague.league);
+    }
     if (!hasExplicitSessions && targetTerm && targetTerm.startDate && targetTerm.endDate) {
       const start = new Date(targetTerm.startDate);
       start.setUTCHours(0, 0, 0, 0);
@@ -3264,7 +3634,7 @@ exports.getTeamFullTable = async (req, res) => {
       attendanceFilter.sessionDate = { $gte: start, $lte: end };
     }
 
-    const attendanceData = await Attendance.find(attendanceFilter).select("sessionDate records");
+    const attendanceData = await Attendance.find(attendanceFilter).select("sessionDate records league");
 
     const attendanceMap = {};
     attendanceData.forEach((att) => {
@@ -3280,7 +3650,12 @@ exports.getTeamFullTable = async (req, res) => {
 
     const sessionDates = Array.from(sessionDateSet).sort();
 
-    const players = (team.players || []).map((item) => {
+    const isLeagueView = Boolean(leagueId);
+    const sourcePlayers = isLeagueView
+      ? (selectedLeague && Array.isArray(selectedLeague.players) ? selectedLeague.players : [])
+      : (team.players || []);
+
+    const players = sourcePlayers.map((item) => {
       const player = item.player && typeof item.player === "object" ? item.player : { _id: item.player };
       const attendance = {};
       sessionDates.forEach((date) => {
@@ -3305,9 +3680,9 @@ exports.getTeamFullTable = async (req, res) => {
         minutesPlayed: 0,
       });
 
-      return {
+      const playerRecord = {
         playerId: player._id,
-        name: player.fullName,
+        name: player.fullName || `${player.firstName || ""} ${player.lastName || ""}`.trim() || "N/A",
         email: player.email,
         dob: player.dob,
         phone: player.phone,
@@ -3322,7 +3697,7 @@ exports.getTeamFullTable = async (req, res) => {
         parent: player.parentId
           ? {
             id: player.parentId._id,
-            name: player.parentId.fullName,
+            name: player.parentId.fullName || `${player.parentId.firstName || ""} ${player.parentId.lastName || ""}`.trim() || "N/A",
             email: player.parentId.email,
             phone: player.parentId.phone,
             profileImage: player.parentId.profileImage,
@@ -3330,6 +3705,12 @@ exports.getTeamFullTable = async (req, res) => {
           : null,
         attendance,
       };
+
+      if (isLeagueView) {
+        playerRecord.status = item.status || "ACTIVE";
+      }
+
+      return playerRecord;
     });
 
     const broadcastRoom = await ChatRoom.findOne({
@@ -3344,7 +3725,14 @@ exports.getTeamFullTable = async (req, res) => {
       broadcastChatRoomId: broadcastRoom ? broadcastRoom._id : null,
       broadcastRoomId: broadcastRoom ? broadcastRoom._id : null,
       term: targetTerm ? { _id: targetTerm._id, name: targetTerm.name, startDate: targetTerm.startDate, endDate: targetTerm.endDate } : null,
-      round: team.round || null,
+      round: effectiveRound || null,
+      league: selectedLeague ? {
+        _id: selectedLeague.league?._id || selectedLeague.league,
+        name: selectedLeague.league?.name || "",
+        season: selectedLeague.league?.season || "",
+        teamFee: selectedLeague.teamFee,
+        round: selectedLeague.round,
+      } : null,
       totalSessions: sessionDates.length,
       sessions: sessionDates,
       players,
@@ -3356,12 +3744,17 @@ exports.getTeamFullTable = async (req, res) => {
 
 exports.exportTeamCSV = async (req, res) => {
   try {
-    const { teamId, termId } = req.query;
+    const { teamId, termId, leagueId } = req.query;
 
     const team = await Team.findById(teamId)
       .populate("term")
+      .populate("leagues.league", "name season fee sessionDates numberOfRounds")
       .populate({
         path: "players.player",
+        select: "fullName email dob phone contactName statistics",
+      })
+      .populate({
+        path: "leagues.players.player",
         select: "fullName email dob phone contactName statistics",
       });
 
@@ -3375,13 +3768,18 @@ exports.exportTeamCSV = async (req, res) => {
       if (termDoc) targetTerm = termDoc;
     }
 
-    const hasExplicitSessions = team.sessionDates && team.sessionDates.length > 0;
-    const generatedSessions = generateClassSessions(targetTerm, team);
+    const { selectedLeague, effectiveSessionDates, sessionConfig } = resolveTeamSessionConfig(team, leagueId);
+
+    const hasExplicitSessions = effectiveSessionDates && effectiveSessionDates.length > 0;
+    const generatedSessions = generateClassSessions(targetTerm, sessionConfig);
     const sessionDateSet = new Set(
       generatedSessions.map((d) => new Date(d).toISOString().split("T")[0])
     );
 
     const attendanceFilter = { team: teamId };
+    if (leagueId || selectedLeague?.league) {
+      attendanceFilter.league = leagueId || (selectedLeague.league?._id || selectedLeague.league);
+    }
     if (!hasExplicitSessions && targetTerm && targetTerm.startDate && targetTerm.endDate) {
       const start = new Date(targetTerm.startDate);
       start.setUTCHours(0, 0, 0, 0);
@@ -3390,7 +3788,7 @@ exports.exportTeamCSV = async (req, res) => {
       attendanceFilter.sessionDate = { $gte: start, $lte: end };
     }
 
-    const attendanceData = await Attendance.find(attendanceFilter).select("sessionDate records");
+    const attendanceData = await Attendance.find(attendanceFilter).select("sessionDate records league");
 
     const attendanceMap = {};
     attendanceData.forEach((att) => {
@@ -3406,7 +3804,12 @@ exports.exportTeamCSV = async (req, res) => {
 
     const sessionDates = Array.from(sessionDateSet).sort();
 
-    const rows = (team.players || []).map((item) => {
+    const isLeagueView = Boolean(leagueId);
+    const sourcePlayers = isLeagueView
+      ? (selectedLeague && Array.isArray(selectedLeague.players) ? selectedLeague.players : [])
+      : (team.players || []);
+
+    const rows = sourcePlayers.map((item) => {
       const player = item.player && typeof item.player === "object" ? item.player : { _id: item.player };
       const playerStats = item.statistics ? {
         appearances: Number(item.statistics.appearances) || 0,
@@ -3427,7 +3830,7 @@ exports.exportTeamCSV = async (req, res) => {
       });
 
       const row = {
-        Name: player.fullName,
+        Name: player.fullName || `${player.firstName || ""} ${player.lastName || ""}`.trim() || "",
         Email: player.email,
         DOB: player.dob ? new Date(player.dob).toISOString().split("T")[0] : "",
         Phone: player.phone,
@@ -3460,6 +3863,9 @@ exports.exportTeamCSV = async (req, res) => {
       "Phone",
       "Guardian",
       "Payment Status",
+      "Goals",
+      "Assists",
+      "Appearances",
       ...sessionDates,
     ];
 
@@ -4336,7 +4742,7 @@ exports.getTermEarningsReport = async (req, res) => {
 
         let expectedAmount = 0;
         let paidAmount = 0;
-        let refundedAmount = 0; 
+        let refundedAmount = 0;
         let hasPendingPayment = false;
         let isInvoiceRejected = false;
 
