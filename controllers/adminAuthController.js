@@ -149,6 +149,18 @@ exports.getUsers = async (req, res) => {
           { _id: { $in: pendingPlayerIds } },
         ],
       });
+    } else {
+      // In getUsers, return all official users who are in the user model:
+      // Exclude unapproved temporary players and unallocated pending registrations
+      andConditions.push({
+        playerStatus: { $ne: "PENDING_APPROVAL" },
+      });
+      andConditions.push({
+        $or: [
+          { hasPendingRequest: { $ne: true } },
+          { "assignedClasses.0": { $exists: true } },
+        ],
+      });
     }
 
     if (search) {

@@ -152,7 +152,7 @@ exports.createTemporaryPlayer = async (req, res) => {
           relationship: "Parent/Guardian",
           isMedicalCondition: hasMedical,
           medicalConditionDetails: medicalDetails,
-          playerStatus: req.admin.role === "SUPER_ADMIN" ? "ACTIVE" : "PENDING_APPROVAL",
+          playerStatus: "PENDING_APPROVAL",
           createdBy: coachId,
           createdByRole: req.admin.role,
           category: primaryCat,
@@ -268,7 +268,6 @@ exports.getTemporaryPlayers = async (req, res) => {
       page = 1,
       limit = 20,
       status,
-      requestType,
       category,
       program,
       classId,
@@ -278,19 +277,34 @@ exports.getTemporaryPlayers = async (req, res) => {
     page = Number(page) || 1;
     limit = Number(limit) || 20;
 
-    const playerQuery = {};
+    // Only unapproved temporary players (playerStatus: "PENDING_APPROVAL")
+    const unapprovedUserQuery = {
+      playerStatus: "PENDING_APPROVAL",
+      $or: [
+        { temporaryClass: { $ne: null } },
+        { temporarySessionDate: { $ne: null } },
+        { createdByRole: "COACH" },
+      ],
+    };
+
     if (req.admin.role === "COACH") {
-      playerQuery.createdBy = coachId;
+      unapprovedUserQuery.createdBy = coachId;
     }
     if (classId) {
-      playerQuery.temporaryClass = classId;
+      unapprovedUserQuery.temporaryClass = classId;
     }
 
-    const matchingPlayers = await User.find(playerQuery).select("_id parentId category programs temporaryClass createdBy");
-    const matchingPlayerIds = matchingPlayers.map((p) => p._id);
+    const tempUsers = await User.find(unapprovedUserQuery).select(
+      "_id parentId category programs temporaryClass createdBy"
+    );
+    const tempUserIds = tempUsers.map((p) => p._id);
 
-    for (const tu of matchingPlayers) {
-      const existingReq = await RegistrationRequest.findOne({ player: tu._id });
+    // Ensure unapproved temporary players have a corresponding RegistrationRequest
+    for (const tu of tempUsers) {
+      const existingReq = await RegistrationRequest.findOne({
+        player: tu._id,
+        requestType: { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] },
+      });
       if (!existingReq && tu.parentId) {
         await RegistrationRequest.create({
           parent: tu.parentId,
@@ -306,21 +320,10 @@ exports.getTemporaryPlayers = async (req, res) => {
     }
 
     const reqQuery = {
-      $or: [
-        { requestType: { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] } },
-        { player: { $in: matchingPlayerIds } },
-      ],
+      requestType: { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] },
+      player: { $in: tempUserIds },
+      status: status ? status.toUpperCase() : "PENDING",
     };
-
-    if (status) {
-      reqQuery.status = status.toUpperCase();
-    } else {
-      reqQuery.status = "PENDING";
-    }
-
-    if (requestType) {
-      reqQuery.requestType = requestType;
-    }
 
     if (category) {
       reqQuery.category = category;
@@ -333,6 +336,7 @@ exports.getTemporaryPlayers = async (req, res) => {
     if (search) {
       const searchRegex = new RegExp(search, "i");
       const searchedPlayers = await User.find({
+        _id: { $in: tempUserIds },
         $or: [
           { fullName: searchRegex },
           { firstName: searchRegex },
@@ -366,7 +370,7 @@ exports.getTemporaryPlayers = async (req, res) => {
       .populate("parent", "fullName email phone address city")
       .populate(
         "player",
-        "firstName lastName fullName email phone dob gender profileImage rating classPaymentStatuses term assignedClasses prefferedFoot isMedicalCondition medicalConditionDetails hasPendingRequest"
+        "firstName lastName fullName email phone dob gender profileImage rating classPaymentStatuses term assignedClasses prefferedFoot isMedicalCondition medicalConditionDetails hasPendingRequest playerStatus temporaryClass temporarySessionDate"
       )
       .populate("category", "name")
       .populate("programs", "name")
@@ -410,6 +414,8 @@ exports.approveTemporaryPlayer = async (req, res) => {
     }
 
     player.playerStatus = "ACTIVE";
+    player.hasPendingRequest = false;
+    player.temporaryClass = null;
 
     if (assignedClasses && Array.isArray(assignedClasses)) {
       player.assignedClasses = assignedClasses;
@@ -430,6 +436,11 @@ exports.approveTemporaryPlayer = async (req, res) => {
     if (term) player.term = term;
 
     await player.save();
+
+    await RegistrationRequest.updateMany(
+      { player: player._id, requestType: { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] } },
+      { status: "COMPLETED", assignedBy: adminId, assignedAt: new Date() }
+    );
 
     if (assignedClasses && Array.isArray(assignedClasses)) {
       try {
@@ -489,6 +500,11 @@ exports.rejectTemporaryPlayer = async (req, res) => {
 
     player.playerStatus = "REJECTED";
     await player.save();
+
+    await RegistrationRequest.updateMany(
+      { player: player._id, requestType: { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] } },
+      { status: "COMPLETED", assignedBy: adminId, assignedAt: new Date() }
+    );
 
     await AuditLog.create({
       user: adminId,

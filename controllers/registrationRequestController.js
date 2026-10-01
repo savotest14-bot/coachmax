@@ -33,6 +33,9 @@ exports.getRegistrationRequests = async (req, res) => {
 
     if (requestType) {
       query.requestType = requestType;
+    } else {
+      // Exclude temporary players from registration requests
+      query.requestType = { $nin: ["TEMPORARY_PLAYER", "TEMPORARY"] };
     }
 
     if (category) {
@@ -52,6 +55,14 @@ exports.getRegistrationRequests = async (req, res) => {
       query.parent = { $in: parentIds };
     }
 
+    // Only include players who are NOT yet included in the user model (not already active/enrolled users)
+    const enrolledUsers = await User.find({
+      playerStatus: "ACTIVE",
+      "assignedClasses.0": { $exists: true },
+      hasPendingRequest: false,
+    }).select("_id");
+    const enrolledUserIds = enrolledUsers.map((u) => u._id.toString());
+
     if (searchPlayer || (isMedicalCondition !== undefined && isMedicalCondition !== "")) {
       const playerFilter = {};
 
@@ -69,8 +80,12 @@ exports.getRegistrationRequests = async (req, res) => {
       }
 
       const players = await User.find(playerFilter).select("_id");
-      const playerIds = players.map((p) => p._id);
+      const playerIds = players
+        .map((p) => p._id.toString())
+        .filter((id) => !enrolledUserIds.includes(id));
       query.player = { $in: playerIds };
+    } else if (enrolledUserIds.length > 0) {
+      query.player = { $nin: enrolledUserIds };
     }
 
     const total = await RegistrationRequest.countDocuments(query);
@@ -496,6 +511,7 @@ exports.assignClassesToPlayer = async (req, res) => {
       }
     }
     playerDoc.programs = updatedProgramIds;
+    playerDoc.playerStatus = "ACTIVE";
     await playerDoc.save();
 
     if (paymentStatus == "UNPAID") {
