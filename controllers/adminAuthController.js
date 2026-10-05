@@ -13,6 +13,8 @@ const Program = require("../models/Program");
 const Term = require("../models/Term");
 const Class = require("../models/Class");
 const Team = require("../models/Team");
+const League = require("../models/League");
+const Standing = require("../models/Standing");
 const Attendance = require("../models/Attendance");
 const { Parser } = require("json2csv");
 const Parent = require("../models/Parent");
@@ -4206,6 +4208,7 @@ exports.previewCloneTerm = async (req, res) => {
       });
     }
 
+    // 1. Preview Classes
     const sourceClasses = await Class.find({ term: sourceTermId })
       .populate("category", "name")
       .populate("program", "name")
@@ -4248,6 +4251,68 @@ exports.previewCloneTerm = async (req, res) => {
       };
     });
 
+    // 2. Preview Leagues & Teams
+    const sourceLeagues = await League.find({ term: sourceTermId }).populate({
+      path: "teams",
+      populate: [
+        {
+          path: "players.player",
+          select: "firstName lastName fullName email phone profileImage jerseyNumber",
+        },
+        {
+          path: "coach",
+          select: "name fullName email phone",
+        },
+      ],
+    });
+
+    const targetLeagues = await League.find({ term: targetTermId });
+
+    const leaguesPreview = sourceLeagues.map((lg) => {
+      const alreadyExists = targetLeagues.some(
+        (tLg) => tLg.name?.trim().toLowerCase() === lg.name?.trim().toLowerCase()
+      );
+
+      const teamsList = (lg.teams || []).filter(Boolean).map((t) => {
+        const playersList = (t.players || []).map((item) => {
+          const playerDoc = item.player;
+          const playerName =
+            playerDoc?.fullName ||
+            [playerDoc?.firstName, playerDoc?.lastName].filter(Boolean).join(" ") ||
+            "Unknown Player";
+          return {
+            _id: playerDoc?._id || item.player,
+            name: playerName,
+            paymentStatus: "TRAIL",
+            selected: true,
+          };
+        });
+
+        return {
+          teamId: t._id,
+          teamName: t.teamName,
+          logo: t.logo || "",
+          coach: t.coach?.fullName || t.coach?.name || "",
+          playerCount: playersList.length,
+          alreadyExists: false,
+          selected: true,
+          players: playersList,
+        };
+      });
+
+      return {
+        leagueId: lg._id,
+        name: lg.name,
+        season: lg.season,
+        fixtureFormat: lg.fixtureFormat,
+        numberOfRounds: lg.numberOfRounds,
+        teamsCount: teamsList.length,
+        alreadyExists,
+        selected: !alreadyExists,
+        teams: teamsList,
+      };
+    });
+
     return res.status(200).json({
       success: true,
       sourceTerm: {
@@ -4259,6 +4324,7 @@ exports.previewCloneTerm = async (req, res) => {
         name: targetTerm.name,
       },
       classes: classesPreview,
+      leagues: leaguesPreview,
     });
   } catch (error) {
     return res.status(500).json({
@@ -4273,7 +4339,7 @@ exports.cloneTerm = async (req, res) => {
   session.startTransaction();
 
   try {
-    const { sourceTermId, targetTermId, classes } = req.body;
+    const { sourceTermId, targetTermId, classes, leagues } = req.body;
 
     if (!sourceTermId || !targetTermId) {
       await session.abortTransaction();
@@ -4322,6 +4388,7 @@ exports.cloneTerm = async (req, res) => {
       });
     }
 
+    // 1. Process Classes
     const selectedClasses = Array.isArray(classes) ? classes : [];
     let classesSelected = selectedClasses.length;
     let classesCloned = 0;
@@ -4391,6 +4458,209 @@ exports.cloneTerm = async (req, res) => {
       }
     }
 
+    // 2. Process Leagues & Teams
+    let leaguesToProcess = Array.isArray(leagues) ? leagues : [];
+    if (leaguesToProcess.length === 0 && (req.body.cloneAllLeagues === true || req.body.cloneLeagues === true)) {
+      const allSourceLeagues = await League.find({ term: sourceTermId }).session(session);
+      leaguesToProcess = allSourceLeagues.map((l) => ({ leagueId: l._id }));
+    }
+
+    let leaguesSelected = leaguesToProcess.length;
+    let leaguesCloned = 0;
+    let leaguesSkipped = 0;
+    let teamsSelected = 0;
+    let teamsCloned = 0;
+    let leaguePlayersCopied = 0;
+
+    for (const item of leaguesToProcess) {
+      const { leagueId, teams: teamItems, duplicateTeams } = item;
+
+      if (!leagueId || !mongoose.Types.ObjectId.isValid(leagueId)) {
+        leaguesSkipped++;
+        continue;
+      }
+
+      const sourceLeague = await League.findById(leagueId)
+        .populate({
+          path: "teams",
+          select: "teamName logo coach assistantCoach ageGroup teamType term dayOfWeek startTime endTime venue location scheduleType schedule captain viceCaptain players",
+        })
+        .session(session);
+
+      if (!sourceLeague || String(sourceLeague.term) !== String(sourceTermId)) {
+        leaguesSkipped++;
+        continue;
+      }
+
+      const existingLeague = await League.findOne({
+        term: targetTermId,
+        name: sourceLeague.name,
+      }).session(session);
+
+      if (existingLeague) {
+        leaguesSkipped++;
+        continue;
+      }
+
+      const sourceTeams = (sourceLeague.teams || []).filter(Boolean);
+      let teamsToInclude = [];
+
+      if (Array.isArray(teamItems) && teamItems.length > 0) {
+        for (const tItem of teamItems) {
+          const tId = tItem.teamId || tItem._id || tItem;
+          const matchTeam = sourceTeams.find((st) => String(st._id) === String(tId));
+          if (matchTeam) {
+            teamsToInclude.push({
+              teamDoc: matchTeam,
+              selectedPlayerIds: Array.isArray(tItem.players) ? tItem.players : null,
+            });
+          }
+        }
+      } else {
+        for (const st of sourceTeams) {
+          teamsToInclude.push({
+            teamDoc: st,
+            selectedPlayerIds: null,
+          });
+        }
+      }
+
+      teamsSelected += teamsToInclude.length;
+
+      const shouldDuplicateTeams = duplicateTeams !== false;
+      const assignedTeamIds = [];
+      const oldToNewTeamMap = {};
+
+      if (shouldDuplicateTeams && teamsToInclude.length > 0) {
+        for (const { teamDoc, selectedPlayerIds } of teamsToInclude) {
+          let playerListToUse = teamDoc.players || [];
+          if (selectedPlayerIds) {
+            playerListToUse = playerListToUse.filter((p) =>
+              selectedPlayerIds.some((spId) => String(spId?._id || spId) === String(p.player?._id || p.player))
+            );
+          }
+
+          const clonedPlayers = playerListToUse.map((p) => ({
+            player: p.player?._id || p.player,
+            paymentStatus: p.paymentStatus || "UNPAID",
+          }));
+
+          const teamObject = teamDoc.toObject();
+          delete teamObject._id;
+          delete teamObject.createdAt;
+          delete teamObject.updatedAt;
+          delete teamObject.statistics;
+
+          teamObject.term = targetTermId;
+          teamObject.players = clonedPlayers;
+          teamObject.leagues = [];
+
+          const [newTeam] = await Team.create([teamObject], { session });
+          assignedTeamIds.push(newTeam._id);
+          oldToNewTeamMap[String(teamDoc._id)] = newTeam._id;
+          teamsCloned++;
+          leaguePlayersCopied += clonedPlayers.length;
+        }
+      } else {
+        for (const { teamDoc } of teamsToInclude) {
+          assignedTeamIds.push(teamDoc._id);
+          teamsCloned++;
+        }
+      }
+
+      const newGroups = (sourceLeague.groups || []).map((g) => ({
+        name: g.name,
+        teams: (g.teams || []).map((tId) => oldToNewTeamMap[String(tId?._id || tId)] || tId),
+      }));
+
+      const leagueObject = sourceLeague.toObject();
+      delete leagueObject._id;
+      delete leagueObject.createdAt;
+      delete leagueObject.updatedAt;
+
+      leagueObject.term = targetTermId;
+      leagueObject.season = targetTerm.name || sourceLeague.season;
+      leagueObject.startDate = targetTerm.startDate || sourceLeague.startDate;
+      leagueObject.endDate = targetTerm.endDate || sourceLeague.endDate;
+      leagueObject.teams = assignedTeamIds;
+      leagueObject.groups = newGroups;
+      leagueObject.fixtureGenerated = false; // NO fixtures cloned!
+
+      const [newLeague] = await League.create([leagueObject], { session });
+      leaguesCloned++;
+
+      if (assignedTeamIds.length > 0) {
+        const standingOps = assignedTeamIds.map((tId) => ({
+          updateOne: {
+            filter: { league: newLeague._id, team: tId },
+            update: {
+              $setOnInsert: {
+                league: newLeague._id,
+                team: tId,
+                group: "",
+                played: 0,
+                won: 0,
+                drawn: 0,
+                lost: 0,
+                goalsFor: 0,
+                goalsAgainst: 0,
+                goalDifference: 0,
+                points: 0,
+              },
+            },
+            upsert: true,
+          },
+        }));
+        await Standing.bulkWrite(standingOps, { session });
+
+        const teamGroupMap = {};
+        if (Array.isArray(newGroups)) {
+          for (const g of newGroups) {
+            if (Array.isArray(g.teams)) {
+              for (const t of g.teams) {
+                teamGroupMap[String(t?._id || t)] = g.name || "";
+              }
+            }
+          }
+        }
+
+        for (const tId of assignedTeamIds) {
+          const tDoc = await Team.findById(tId).session(session);
+          if (tDoc) {
+            const defaultPlayers = (tDoc.players || []).map((p) => ({
+              player: p.player,
+              paymentStatus: p.paymentStatus || "UNPAID",
+              status: "ACTIVE",
+            }));
+
+            tDoc.leagues = tDoc.leagues || [];
+            tDoc.leagues.push({
+              league: newLeague._id,
+              teamFee: newLeague.fee || 0,
+              round: newLeague.numberOfRounds || null,
+              sessionDates: newLeague.sessionDates || [],
+              group: teamGroupMap[String(tId)] || "",
+              status: "ACTIVE",
+              enrolledAt: new Date(),
+              players: defaultPlayers,
+              statistics: {
+                played: 0,
+                won: 0,
+                drawn: 0,
+                lost: 0,
+                goalsFor: 0,
+                goalsAgainst: 0,
+                goalDifference: 0,
+                points: 0,
+              },
+            });
+
+            await tDoc.save({ session });
+          }
+        }
+      }
+    }
+
     await session.commitTransaction();
     session.endSession();
 
@@ -4403,6 +4673,12 @@ exports.cloneTerm = async (req, res) => {
         classesSkipped,
         playersSelected,
         playersCopied,
+        leaguesSelected,
+        leaguesCloned,
+        leaguesSkipped,
+        teamsSelected,
+        teamsCloned,
+        leaguePlayersCopied,
         attendanceCopied: false,
       },
     });

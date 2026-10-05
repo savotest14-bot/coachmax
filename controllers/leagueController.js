@@ -618,6 +618,265 @@ exports.createLeague = async (req, res) => {
   }
 };
 
+exports.cloneLeague = async (req, res) => {
+  let session = null;
+  let useSession = false;
+  let createdLeagueId = null;
+
+  try {
+    const sourceLeagueId = req.params.leagueId || req.body.leagueId || req.body.sourceLeagueId;
+
+    if (!sourceLeagueId || !mongoose.Types.ObjectId.isValid(sourceLeagueId)) {
+      return res.status(400).json({ success: false, message: "Valid source League ID is required" });
+    }
+
+    const sourceLeague = await League.findById(sourceLeagueId).populate({
+      path: "teams",
+      select: "teamName logo coach assistantCoach ageGroup teamType term dayOfWeek startTime endTime venue location scheduleType schedule captain viceCaptain players",
+    });
+
+    if (!sourceLeague) {
+      return res.status(404).json({ success: false, message: "Source league not found" });
+    }
+
+    try {
+      session = await mongoose.startSession();
+      session.startTransaction();
+      useSession = true;
+    } catch (sessionErr) {
+      useSession = false;
+      session = null;
+    }
+    const sessionOption = useSession && session ? { session } : {};
+
+    const {
+      name,
+      season,
+      startDate,
+      endDate,
+      description,
+      status,
+      type,
+      term,
+      fee,
+      numberOfRounds,
+      groupCount,
+      fixtureFormat,
+      matchDuration,
+      breakBetweenMatches,
+      numberOfFields,
+      startTime,
+      pointsForWin,
+      pointsForDraw,
+      allowDraws,
+      automaticLadderRecalculation,
+      registrationStartDate,
+      registrationEndDate,
+      visibility,
+      duplicateTeams,
+    } = req.body;
+
+    const newLogo = req.file ? req.file.path.replace(/\\/g, "/") : (req.body.logo || sourceLeague.logo || "");
+    const newName = name && name.trim() ? name.trim() : `${sourceLeague.name} (Copy)`;
+    const newSeason = season && season.trim() ? season.trim() : sourceLeague.season;
+    const newStartDate = startDate ? new Date(startDate) : (sourceLeague.startDate ? new Date(sourceLeague.startDate) : new Date());
+    const newEndDate = endDate ? new Date(endDate) : (sourceLeague.endDate ? new Date(sourceLeague.endDate) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000));
+    const newFee = fee !== undefined && fee !== null && !isNaN(Number(fee)) ? Number(fee) : (sourceLeague.fee || 0);
+
+    const sourceTeams = (sourceLeague.teams || []).filter((t) => t && t._id);
+    let assignedTeamIds = [];
+    let newGroups = [];
+
+    const shouldDuplicateTeams = duplicateTeams === true || duplicateTeams === "true";
+
+    if (shouldDuplicateTeams && sourceTeams.length > 0) {
+      const oldToNewMap = {};
+      const newTeamDocs = [];
+
+      for (const t of sourceTeams) {
+        const clonedPlayers = (t.players || []).map((p) => ({
+          player: p.player?._id || p.player,
+          paymentStatus: p.paymentStatus || "UNPAID",
+        }));
+
+        newTeamDocs.push({
+          teamName: t.teamName,
+          logo: t.logo || "",
+          coach: t.coach,
+          assistantCoach: t.assistantCoach,
+          ageGroup: t.ageGroup || "",
+          teamType: t.teamType || "INTERNAL",
+          term: t.term,
+          dayOfWeek: t.dayOfWeek,
+          startTime: t.startTime,
+          endTime: t.endTime,
+          venue: t.venue,
+          location: t.location,
+          scheduleType: t.scheduleType || "SINGLE_DAY",
+          schedule: t.schedule || [],
+          captain: t.captain,
+          viceCaptain: t.viceCaptain,
+          players: clonedPlayers,
+          leagues: [],
+        });
+      }
+
+      const createdTeams = await Team.insertMany(newTeamDocs, sessionOption);
+      for (let i = 0; i < sourceTeams.length; i++) {
+        oldToNewMap[sourceTeams[i]._id.toString()] = createdTeams[i]._id;
+      }
+
+      assignedTeamIds = createdTeams.map((t) => t._id);
+
+      newGroups = (sourceLeague.groups || []).map((g) => ({
+        name: g.name,
+        teams: (g.teams || []).map((tId) => oldToNewMap[(tId?._id || tId).toString()] || tId),
+      }));
+    } else {
+      assignedTeamIds = sourceTeams.map((t) => t._id);
+
+      newGroups = (sourceLeague.groups || []).map((g) => ({
+        name: g.name,
+        teams: Array.isArray(g.teams) ? [...g.teams] : [],
+      }));
+    }
+
+    const clonedLeague = new League({
+      name: newName,
+      season: newSeason,
+      logo: newLogo,
+      description: description !== undefined ? description : (sourceLeague.description || ""),
+      startDate: newStartDate,
+      endDate: newEndDate,
+      status: status || "UPCOMING",
+      type: type || sourceLeague.type || "LOCAL",
+      term: term || sourceLeague.term,
+      registrationStartDate: registrationStartDate ? new Date(registrationStartDate) : sourceLeague.registrationStartDate,
+      registrationEndDate: registrationEndDate ? new Date(registrationEndDate) : sourceLeague.registrationEndDate,
+      visibility: visibility || sourceLeague.visibility || "PUBLIC",
+      pointsForWin: pointsForWin !== undefined ? Number(pointsForWin) : sourceLeague.pointsForWin,
+      pointsForDraw: pointsForDraw !== undefined ? Number(pointsForDraw) : sourceLeague.pointsForDraw,
+      allowDraws: allowDraws !== undefined ? Boolean(allowDraws) : sourceLeague.allowDraws,
+      automaticLadderRecalculation:
+        automaticLadderRecalculation !== undefined ? Boolean(automaticLadderRecalculation) : sourceLeague.automaticLadderRecalculation,
+      teams: assignedTeamIds,
+      fixtureFormat: fixtureFormat || sourceLeague.fixtureFormat || "ROUND_ROBIN",
+      groupCount: groupCount !== undefined ? Math.max(1, Number(groupCount)) : (sourceLeague.groupCount || 1),
+      numberOfRounds: numberOfRounds !== undefined ? Math.max(1, Number(numberOfRounds)) : (sourceLeague.numberOfRounds || 1),
+      fee: newFee,
+      sessionDates: req.body.sessionDates || sourceLeague.sessionDates || [],
+      matchDuration: matchDuration !== undefined ? Math.max(1, Number(matchDuration)) : (sourceLeague.matchDuration || 90),
+      breakBetweenMatches:
+        breakBetweenMatches !== undefined ? Math.max(0, Number(breakBetweenMatches)) : (sourceLeague.breakBetweenMatches || 15),
+      numberOfFields: numberOfFields !== undefined ? Math.max(1, Number(numberOfFields)) : (sourceLeague.numberOfFields || 1),
+      startTime: startTime || sourceLeague.startTime || "10:00",
+      fixtureGenerated: false, // ⚠️ NO fixtures are cloned!
+      generationType: sourceLeague.generationType || "MANUAL",
+      groups: newGroups,
+    });
+
+    await clonedLeague.save(sessionOption);
+    createdLeagueId = clonedLeague._id;
+
+    if (assignedTeamIds.length > 0) {
+      // Initialize fresh standings (0 games, 0 points) for all enrolled teams
+      const standingOps = assignedTeamIds.map((tId) => ({
+        updateOne: {
+          filter: { league: clonedLeague._id, team: tId },
+          update: {
+            $setOnInsert: {
+              league: clonedLeague._id,
+              team: tId,
+              group: "",
+              played: 0,
+              won: 0,
+              drawn: 0,
+              lost: 0,
+              goalsFor: 0,
+              goalsAgainst: 0,
+              goalDifference: 0,
+              points: 0,
+            },
+          },
+          upsert: true,
+        },
+      }));
+      await Standing.bulkWrite(standingOps, sessionOption);
+
+      // Synchronize team model with new league enrollment & default players
+      await syncTeamsLeagueData({
+        teamIds: assignedTeamIds,
+        leagueId: clonedLeague._id,
+        teamFee: newFee,
+        round: clonedLeague.numberOfRounds || null,
+        sessionDates: clonedLeague.sessionDates || [],
+        groups: clonedLeague.groups || [],
+        status: "ACTIVE",
+        sessionOption,
+      });
+    }
+
+    if (useSession && session) {
+      await session.commitTransaction();
+      session.endSession();
+    }
+
+    // Process fee invoices if applicable
+    if (newFee > 0 && assignedTeamIds.length > 0) {
+      for (const tId of assignedTeamIds) {
+        try {
+          await processLeagueInvoicesForTeam({
+            leagueId: clonedLeague._id,
+            teamId: tId,
+            amount: newFee,
+          });
+        } catch (invErr) {
+          console.error(`[League Clone] Error processing invoices for team ${tId}:`, invErr.message);
+        }
+      }
+    }
+
+    const populatedLeague = await League.findById(clonedLeague._id).populate({
+      path: "teams",
+      select: "teamName logo coach assistantCoach ageGroup players leagues",
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "League cloned successfully with teams and players (without fixtures)",
+      data: {
+        league: populatedLeague,
+        sourceLeagueId: sourceLeague._id,
+        sourceLeagueName: sourceLeague.name,
+        teamsCount: assignedTeamIds.length,
+        fixturesCount: 0,
+        duplicateTeams: shouldDuplicateTeams,
+      },
+    });
+  } catch (err) {
+    if (useSession && session) {
+      try {
+        await session.abortTransaction();
+        session.endSession();
+      } catch (abortErr) {
+        console.error("[League Clone] Error aborting transaction:", abortErr.message);
+      }
+    } else if (createdLeagueId) {
+      try {
+        await League.findByIdAndDelete(createdLeagueId);
+        await Standing.deleteMany({ league: createdLeagueId });
+      } catch (cleanupErr) {
+        console.error("[League Clone] Cleanup error after failure:", cleanupErr.message);
+      }
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};
+
 exports.generateRandomFixtures = async (req, res) => {
   const { leagueId } = req.params;
 
@@ -769,6 +1028,8 @@ exports.getAllLeagues = async (req, res) => {
     const limit = parseInt(req.query.limit, 10) || 10;
     const search = req.query.search?.trim() || "";
     const type = (req.query.type || req.query.leagueType || "")?.trim().toUpperCase();
+    const status = req.query.status?.trim().toUpperCase();
+    const term = req.query.term || req.query.termId;
 
     const skip = (page - 1) * limit;
 
@@ -795,8 +1056,21 @@ exports.getAllLeagues = async (req, res) => {
       filter.type = type;
     }
 
+    if (status && status !== "ALL") {
+      if (["UPCOMING", "ACTIVE", "COMPLETED"].includes(status)) {
+        filter.status = status;
+      }
+    }
+
+    if (term && term !== "ALL") {
+      if (mongoose.Types.ObjectId.isValid(term)) {
+        filter.term = term;
+      }
+    }
+
     const [leagues, total] = await Promise.all([
       League.find(filter)
+        .populate("term", "name year startDate endDate status")
         .populate({
           path: "teams",
           populate: [
@@ -1843,8 +2117,8 @@ exports.recordMatchEvent = async (req, res) => {
       await User.findByIdAndUpdate(player, playerUpdate);
 
       await PlayerStatistics.findOneAndUpdate(
-        { player, league: match.league, team },
-        { ...statsUpdate, $setOnInsert: { appearances: 0, cleanSheets: 0, minutesPlayed: 0 } },
+        { player, league: match.league },
+        { ...statsUpdate, $set: { team }, $setOnInsert: { appearances: 0, cleanSheets: 0, minutesPlayed: 0 } },
         { upsert: true, new: true }
       );
     }
@@ -1984,7 +2258,6 @@ exports.completeMatch = async (req, res) => {
           {
             player: player.player,
             league: match.league,
-            team: team._id,
           },
           {
             $inc: {
@@ -1997,6 +2270,7 @@ exports.completeMatch = async (req, res) => {
               redCards: player.redCards || 0,
             },
             $set: {
+              team: team._id,
               rating: player.rating || 0,
             },
           },
@@ -4979,9 +5253,10 @@ exports.updateFixture = async (req, res) => {
 
           playerStatsOps.push({
             updateOne: {
-              filter: { player: pId, league: oldLeague, team: pTeamId },
+              filter: { player: pId, league: oldLeague },
               update: {
                 $inc: inc,
+                $set: { team: pTeamId },
                 $setOnInsert: { appearances: 0, cleanSheets: 0, minutesPlayed: 0, yellowCards: 0, redCards: 0 },
               },
               upsert: true,
@@ -5132,6 +5407,59 @@ exports.deleteFixture = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Fixture deleted successfully",
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+exports.deleteRoundFixtures = async (req, res) => {
+  try {
+    const leagueId = req.params.leagueId || req.body.leagueId || req.query.leagueId;
+    const round = req.params.round || req.body.round || req.query.round;
+
+    if (!leagueId || !mongoose.Types.ObjectId.isValid(leagueId)) {
+      return res.status(400).json({ success: false, message: "Valid League ID is required" });
+    }
+
+    const roundNum = Number(round);
+    if (!round || isNaN(roundNum) || roundNum < 1) {
+      return res.status(400).json({ success: false, message: "A valid positive round number is required" });
+    }
+
+    const league = await League.findById(leagueId);
+    if (!league) {
+      return res.status(404).json({ success: false, message: "League not found" });
+    }
+
+    const fixtures = await Fixture.find({ league: leagueId, round: roundNum });
+    if (!fixtures || fixtures.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `No fixtures found for round ${roundNum} in this league`,
+      });
+    }
+
+    const fixtureIds = fixtures.map((f) => f._id);
+    const wasAnyCompleted = fixtures.some((f) => f.status === "COMPLETED");
+
+    await Promise.all([
+      Fixture.deleteMany({ _id: { $in: fixtureIds } }),
+      MatchEvent.deleteMany({ match: { $in: fixtureIds } }),
+    ]);
+
+    if (wasAnyCompleted) {
+      await recalculateLeagueStandings(leagueId);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Round ${roundNum} fixtures deleted successfully (${fixtures.length} fixture${fixtures.length > 1 ? "s" : ""} removed)`,
+      data: {
+        leagueId,
+        round: roundNum,
+        deletedCount: fixtures.length,
+      },
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

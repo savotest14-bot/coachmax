@@ -117,6 +117,7 @@ const {
   removeTeamFromLeague,
   updateFixture,
   deleteFixture,
+  deleteRoundFixtures,
   updateTeamStatistics,
   updateTeamPlayerStatistics,
   getTeamPlayerStatistics,
@@ -308,6 +309,7 @@ router.put("/training/:sessionId", auth, uploads.array("attachments", 5), update
 
 // League Tournament configurations (Admin only)
 router.post("/leagues", auth, isAdmin, uploads.single("leagueLogo"), createLeague);
+
 router.get(
   "/leagues",
   auth,
@@ -325,6 +327,7 @@ router.post("/leagues/:leagueId/generate-random-fixtures", auth, isAdmin, genera
 router.post("/leagues/:leagueId/fixtures", auth, isAdmin, createFixture);
 router.put("/leagues/:leagueId/fixtures/:fixtureId", auth, isAdmin, updateFixture);
 router.delete("/leagues/:leagueId/fixtures/:fixtureId", auth, isAdmin, deleteFixture);
+router.delete("/leagues/:leagueId/rounds/:round", auth, isAdmin, deleteRoundFixtures);
 
 router.post("/teams", auth, isAdmin, uploads.single("teamLogo"), createTeam);
 router.get("/getAllTeams", auth, isAdmin, getAllTeams)
