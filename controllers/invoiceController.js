@@ -550,3 +550,5 @@ exports.getParentInvoiceById = async (req, res) => {
     });
   }
 };
+
+exports.generateInvoiceNumber = generateInvoiceNumber;

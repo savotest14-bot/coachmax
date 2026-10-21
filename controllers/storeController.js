@@ -6,6 +6,10 @@ const Invoice = require("../models/Invoice");
 const Parent = require("../models/Parent");
 const mongoose = require("mongoose");
 const { sendNotification } = require("../services/notificationService");
+let broadcastSidebarBadges = null;
+try {
+  ({ broadcastSidebarBadges } = require("../sockets/chatSocket"));
+} catch (e) {}
 
 exports.createCategory = async (req, res) => {
   try {
@@ -809,6 +813,10 @@ exports.checkout = async (req, res) => {
       console.error("Admin checkout notification error:", notifErr.message);
     }
 
+    if (broadcastSidebarBadges) {
+      broadcastSidebarBadges().catch(() => {});
+    }
+
     res.status(201).json({
       success: true,
       message: "Order placed successfully. Invoice generated.",
@@ -971,6 +979,10 @@ exports.updateOrderStatus = async (req, res) => {
     const updatedOrder = await Order.findById(id)
       .populate("parent", "fullName email phone")
       .populate("invoice");
+
+    if (broadcastSidebarBadges) {
+      broadcastSidebarBadges().catch(() => {});
+    }
 
     return res.status(200).json({
       success: true,

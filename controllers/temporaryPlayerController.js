@@ -17,6 +17,10 @@ const { generateClassInvoice } = require("../services/invoiceService");
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
+let broadcastSidebarBadges = null;
+try {
+  ({ broadcastSidebarBadges } = require("../sockets/chatSocket"));
+} catch (e) {}
 
 exports.createTemporaryPlayer = async (req, res) => {
   const session = await mongoose.startSession();
@@ -238,6 +242,10 @@ exports.createTemporaryPlayer = async (req, res) => {
           coachId: coachId.toString(),
         },
       });
+    }
+
+    if (broadcastSidebarBadges) {
+      broadcastSidebarBadges().catch(() => {});
     }
 
     res.status(201).json({
@@ -476,6 +484,10 @@ exports.approveTemporaryPlayer = async (req, res) => {
       });
     }
 
+    if (broadcastSidebarBadges) {
+      broadcastSidebarBadges().catch(() => {});
+    }
+
     res.json({
       success: true,
       message: "Player approved successfully and activated.",
@@ -528,6 +540,10 @@ exports.rejectTemporaryPlayer = async (req, res) => {
         type: "TEMPORARY_PLAYER_ADDED",
         data: { playerId: player._id.toString() },
       });
+    }
+
+    if (broadcastSidebarBadges) {
+      broadcastSidebarBadges().catch(() => {});
     }
 
     res.json({
@@ -599,6 +615,10 @@ exports.deleteTemporaryPlayer = async (req, res) => {
 
     await session.commitTransaction();
     session.endSession();
+
+    if (broadcastSidebarBadges) {
+      broadcastSidebarBadges().catch(() => {});
+    }
 
     res.json({
       success: true,

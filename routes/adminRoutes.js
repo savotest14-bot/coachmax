@@ -4,6 +4,7 @@ const {
   logout,
   updatePaymentStatus,
   getUsers,
+  getPlayerStats,
   createBanner,
   updateBanner,
   deleteBanner,
@@ -55,9 +56,11 @@ const {
   removeClassFromUser,
   transferPlayerClass,
   getPlayerDetails,
+  updatePlayer,
   changeCoachPassword,
   toggleCoachActiveStatus,
   getTermEarningsReport,
+  getSidebarBadges,
 } = require("../controllers/adminAuthController");
 
 const {
@@ -191,6 +194,13 @@ const {
   getEventParticipants,
   getEventDetailsAdmin,
   exportEventParticipants,
+  configureCampSessions,
+  toggleCampDateAvailability,
+  getEventAttendanceGrid,
+  markEventSingleAttendance,
+  markEventBulkAttendance,
+  getEventRegistrationDetails,
+  updateEventRegistrationPaymentStatus,
 } = require("../controllers/eventController");
 
 const {
@@ -207,12 +217,14 @@ router.get("/registration-requests", auth, isAdmin, getRegistrationRequests);
 router.get("/unallocated-players", auth, isAdmin, getUnallocatedPlayers);
 router.get("/players/search", auth, isAdmin, getPlayersByCategoryAndProgram);
 router.patch("/player/:playerId/assign-classes", auth, isAdmin, assignClassesToPlayer);
+router.get("/sidebar-badges", auth, isAdmin, getSidebarBadges);
 
 
 // Administrative Auth & Players Mod
 router.post("/login", adminLogin);
 router.post("/logout", auth, logout);
 router.get("/getUsers", auth, getUsers);
+router.get("/playerStats", auth, getPlayerStats);
 router.put("/updatePaymentStatus/:userId", auth, isAdmin, updatePaymentStatus);
 router.put("/updateRating/:userId", auth, isAdmin, updatePlayerRating);
 router.post("/assignClass/:userId", auth, isAdmin, assignClassToUser);
@@ -236,6 +248,18 @@ router.put("/updateEventStatus/:id", auth, isAdmin, updateEventStatus);
 router.put("/updateEvent/:id", auth, isAdmin, uploads.single("eventImg"), updateEvent);
 router.get("/getEventParticipants/:eventId", auth, isAdmin, getEventParticipants);
 router.get("/getEventDetails/:eventId", auth, getEventDetailsAdmin);
+
+// Holiday Camp Dates & Sessions Configuration
+router.post("/events/:eventId/sessions", auth, isAdmin, configureCampSessions);
+router.patch("/events/:eventId/toggle-date", auth, isAdmin, toggleCampDateAvailability);
+
+// Holiday Camp & Event Attendance
+router.get("/events/:eventId/attendance-grid", auth, getEventAttendanceGrid);
+router.post("/events/:eventId/attendance/single", auth, markEventSingleAttendance);
+router.post("/events/:eventId/attendance/bulk", auth, markEventBulkAttendance);
+router.get("/events/registrations/:registrationId", auth, getEventRegistrationDetails);
+router.patch("/events/registrations/:registrationId/payment-status", auth, updateEventRegistrationPaymentStatus);
+router.put("/events/registrations/:registrationId/payment-status", auth, updateEventRegistrationPaymentStatus);
 
 // Data Exports
 router.post("/exportUsers", auth, isAdmin, exportUsers);
@@ -416,6 +440,15 @@ router.get(
 );
 
 // Notifications & FCM Push Tokens (Admin)
+router.put(
+  "/updatePlayer/:playerId",
+  auth,
+  isAdmin,
+  uploads.single("profileImage"),
+  updatePlayer
+);
+
+// ✅ Notifications & FCM Push Tokens (Admin)
 router.get("/notifications", auth, isAdmin, getAdminNotifications);
 router.patch("/notifications/read-all", auth, isAdmin, markAllAdminNotificationsRead);
 router.patch("/notifications/:notificationId/read", auth, isAdmin, markAdminNotificationRead);

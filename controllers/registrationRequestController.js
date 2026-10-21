@@ -8,6 +8,10 @@ const Program = require("../models/Program");
 const Notification = require("../models/Notification");
 const { sendNotification } = require("../services/notificationService");
 const { generateClassInvoice } = require("../services/invoiceService");
+let broadcastSidebarBadges = null;
+try {
+  ({ broadcastSidebarBadges } = require("../sockets/chatSocket"));
+} catch (e) {}
 
 exports.getRegistrationRequests = async (req, res) => {
   try {
@@ -549,6 +553,10 @@ Payment Status: ${paymentStatus}`;
       });
     } catch (notifErr) {
       console.error("Failed to create parent allocation notification:", notifErr.message);
+    }
+
+    if (broadcastSidebarBadges) {
+      broadcastSidebarBadges().catch(() => {});
     }
 
     return res.status(200).json({

@@ -159,8 +159,9 @@ exports.markAttendance = async (req, res) => {
 exports.markSingleAttendance = async (req, res) => {
   try {
     const { classId } = req.params;
-    const { sessionDate, playerId, status, comment } = req.body;
+    const { sessionDate, playerId, status, comment, reason, remarks } = req.body;
     const coachId = req.admin._id;
+    const trimmedReason = reason !== undefined ? String(reason).trim() : (remarks !== undefined ? String(remarks).trim() : undefined);
 
     if (!sessionDate || !playerId || !status) {
       return res.status(400).json({
@@ -218,12 +219,18 @@ exports.markSingleAttendance = async (req, res) => {
     if (existingRecord) {
       existingRecord.status = status;
       existingRecord.comment = comment || "";
+      if (trimmedReason !== undefined) {
+        existingRecord.reason = trimmedReason;
+        existingRecord.remarks = trimmedReason;
+      }
       existingRecord.lateArrival = status === "LATE";
     } else {
       attendance.records.push({
         player: playerId,
         status,
         comment: comment || "",
+        reason: trimmedReason || "",
+        remarks: trimmedReason || "",
         lateArrival: status === "LATE",
       });
     }
@@ -610,8 +617,9 @@ exports.markTeamAttendance = async (req, res) => {
 exports.markSingleTeamAttendance = async (req, res) => {
   try {
     const { teamId } = req.params;
-    const { sessionDate, playerId, status, comment, leagueId } = req.body;
+    const { sessionDate, playerId, status, comment, reason, remarks, leagueId } = req.body;
     const coachId = req.admin ? req.admin._id : null;
+    const trimmedReason = reason !== undefined ? String(reason).trim() : (remarks !== undefined ? String(remarks).trim() : undefined);
 
     if (!sessionDate || !playerId || !status) {
       return res.status(400).json({
@@ -732,15 +740,22 @@ exports.markSingleTeamAttendance = async (req, res) => {
       });
     }
 
+
     if (existingRecord) {
       existingRecord.status = status;
       existingRecord.comment = comment || "";
+      if (trimmedReason !== undefined) {
+        existingRecord.reason = trimmedReason;
+        existingRecord.remarks = trimmedReason;
+      }
       existingRecord.lateArrival = status === "LATE";
     } else {
       attendance.records.push({
         player: playerId,
         status,
         comment: comment || "",
+        reason: trimmedReason || "",
+        remarks: trimmedReason || "",
         lateArrival: status === "LATE",
       });
     }
@@ -769,12 +784,18 @@ exports.markSingleTeamAttendance = async (req, res) => {
           if (rec) {
             rec.status = status;
             rec.comment = comment || "";
+            if (trimmedReason !== undefined) {
+              rec.reason = trimmedReason;
+              rec.remarks = trimmedReason;
+            }
             rec.lateArrival = status === "LATE";
           } else {
             existing.records.push({
               player: playerId,
               status,
               comment: comment || "",
+              reason: trimmedReason || "",
+              remarks: trimmedReason || "",
               lateArrival: status === "LATE",
             });
           }

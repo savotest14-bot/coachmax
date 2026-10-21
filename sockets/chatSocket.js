@@ -199,6 +199,38 @@ const initSocket = (server) => {
     // Auto-deliver unread messages for this user (Single Tick ➔ Double Gray Tick)
     autoDeliverUnreadMessages(userIdStr);
 
+    // Join admin channel and send initial badges if admin
+    if (socket.role === "SUPER_ADMIN" || socket.role === "ADMIN") {
+      socket.join("admin_channel");
+      try {
+        const { calculateSidebarBadges } = require("../controllers/adminAuthController");
+        if (typeof calculateSidebarBadges === "function") {
+          calculateSidebarBadges().then((badges) => {
+            socket.emit("sidebar_badges_update", badges);
+          }).catch((err) => {
+            console.error("Failed to send initial sidebar badges:", err.message);
+          });
+        }
+      } catch (e) {}
+    }
+
+    // Explicit request from client to fetch sidebar badges via socket
+    socket.on("get_sidebar_badges", async (callback) => {
+      try {
+        const { calculateSidebarBadges } = require("../controllers/adminAuthController");
+        const badges = await calculateSidebarBadges();
+        if (typeof callback === "function") {
+          callback({ success: true, data: badges });
+        } else {
+          socket.emit("sidebar_badges_update", badges);
+        }
+      } catch (err) {
+        if (typeof callback === "function") {
+          callback({ success: false, message: err.message });
+        }
+      }
+    });
+
     // ─────────────────────────────────────────────
     //  Check User Online / Offline Status
     // ─────────────────────────────────────────────
@@ -649,10 +681,27 @@ const getIO = () => {
   return io;
 };
 
+/**
+ * Broadcast updated sidebar badges to all connected admins
+ */
+const broadcastSidebarBadges = async () => {
+  try {
+    if (!io) return;
+    const { calculateSidebarBadges } = require("../controllers/adminAuthController");
+    if (typeof calculateSidebarBadges === "function") {
+      const badges = await calculateSidebarBadges();
+      io.to("admin_channel").emit("sidebar_badges_update", badges);
+    }
+  } catch (err) {
+    console.error("broadcastSidebarBadges error:", err.message);
+  }
+};
+
 module.exports = {
   initSocket,
   getIO,
   isUserOnline,
   getUserLastSeen,
   calculateTickStatus,
+  broadcastSidebarBadges,
 };

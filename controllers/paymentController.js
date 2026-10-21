@@ -8,6 +8,10 @@ const Notification = require("../models/Notification");
 const BankDetails = require("../models/BankDetails");
 const PaymentSettings = require("../models/PaymentSettings");
 const { sendNotification } = require("../services/notificationService");
+let broadcastSidebarBadges = null;
+try {
+  ({ broadcastSidebarBadges } = require("../sockets/chatSocket"));
+} catch (e) {}
 
 const getOrCreatePaymentSettings = async () => {
   let settings = await PaymentSettings.findOne();
@@ -597,6 +601,19 @@ exports.approvePayment = async (req, res) => {
       );
     }
 
+    // Holiday Camp or Event Fee: sync EventRegistration paymentStatus
+    if (invoice.event || invoice.eventRegistration || invoice.type === "CAMP_FEE" || invoice.type === "TOURNAMENT_FEE") {
+      const EventRegistration = require("../models/EventRegistration");
+      const filter = invoice.eventRegistration
+        ? { _id: invoice.eventRegistration }
+        : { invoice: invoice._id };
+      await EventRegistration.updateMany(
+        filter,
+        { paymentStatus: "PAID", status: "REGISTERED" },
+        { session }
+      );
+    }
+
     await session.commitTransaction();
     session.endSession();
 
@@ -617,6 +634,10 @@ exports.approvePayment = async (req, res) => {
       });
     } catch (notifErr) {
       console.error("Notification error:", notifErr.message);
+    }
+
+    if (broadcastSidebarBadges) {
+      broadcastSidebarBadges().catch(() => {});
     }
 
     return res.status(200).json({
@@ -680,6 +701,10 @@ exports.rejectPayment = async (req, res) => {
       });
     } catch (notifErr) {
       console.error("Notification error:", notifErr.message);
+    }
+
+    if (broadcastSidebarBadges) {
+      broadcastSidebarBadges().catch(() => {});
     }
 
     return res.status(200).json({

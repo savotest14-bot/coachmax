@@ -116,30 +116,191 @@ exports.getUsers = async (req, res) => {
       paymentStatus,
       category,
       program,
+      term,
+      medical,
+      ageGroup,
       unallocated,
       page = 1,
       limit = 10,
       search = "",
     } = req.query;
 
-    const validPaymentStatus = ["TRIAL", "UNPAID", "PAID", "OVER_DUE"];
+    const validPaymentStatus = ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "ALL"];
 
-    if (paymentStatus && !validPaymentStatus.includes(paymentStatus)) {
+    if (paymentStatus && !validPaymentStatus.includes(paymentStatus.toUpperCase())) {
       return res.status(400).json({
         message: "Invalid paymentStatus",
       });
     }
 
-    page = Number(page);
-    limit = Number(limit);
+    page = Math.max(1, parseInt(page, 10) || 1);
+    limit = Math.max(1, Math.min(100, parseInt(limit, 10) || 10));
 
     const andConditions = [{ parentId: { $exists: true } }];
 
-    if (paymentStatus) andConditions.push({ "classPaymentStatuses.paymentStatus": paymentStatus });
-    if (category) {
-      andConditions.push({ $or: [{ category }, { categories: category }] });
+    // Term filtering
+    let termClassIds = [];
+    if (term && term !== "All") {
+      let termId = term;
+      if (!mongoose.Types.ObjectId.isValid(term)) {
+        const foundTerm = await Term.findOne({ name: { $regex: term, $options: "i" } });
+        if (foundTerm) termId = foundTerm._id;
+      }
+      if (mongoose.Types.ObjectId.isValid(termId)) {
+        termClassIds = await Class.find({ term: termId }).distinct("_id");
+        andConditions.push({
+          $or: [
+            { term: termId },
+            { assignedClasses: { $in: termClassIds } },
+            { "classPaymentStatuses.class": { $in: termClassIds } },
+          ],
+        });
+      }
     }
-    if (program) andConditions.push({ programs: program });
+
+    // Payment Status filtering (supports term-wise when term is selected)
+    if (paymentStatus && paymentStatus !== "All") {
+      const statusUpper = paymentStatus.toUpperCase();
+      if (termClassIds.length > 0) {
+        if (statusUpper === "UNPAID") {
+          andConditions.push({
+            classPaymentStatuses: {
+              $elemMatch: {
+                class: { $in: termClassIds },
+                paymentStatus: { $in: ["UNPAID", "OVER_DUE"] },
+              },
+            },
+          });
+        } else {
+          andConditions.push({
+            classPaymentStatuses: {
+              $elemMatch: {
+                class: { $in: termClassIds },
+                paymentStatus: statusUpper,
+              },
+            },
+          });
+        }
+      } else {
+        if (statusUpper === "UNPAID") {
+          andConditions.push({
+            $or: [
+              { "classPaymentStatuses.paymentStatus": { $in: ["UNPAID", "OVER_DUE"] } },
+              { paymentStatus: { $in: ["UNPAID", "OVER_DUE"] } },
+            ],
+          });
+        } else if (statusUpper === "PAID") {
+          andConditions.push({
+            $or: [
+              { "classPaymentStatuses.paymentStatus": "PAID" },
+              { paymentStatus: "PAID" },
+            ],
+          });
+        } else if (statusUpper === "TRIAL") {
+          andConditions.push({
+            $or: [
+              { "classPaymentStatuses.paymentStatus": "TRIAL" },
+              { paymentStatus: "TRIAL" },
+              { classPaymentStatuses: { $exists: false } },
+              { classPaymentStatuses: { $size: 0 } },
+            ],
+          });
+        } else {
+          andConditions.push({
+            $or: [
+              { "classPaymentStatuses.paymentStatus": statusUpper },
+              { paymentStatus: statusUpper },
+            ],
+          });
+        }
+      }
+    }
+
+    // Program / Category filtering
+    if (program && program !== "All") {
+      const progRegex = new RegExp(program, "i");
+      const matchingCats = await Category.find({ name: progRegex }).distinct("_id");
+      const matchingProgs = await Program.find({
+        $or: [{ name: progRegex }, { category: { $in: matchingCats } }],
+      }).distinct("_id");
+
+      const progOr = [];
+      if (mongoose.Types.ObjectId.isValid(program)) {
+        progOr.push({ programs: program }, { category: program }, { categories: program });
+      }
+      if (matchingCats.length > 0) {
+        progOr.push({ category: { $in: matchingCats } }, { categories: { $in: matchingCats } });
+      }
+      if (matchingProgs.length > 0) {
+        progOr.push({ programs: { $in: matchingProgs } });
+      }
+      if (progOr.length > 0) {
+        andConditions.push({ $or: progOr });
+      }
+    }
+
+    if (category && category !== "All") {
+      if (mongoose.Types.ObjectId.isValid(category)) {
+        andConditions.push({ $or: [{ category }, { categories: category }] });
+      } else {
+        const catDocs = await Category.find({ name: { $regex: category, $options: "i" } }).distinct("_id");
+        if (catDocs.length > 0) {
+          andConditions.push({ $or: [{ category: { $in: catDocs } }, { categories: { $in: catDocs } }] });
+        }
+      }
+    }
+
+    // Medical Condition filter
+    if (medical !== undefined && medical !== "All") {
+      if (medical === "true" || medical === true) {
+        andConditions.push({ isMedicalCondition: true });
+      } else if (medical === "false" || medical === false) {
+        andConditions.push({
+          $or: [
+            { isMedicalCondition: false },
+            { isMedicalCondition: { $exists: false } },
+            { isMedicalCondition: null },
+          ],
+        });
+      }
+    }
+
+    // Age Group filter
+    if (ageGroup && ageGroup !== "All") {
+      const ageMatches = ageGroup.match(/\d+/g);
+      const orAgeList = [];
+
+      const matchingAgePrograms = await Program.find({
+        $or: [
+          { ageGroup: { $regex: ageGroup, $options: "i" } },
+          { name: { $regex: ageGroup, $options: "i" } },
+        ],
+      }).distinct("_id");
+
+      if (matchingAgePrograms.length > 0) {
+        orAgeList.push({ programs: { $in: matchingAgePrograms } });
+      }
+
+      if (ageMatches && ageMatches.length > 0) {
+        const currentYear = new Date().getFullYear();
+        if (ageMatches.length >= 2) {
+          const minAge = parseInt(ageMatches[0], 10);
+          const maxAge = parseInt(ageMatches[1], 10);
+          const minDob = new Date(currentYear - maxAge - 1, 0, 1);
+          const maxDob = new Date(currentYear - minAge + 1, 11, 31);
+          orAgeList.push({ dob: { $gte: minDob, $lte: maxDob } });
+        } else {
+          const targetAge = parseInt(ageMatches[0], 10);
+          const minDob = new Date(currentYear - targetAge - 1, 0, 1);
+          const maxDob = new Date(currentYear - (targetAge > 2 ? targetAge - 2 : 0), 11, 31);
+          orAgeList.push({ dob: { $gte: minDob, $lte: maxDob } });
+        }
+      }
+
+      if (orAgeList.length > 0) {
+        andConditions.push({ $or: orAgeList });
+      }
+    }
 
     if (unallocated === "true") {
       const pendingPlayerIds = await RegistrationRequest.find({ status: "PENDING" }).distinct("player");
@@ -165,12 +326,31 @@ exports.getUsers = async (req, res) => {
       });
     }
 
-    if (search) {
+    if (search && search.trim()) {
+      const searchTrim = search.trim();
+      const searchRegex = { $regex: searchTrim, $options: "i" };
+      const matchingParents = await Parent.find({
+        $or: [
+          { fullName: searchRegex },
+          { email: searchRegex },
+          { phone: searchRegex },
+          { emergencyContact: searchRegex },
+        ],
+      }).distinct("_id");
+
       const searchCriteria = [
-        { fullName: { $regex: search, $options: "i" } },
-        { firstName: { $regex: search, $options: "i" } },
-        { lastName: { $regex: search, $options: "i" } },
+        { fullName: searchRegex },
+        { firstName: searchRegex },
+        { lastName: searchRegex },
+        { email: searchRegex },
+        { phone: searchRegex },
+        { contactName: searchRegex },
       ];
+
+      if (matchingParents.length > 0) {
+        searchCriteria.push({ parentId: { $in: matchingParents } });
+      }
+
       andConditions.push({ $or: searchCriteria });
     }
 
@@ -183,6 +363,12 @@ exports.getUsers = async (req, res) => {
       .populate("category", "name")
       .populate("categories", "name")
       .populate("programs", "name")
+      .populate("term", "name year")
+      .populate({
+        path: "classPaymentStatuses.class",
+        select: "name term program category",
+        populate: { path: "term", select: "name year" },
+      })
       .populate({
         path: "assignedClasses",
         populate: [
@@ -196,16 +382,196 @@ exports.getUsers = async (req, res) => {
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit);
+
+    // Compute dynamic player stats scoped to term (or all database players if term is not specified)
+    const termAndConditions = [{ parentId: { $exists: true } }];
+    if (termClassIds.length > 0) {
+      termAndConditions.push({
+        $or: [
+          { term: term },
+          { assignedClasses: { $in: termClassIds } },
+          { "classPaymentStatuses.class": { $in: termClassIds } },
+        ],
+      });
+    } else if (term && term !== "All" && mongoose.Types.ObjectId.isValid(term)) {
+      termAndConditions.push({ term: term });
+    }
+
+    const eliteCats = await Category.find({ name: { $regex: "ACADEMY|ELITE", $options: "i" } }).distinct("_id");
+    const elitePrograms = await Program.find({ name: { $regex: "ELITE", $options: "i" } }).distinct("_id");
+    const schoolCats = await Category.find({ name: { $regex: "SCHOOL", $options: "i" } }).distinct("_id");
+    const schoolPrograms = await Program.find({
+      $or: [
+        { name: { $regex: "SCHOOL", $options: "i" } },
+        { category: { $in: schoolCats } },
+      ],
+    }).distinct("_id");
+
+    const reqTermQuery = (term && term !== "All" && mongoose.Types.ObjectId.isValid(term))
+      ? { preferredTerm: term }
+      : {};
+
+    const [
+      totalCount,
+      approvedCount,
+      pendingUsers,
+      pendingReqs,
+      rejectedUsers,
+      rejectedReqs,
+      eliteCount,
+      schoolCount,
+    ] = await Promise.all([
+      User.countDocuments({ $and: [...termAndConditions, { playerStatus: { $ne: "PENDING_APPROVAL" } }] }),
+      User.countDocuments({ $and: [...termAndConditions, { playerStatus: { $in: ["ACTIVE", "APPROVED"] } }] }),
+      User.countDocuments({ $and: [...termAndConditions, { $or: [{ playerStatus: "PENDING_APPROVAL" }, { hasPendingRequest: true }] }] }),
+      RegistrationRequest.countDocuments({ status: "PENDING", ...reqTermQuery }),
+      User.countDocuments({ $and: [...termAndConditions, { playerStatus: "REJECTED" }] }),
+      RegistrationRequest.countDocuments({ status: "REJECTED", ...reqTermQuery }),
+      User.countDocuments({
+        $and: [
+          ...termAndConditions,
+          { playerStatus: { $ne: "PENDING_APPROVAL" } },
+          {
+            $or: [
+              { programs: { $in: elitePrograms } },
+              { category: { $in: eliteCats } },
+              { categories: { $in: eliteCats } },
+            ],
+          },
+        ],
+      }),
+      User.countDocuments({
+        $and: [
+          ...termAndConditions,
+          { playerStatus: { $ne: "PENDING_APPROVAL" } },
+          {
+            $or: [
+              { programs: { $in: schoolPrograms } },
+              { category: { $in: schoolCats } },
+              { categories: { $in: schoolCats } },
+            ],
+          },
+        ],
+      }),
+    ]);
+
+    const stats = {
+      totalCount,
+      approvedCount,
+      pendingCount: pendingUsers + pendingReqs,
+      rejectedCount: rejectedUsers + rejectedReqs,
+      eliteCount,
+      schoolCount,
+    };
+
     res.json({
       success: true,
       page,
       limit,
       total,
-      totalPages: Math.ceil(total / limit),
+      totalPages: Math.ceil(total / limit) || 1,
+      stats,
       users,
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getPlayerStats = async (req, res) => {
+  try {
+    const { term } = req.query;
+    let termClassIds = [];
+    const termAndConditions = [{ parentId: { $exists: true } }];
+
+    if (term && term !== "All") {
+      let termId = term;
+      if (!mongoose.Types.ObjectId.isValid(term)) {
+        const foundTerm = await Term.findOne({ name: { $regex: term, $options: "i" } });
+        if (foundTerm) termId = foundTerm._id;
+      }
+      if (mongoose.Types.ObjectId.isValid(termId)) {
+        termClassIds = await Class.find({ term: termId }).distinct("_id");
+        termAndConditions.push({
+          $or: [
+            { term: termId },
+            { assignedClasses: { $in: termClassIds } },
+            { "classPaymentStatuses.class": { $in: termClassIds } },
+          ],
+        });
+      }
+    }
+
+    const eliteCats = await Category.find({ name: { $regex: "ACADEMY|ELITE", $options: "i" } }).distinct("_id");
+    const elitePrograms = await Program.find({ name: { $regex: "ELITE", $options: "i" } }).distinct("_id");
+    const schoolCats = await Category.find({ name: { $regex: "SCHOOL", $options: "i" } }).distinct("_id");
+    const schoolPrograms = await Program.find({
+      $or: [
+        { name: { $regex: "SCHOOL", $options: "i" } },
+        { category: { $in: schoolCats } },
+      ],
+    }).distinct("_id");
+
+    const reqTermQuery = (term && term !== "All" && mongoose.Types.ObjectId.isValid(term))
+      ? { preferredTerm: term }
+      : {};
+
+    const [
+      totalCount,
+      approvedCount,
+      pendingUsers,
+      pendingReqs,
+      rejectedUsers,
+      rejectedReqs,
+      eliteCount,
+      schoolCount,
+    ] = await Promise.all([
+      User.countDocuments({ $and: [...termAndConditions, { playerStatus: { $ne: "PENDING_APPROVAL" } }] }),
+      User.countDocuments({ $and: [...termAndConditions, { playerStatus: { $in: ["ACTIVE", "APPROVED"] } }] }),
+      User.countDocuments({ $and: [...termAndConditions, { $or: [{ playerStatus: "PENDING_APPROVAL" }, { hasPendingRequest: true }] }] }),
+      RegistrationRequest.countDocuments({ status: "PENDING", ...reqTermQuery }),
+      User.countDocuments({ $and: [...termAndConditions, { playerStatus: "REJECTED" }] }),
+      RegistrationRequest.countDocuments({ status: "REJECTED", ...reqTermQuery }),
+      User.countDocuments({
+        $and: [
+          ...termAndConditions,
+          { playerStatus: { $ne: "PENDING_APPROVAL" } },
+          {
+            $or: [
+              { programs: { $in: elitePrograms } },
+              { category: { $in: eliteCats } },
+              { categories: { $in: eliteCats } },
+            ],
+          },
+        ],
+      }),
+      User.countDocuments({
+        $and: [
+          ...termAndConditions,
+          { playerStatus: { $ne: "PENDING_APPROVAL" } },
+          {
+            $or: [
+              { programs: { $in: schoolPrograms } },
+              { category: { $in: schoolCats } },
+              { categories: { $in: schoolCats } },
+            ],
+          },
+        ],
+      }),
+    ]);
+
+    const stats = {
+      totalCount,
+      approvedCount,
+      pendingCount: pendingUsers + pendingReqs,
+      rejectedCount: rejectedUsers + rejectedReqs,
+      eliteCount,
+      schoolCount,
+    };
+
+    res.json({ success: true, stats });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 };
 
@@ -475,6 +841,47 @@ exports.updatePaymentStatus = async (req, res) => {
               paymentStatus,
             });
           }
+        }
+      }
+
+      // Update composite player paymentStatus
+      if (!classId) {
+        user.paymentStatus = paymentStatus;
+      } else {
+        const allStatuses = (user.classPaymentStatuses || []).map((s) => s.paymentStatus);
+        if (allStatuses.length > 0) {
+          if (allStatuses.some((st) => st === "OVER_DUE")) {
+            user.paymentStatus = "OVER_DUE";
+          } else if (allStatuses.some((st) => st === "UNPAID")) {
+            user.paymentStatus = "UNPAID";
+          } else if (allStatuses.every((st) => st === "PAID")) {
+            user.paymentStatus = "PAID";
+          } else if (allStatuses.some((st) => st === "TRIAL")) {
+            user.paymentStatus = "TRIAL";
+          } else {
+            user.paymentStatus = paymentStatus;
+          }
+        } else {
+          user.paymentStatus = paymentStatus;
+        }
+      }
+
+      // Synchronize matching ACTIVE invoices if set to PAID
+      if (paymentStatus === "PAID") {
+        try {
+          const InvoiceModel = require("../models/Invoice");
+          const invQuery = {
+            players: user._id,
+            status: "ACTIVE",
+          };
+          if (classId) {
+            invQuery.class = classId;
+          }
+          await InvoiceModel.updateMany(invQuery, {
+            $set: { paymentStatus: "PAID" },
+          });
+        } catch (e) {
+          console.error("Error updating invoice to PAID:", e.message);
         }
       }
 
@@ -2757,7 +3164,7 @@ exports.markAttendance = async (req, res) => {
 exports.markSingleAttendance = async (req, res) => {
   try {
     const { classId } = req.params;
-    const { sessionDate, playerId, status } = req.body;
+    const { sessionDate, playerId, status, reason, remarks, comment } = req.body;
 
     if (!sessionDate || !playerId || !status) {
       return res.status(400).json({
@@ -2778,7 +3185,7 @@ exports.markSingleAttendance = async (req, res) => {
         class: classId,
         sessionDate: date,
         records: [],
-        markedBy: req.user?.id,
+        markedBy: req.user?.id || req.admin?._id,
       });
     }
 
@@ -2786,12 +3193,24 @@ exports.markSingleAttendance = async (req, res) => {
       (r) => r.player.toString() === playerId
     );
 
+    const trimmedReason = reason !== undefined ? String(reason).trim() : (remarks !== undefined ? String(remarks).trim() : undefined);
+
     if (existingRecord) {
       existingRecord.status = status;
+      if (trimmedReason !== undefined) {
+        existingRecord.reason = trimmedReason;
+        existingRecord.remarks = trimmedReason;
+      }
+      if (comment !== undefined) existingRecord.comment = comment;
+      if (status === "LATE") existingRecord.lateArrival = true;
     } else {
       attendance.records.push({
         player: playerId,
         status,
+        reason: trimmedReason || "",
+        remarks: trimmedReason || "",
+        comment: comment || "",
+        lateArrival: status === "LATE",
       });
     }
 
@@ -2804,6 +3223,7 @@ exports.markSingleAttendance = async (req, res) => {
         sessionDate: date,
         playerId,
         status,
+        reason: trimmedReason,
       },
     });
 
@@ -2837,6 +3257,8 @@ exports.getAttendanceByClass = async (req, res) => {
 
         attendanceMap[date][player._id] = {
           status: r.status,
+          reason: r.reason || r.remarks || "",
+          markedByParent: r.markedByParent || false,
           fullName: player.fullName,
           profile: player.profile,
           email: player.email,
@@ -3349,19 +3771,33 @@ exports.getClassFullTable = async (req, res) => {
         .toISOString()
         .split("T")[0];
 
-      attendanceMap[date] = {};
+      if (!attendanceMap[date]) attendanceMap[date] = {};
 
       att.records.forEach((r) => {
-        attendanceMap[date][r.player.toString()] = r.status;
+        attendanceMap[date][r.player.toString()] = {
+          status: r.status,
+          reason: r.reason || r.remarks || "",
+          markedByParent: r.markedByParent || false,
+          comment: r.comment || "",
+          lateArrival: r.lateArrival || false,
+        };
       });
     });
 
     const players = cls.players.map((player) => {
       const attendance = {};
+      const attendanceDetails = {};
 
       sessionDates.forEach((date) => {
-        attendance[date] =
-          attendanceMap[date]?.[player._id] || "NOT_MARKED";
+        const rec = attendanceMap[date]?.[player._id];
+        const status = rec?.status || "NOT_MARKED";
+        attendance[date] = status;
+        attendanceDetails[date] = {
+          status,
+          reason: rec?.reason || "",
+          markedByParent: rec?.markedByParent || false,
+          comment: rec?.comment || "",
+        };
       });
 
       return {
@@ -3387,6 +3823,7 @@ exports.getClassFullTable = async (req, res) => {
           }
           : null,
         attendance,
+        attendanceDetails,
       };
     });
 
@@ -3656,9 +4093,15 @@ exports.getTeamFullTable = async (req, res) => {
       if (!hasExplicitSessions) {
         sessionDateSet.add(date);
       }
-      attendanceMap[date] = {};
+      if (!attendanceMap[date]) attendanceMap[date] = {};
       att.records.forEach((r) => {
-        attendanceMap[date][r.player.toString()] = r.status;
+        attendanceMap[date][r.player.toString()] = {
+          status: r.status,
+          reason: r.reason || r.remarks || "",
+          markedByParent: r.markedByParent || false,
+          comment: r.comment || "",
+          lateArrival: r.lateArrival || false,
+        };
       });
     });
 
@@ -3672,8 +4115,17 @@ exports.getTeamFullTable = async (req, res) => {
     const players = sourcePlayers.map((item) => {
       const player = item.player && typeof item.player === "object" ? item.player : { _id: item.player };
       const attendance = {};
+      const attendanceDetails = {};
       sessionDates.forEach((date) => {
-        attendance[date] = attendanceMap[date]?.[player._id?.toString()] || "NOT_MARKED";
+        const rec = attendanceMap[date]?.[player._id?.toString()];
+        const status = rec?.status || "NOT_MARKED";
+        attendance[date] = status;
+        attendanceDetails[date] = {
+          status,
+          reason: rec?.reason || "",
+          markedByParent: rec?.markedByParent || false,
+          comment: rec?.comment || "",
+        };
       });
 
       const playerStats = item.statistics ? {
@@ -3718,6 +4170,7 @@ exports.getTeamFullTable = async (req, res) => {
           }
           : null,
         attendance,
+        attendanceDetails,
       };
 
       if (isLeagueView) {
@@ -3945,9 +4398,25 @@ exports.getPlayerDetails = async (req, res) => {
       })
       .populate("category", "name")
       .populate("programs", "name")
-      .populate("term", "name")
-      .populate("assignedClasses", "name dayOfWeek startTime endTime")
-      .populate("classPaymentStatuses.class", "name")
+      .populate("term", "name year startDate endDate")
+      .populate({
+        path: "assignedClasses",
+        select: "name dayOfWeek startTime endTime price location venue term program category",
+        populate: [
+          { path: "term", select: "name year startDate endDate" },
+          { path: "program", select: "name" },
+          { path: "category", select: "name" },
+        ],
+      })
+      .populate({
+        path: "classPaymentStatuses.class",
+        select: "name dayOfWeek startTime endTime price location venue term program category",
+        populate: [
+          { path: "term", select: "name year startDate endDate" },
+          { path: "program", select: "name" },
+          { path: "category", select: "name" },
+        ],
+      })
       .lean();
 
     if (!player) {
@@ -4015,23 +4484,102 @@ exports.getPlayerDetails = async (req, res) => {
       percentage: overallAttendancePercentage,
     };
 
+    // Load active player invoices
+    const InvoiceModel = require("../models/Invoice");
+    const playerInvoices = await InvoiceModel.find({
+      $or: [
+        { players: playerId },
+        ...(parentId ? [{ parent: parentId, $or: [{ players: { $exists: false } }, { players: { $size: 0 } }] }] : []),
+      ],
+      status: "ACTIVE",
+    })
+      .populate("class", "name term price")
+      .populate("team", "teamName teamFee")
+      .populate("league", "name fee")
+      .sort({ createdAt: -1 })
+      .lean();
+
     const classPaymentStatuses = player.classPaymentStatuses || [];
-    const assignedClassesPaymentInfo = (player.assignedClasses || []).map((cls) => {
-      const classIdStr = cls._id ? cls._id.toString() : cls.toString();
+    
+    // Combine unique classes
+    const classMap = new Map();
+    (player.assignedClasses || []).forEach((cls) => {
+      if (cls && cls._id) {
+        classMap.set(cls._id.toString(), cls);
+      }
+    });
+    classPaymentStatuses.forEach((cps) => {
+      if (cps && cps.class && cps.class._id && !classMap.has(cps.class._id.toString())) {
+        classMap.set(cps.class._id.toString(), cps.class);
+      }
+    });
+
+    const assignedClassesPaymentInfo = Array.from(classMap.values()).map((cls) => {
+      const classIdStr = cls._id.toString();
       const className = cls.name || "";
+      const classPrice = typeof cls.price === "number" ? cls.price : 0;
+      const classTerm = cls.term || player.term || null;
+
       const paymentEntry = classPaymentStatuses.find((cps) => {
         const cpsClassId = cps.class
-          ? cps.class._id
-            ? cps.class._id.toString()
-            : cps.class.toString()
+          ? (cps.class._id ? cps.class._id.toString() : cps.class.toString())
           : null;
         return cpsClassId === classIdStr;
       });
-      const status = paymentEntry ? paymentEntry.paymentStatus : "TRIAL";
+
+      const rawStatus = paymentEntry ? paymentEntry.paymentStatus : (player.paymentStatus || "TRIAL");
+      const stUpper = (rawStatus || "TRIAL").toUpperCase();
+
+      // Find matching invoice if any
+      const matchingInvoice = playerInvoices.find((inv) => {
+        const invClassId = inv.class
+          ? (inv.class._id ? inv.class._id.toString() : inv.class.toString())
+          : null;
+        return invClassId === classIdStr;
+      });
+
+      let amountReceived = 0;
+      let amountPending = 0;
+      const fee = matchingInvoice && typeof matchingInvoice.totalAmount === "number"
+        ? matchingInvoice.totalAmount
+        : classPrice;
+
+      if (stUpper === "PAID" || matchingInvoice?.paymentStatus === "PAID") {
+        amountReceived = fee;
+        amountPending = 0;
+      } else if (stUpper === "UNPAID" || stUpper === "OVER_DUE" || matchingInvoice?.paymentStatus === "UNPAID") {
+        amountReceived = 0;
+        amountPending = fee;
+      } else {
+        // TRIAL, HANDSHAKE, TBC, etc.
+        amountReceived = 0;
+        amountPending = 0;
+      }
+
+      const effectiveStatus = stUpper === "PAID" || matchingInvoice?.paymentStatus === "PAID" ? "PAID" : stUpper;
+
       return {
-        classId: cls._id || cls,
+        classId: cls._id,
         className,
-        paymentStatus: status,
+        dayOfWeek: cls.dayOfWeek || "",
+        startTime: cls.startTime || "",
+        endTime: cls.endTime || "",
+        location: cls.location || "",
+        term: classTerm ? {
+          _id: classTerm._id,
+          name: classTerm.name,
+          year: classTerm.year,
+        } : null,
+        termId: classTerm?._id ? classTerm._id.toString() : null,
+        termName: classTerm?.name || (classTerm?.year ? `Term (${classTerm.year})` : "General"),
+        fee,
+        amountReceived,
+        amountPending,
+        paymentStatus: effectiveStatus,
+        invoiceId: matchingInvoice?._id || null,
+        invoiceNumber: matchingInvoice?.invoiceNumber || null,
+        invoiceStatus: matchingInvoice?.paymentStatus || null,
+        dueDate: matchingInvoice?.dueDate || null,
       };
     });
 
@@ -4064,11 +4612,43 @@ exports.getPlayerDetails = async (req, res) => {
       const pEntry = (team.players || []).find(
         (p) => p.player && p.player.toString() === playerId.toString()
       );
+      const rawStatus = (pEntry ? pEntry.paymentStatus : "UNPAID").toUpperCase();
+      const teamFee = typeof team.teamFee === "number" ? team.teamFee : 0;
+      const matchingInvoice = playerInvoices.find((inv) => {
+        const invTeamId = inv.team
+          ? (inv.team._id ? inv.team._id.toString() : inv.team.toString())
+          : null;
+        return invTeamId === team._id.toString();
+      });
+
+      const fee = matchingInvoice && typeof matchingInvoice.totalAmount === "number"
+        ? matchingInvoice.totalAmount
+        : teamFee;
+
+      let amountReceived = 0;
+      let amountPending = 0;
+
+      if (rawStatus === "PAID" || matchingInvoice?.paymentStatus === "PAID") {
+        amountReceived = fee;
+        amountPending = 0;
+      } else {
+        amountReceived = 0;
+        amountPending = fee;
+      }
+
+      const effectiveStatus = rawStatus === "PAID" || matchingInvoice?.paymentStatus === "PAID" ? "PAID" : rawStatus;
+
       return {
         teamId: team._id,
         teamName: team.teamName,
-        teamFee: team.teamFee || 0,
-        paymentStatus: pEntry ? pEntry.paymentStatus : "UNPAID",
+        teamFee: fee,
+        fee,
+        amountReceived,
+        amountPending,
+        paymentStatus: effectiveStatus,
+        invoiceId: matchingInvoice?._id || null,
+        invoiceNumber: matchingInvoice?.invoiceNumber || null,
+        invoiceStatus: matchingInvoice?.paymentStatus || null,
       };
     });
 
@@ -4091,6 +4671,110 @@ exports.getPlayerDetails = async (req, res) => {
       trialTeamNames: trialTeams.map((t) => t.teamName),
       overdueTeamNames: overdueTeams.map((t) => t.teamName),
       assignedTeamsWithPaymentStatus: assignedTeamsPaymentInfo,
+    };
+
+    // Build comprehensive payment history items list
+    const paymentHistory = [];
+
+    // Add classes
+    assignedClassesPaymentInfo.forEach((cls) => {
+      paymentHistory.push({
+        id: `class-${cls.classId}`,
+        type: "CLASS",
+        classId: cls.classId,
+        name: cls.className,
+        termId: cls.termId,
+        termName: cls.termName,
+        fee: cls.fee,
+        amountReceived: cls.amountReceived,
+        amountPending: cls.amountPending,
+        paymentStatus: cls.paymentStatus,
+        invoiceNumber: cls.invoiceNumber,
+        invoiceId: cls.invoiceId,
+        invoiceStatus: cls.invoiceStatus,
+        dueDate: cls.dueDate,
+        dayOfWeek: cls.dayOfWeek,
+        startTime: cls.startTime,
+      });
+    });
+
+    // Add teams
+    assignedTeamsPaymentInfo.forEach((tm) => {
+      paymentHistory.push({
+        id: `team-${tm.teamId}`,
+        type: "TEAM",
+        teamId: tm.teamId,
+        name: tm.teamName,
+        termId: null,
+        termName: "Team Tournament",
+        fee: tm.fee,
+        amountReceived: tm.amountReceived,
+        amountPending: tm.amountPending,
+        paymentStatus: tm.paymentStatus,
+        invoiceNumber: tm.invoiceNumber,
+        invoiceId: tm.invoiceId,
+        invoiceStatus: tm.invoiceStatus,
+      });
+    });
+
+    // Add any remaining invoices not matched
+    const matchedInvoiceIds = new Set(
+      paymentHistory.map((p) => p.invoiceId?.toString()).filter(Boolean)
+    );
+
+    playerInvoices.forEach((inv) => {
+      if (!matchedInvoiceIds.has(inv._id.toString())) {
+        const isPaid = inv.paymentStatus === "PAID";
+        const fee = Number(inv.totalAmount || 0);
+        paymentHistory.push({
+          id: `inv-${inv._id}`,
+          type: "INVOICE",
+          name: inv.items?.[0]?.title || inv.description || inv.invoiceNumber,
+          termId: null,
+          termName: inv.type?.replace("_", " ") || "Other",
+          fee,
+          amountReceived: isPaid ? fee : 0,
+          amountPending: isPaid ? 0 : fee,
+          paymentStatus: isPaid ? "PAID" : (inv.paymentStatus || "UNPAID"),
+          invoiceNumber: inv.invoiceNumber,
+          invoiceId: inv._id,
+          invoiceStatus: inv.paymentStatus,
+          dueDate: inv.dueDate,
+        });
+      }
+    });
+
+    // Aggregate overall totals
+    const totalFees = paymentHistory.reduce((sum, item) => sum + (Number(item.fee) || 0), 0);
+    const totalReceived = paymentHistory.reduce((sum, item) => sum + (Number(item.amountReceived) || 0), 0);
+    const totalPending = paymentHistory.reduce((sum, item) => sum + (Number(item.amountPending) || 0), 0);
+
+    // Group by Term for term-wise stats
+    const termStatsMap = {};
+    paymentHistory.forEach((item) => {
+      const tKey = item.termId || item.termName || "Other";
+      if (!termStatsMap[tKey]) {
+        termStatsMap[tKey] = {
+          termId: item.termId || null,
+          termName: item.termName || "Other",
+          totalFees: 0,
+          totalReceived: 0,
+          totalPending: 0,
+          itemsCount: 0,
+        };
+      }
+      termStatsMap[tKey].totalFees += Number(item.fee) || 0;
+      termStatsMap[tKey].totalReceived += Number(item.amountReceived) || 0;
+      termStatsMap[tKey].totalPending += Number(item.amountPending) || 0;
+      termStatsMap[tKey].itemsCount += 1;
+    });
+
+    const paymentFinancialSummary = {
+      totalFees,
+      totalReceived,
+      totalPending,
+      byTerm: Object.values(termStatsMap),
+      history: paymentHistory,
     };
 
     const teamAttendanceRecords = await Attendance.find({
@@ -4153,6 +4837,7 @@ exports.getPlayerDetails = async (req, res) => {
         classPaymentSummary,
         assignedTeamsPaymentInfo,
         teamPaymentSummary,
+        paymentFinancialSummary,
         perDayAttendance,
         overallAttendance,
         perDayTeamAttendance,
@@ -4166,6 +4851,12 @@ exports.getPlayerDetails = async (req, res) => {
     });
   }
 };
+
+/**
+ * @desc Preview Clone Term - Fetch classes and players to clone, check duplicate class existence
+ * @route POST /api/admin/cloneTerm/preview
+ * @access Private/Admin
+ */
 
 exports.previewCloneTerm = async (req, res) => {
   try {
@@ -4965,184 +5656,588 @@ exports.getAdminDashboardOverview = async (req, res) => {
   }
 };
 
-exports.getTermEarningsReport = async (req, res) => {
-  try {
-    const { termId } = req.params;
-    const { classId, status } = req.query;
+/**
+ * Helper to compute earnings across all streams (Academy, Leagues, Camps, Store)
+ */
+const computeEarningsForTerm = async ({ termId, classId, status }) => {
+  const isAllTime = !termId || termId === "ALL";
+  let termDoc = null;
 
+  if (!isAllTime) {
     if (!mongoose.Types.ObjectId.isValid(termId)) {
-      return res.status(400).json({ success: false, message: "Invalid Term ID format" });
+      throw new Error("Invalid Term ID format");
     }
-
-    const termDoc = await Term.findById(termId);
+    termDoc = await Term.findById(termId).lean();
     if (!termDoc) {
-      return res.status(404).json({ success: false, message: "Term not found" });
+      throw new Error("Term not found");
     }
+  }
 
-    const classFilter = { term: termId };
-    if (classId) {
-      if (!mongoose.Types.ObjectId.isValid(classId)) {
-        return res.status(400).json({ success: false, message: "Invalid Class ID format" });
-      }
-      classFilter._id = classId;
-    }
+  const termInfo = isAllTime
+    ? { id: "ALL", name: "All Time (All Streams & Terms)" }
+    : {
+        id: termDoc._id.toString(),
+        name: termDoc.name,
+        startDate: termDoc.startDate,
+        endDate: termDoc.endDate,
+      };
 
-    const classes = await Class.find(classFilter)
-      .populate("program", "name")
-      .populate("category", "name")
-      .populate("coach", "name email mobile profileImage")
-      .populate("players", "firstName lastName fullName email phone dob gender profileImage jerseyNumber paymentStatus");
+  // 1. Academy Classes & Invoices
+  const classFilter = isAllTime ? {} : { term: termDoc._id };
+  if (classId && classId !== "ALL" && mongoose.Types.ObjectId.isValid(classId)) {
+    classFilter._id = classId;
+  }
 
-    const classIds = classes.map(c => c._id);
+  const classes = await Class.find(classFilter)
+    .populate("program", "name")
+    .populate("category", "name")
+    .populate("coach", "name email mobile profileImage")
+    .populate({
+      path: "players",
+      select: "firstName lastName fullName email phone dob gender profileImage jerseyNumber paymentStatus classPaymentStatuses parentId",
+      populate: { path: "parentId", select: "fullName email phone" }
+    })
+    .lean();
 
-    const invoices = await Invoice.find({
-      class: { $in: classIds },
-      status: "ACTIVE"
-    });
+  const classIds = classes.map((c) => c._id);
 
-    const invoiceIds = invoices.map(inv => inv._id);
-    const payments = await Payment.find({
-      invoice: { $in: invoiceIds }
-    });
+  // Invoices & Payments for classes
+  const [classInvoices, allPayments] = await Promise.all([
+    Invoice.find({ class: { $in: classIds }, status: "ACTIVE" }).lean(),
+    Payment.find({}).lean(),
+  ]);
 
-    let totalEnrolledPlayersSet = new Set();
-    let termExpected = 0;
-    let termPaid = 0;
-    let termPending = 0;
-    let termRefunded = 0;
+  const paymentByInvoiceId = {};
+  for (const p of allPayments) {
+    if (!p.invoice) continue;
+    const invId = p.invoice.toString();
+    if (!paymentByInvoiceId[invId]) paymentByInvoiceId[invId] = [];
+    paymentByInvoiceId[invId].push(p);
+  }
 
-    const classReports = [];
+  let academyExpected = 0;
+  let academyHandshake = 0;
+  let academyPaid = 0;
+  let academyPending = 0;
+  let academyTrialPotential = 0;
+  let academyTrialCount = 0;
+  let academyHandshakeCount = 0;
+  const academyPlayersSet = new Set();
+  const classReports = [];
+  const allRecords = [];
 
-    for (const classDoc of classes) {
-      const classPlayers = classDoc.players || [];
-      const playerReports = [];
+  for (const classDoc of classes) {
+    const classPlayers = classDoc.players || [];
+    const playerReports = [];
+    let cExpected = 0;
+    let cHandshake = 0;
+    let cPaid = 0;
+    let cPending = 0;
 
-      let classExpected = 0;
-      let classPaid = 0;
-      let classPending = 0;
-      let classRefunded = 0;
+    for (const player of classPlayers) {
+      const pIdStr = player._id.toString();
+      const parent = player.parentId || {};
+      const basePrice = classDoc.price || 0;
 
-      for (const player of classPlayers) {
-        const playerInvoices = invoices.filter(inv =>
+      // Check player's classPaymentStatuses
+      const cps = (player.classPaymentStatuses || []).find(
+        (s) => s.class && s.class.toString() === classDoc._id.toString()
+      );
+      const rawStatus = (cps ? cps.paymentStatus : (player.paymentStatus || "UNPAID")).toUpperCase();
+
+      // Match player invoices for this class
+      const playerInvoices = classInvoices.filter(
+        (inv) =>
+          inv.class &&
           inv.class.toString() === classDoc._id.toString() &&
-          inv.players.some(pId => pId.toString() === player._id.toString())
-        );
+          inv.players &&
+          inv.players.some((p) => p.toString() === pIdStr)
+      );
 
-        let expectedAmount = 0;
-        let paidAmount = 0;
-        let refundedAmount = 0;
+      let expected = basePrice;
+      let handshake = 0;
+      let paid = 0;
+      let pending = 0;
+      let pStatus = rawStatus;
+
+      if (rawStatus === "HANDSHAKE") {
+        handshake = basePrice;
+        pStatus = "HANDSHAKE";
+        academyHandshakeCount++;
+      } else if (rawStatus === "TRIAL") {
+        pStatus = "TRIAL";
+        academyTrialCount++;
+        academyTrialPotential += basePrice;
+      } else if (playerInvoices.length > 0) {
+        const invTotal = playerInvoices.reduce((s, inv) => s + (inv.totalAmount || inv.amount || 0), 0);
+        const invDiscount = playerInvoices.reduce((s, inv) => s + (inv.discount || 0), 0);
+        expected = invTotal + invDiscount;
+        handshake = invDiscount;
+        if (handshake > 0) academyHandshakeCount++;
+
+        let totalApprovedPaid = 0;
         let hasPendingPayment = false;
-        let isInvoiceRejected = false;
-
-        if (playerInvoices.length > 0) {
-          expectedAmount = playerInvoices.reduce((sum, inv) => sum + (inv.totalAmount || 0), 0);
-
-          const playerInvIds = playerInvoices.map(inv => inv._id.toString());
-          const playerPayments = payments.filter(p => playerInvIds.includes(p.invoice.toString()));
-
-          paidAmount = playerPayments
-            .filter(p => p.status === "APPROVED")
-            .reduce((sum, p) => sum + (p.amount || 0), 0);
-
-          hasPendingPayment = playerPayments.some(p => p.status === "PENDING") ||
-            playerInvoices.some(inv => inv.paymentStatus === "PAYMENT_PENDING");
-          isInvoiceRejected = playerInvoices.some(inv => inv.paymentStatus === "REJECTED");
-        } else {
-          expectedAmount = classDoc.price || 0;
-          paidAmount = 0;
-        }
-
-        const pendingAmount = Math.max(0, expectedAmount - paidAmount);
-
-        let paymentStatus = "UNPAID";
-        if (paidAmount >= expectedAmount && expectedAmount > 0) {
-          paymentStatus = "PAID";
-        } else if (paidAmount > 0 && paidAmount < expectedAmount) {
-          paymentStatus = "PARTIAL";
-        } else if (paidAmount === 0) {
-          if (hasPendingPayment) {
-            paymentStatus = "PENDING";
-          } else if (isInvoiceRejected) {
-            paymentStatus = "FAILED";
-          } else {
-            paymentStatus = "UNPAID";
+        for (const inv of playerInvoices) {
+          const invPayments = paymentByInvoiceId[inv._id.toString()] || [];
+          for (const pm of invPayments) {
+            if (pm.status === "APPROVED") totalApprovedPaid += (pm.amount || 0);
+            if (pm.status === "PENDING") hasPendingPayment = true;
           }
+          if (inv.paymentStatus === "PAYMENT_PENDING") hasPendingPayment = true;
         }
 
-        const reportItem = {
+        paid = totalApprovedPaid;
+        const netBilled = Math.max(0, expected - handshake);
+        pending = Math.max(0, netBilled - paid);
+
+        if (paid >= netBilled && netBilled > 0) {
+          pStatus = "PAID";
+        } else if (paid > 0) {
+          pStatus = "PARTIAL";
+        } else if (hasPendingPayment) {
+          pStatus = "PENDING";
+        } else {
+          pStatus = "UNPAID";
+        }
+      } else {
+        pending = basePrice;
+        pStatus = "UNPAID";
+      }
+
+      if (!status || status === "ALL" || pStatus.toUpperCase() === status.toUpperCase()) {
+        academyPlayersSet.add(pIdStr);
+        cExpected += expected;
+        cHandshake += handshake;
+        cPaid += paid;
+        cPending += pending;
+
+        const pReport = {
           playerId: player._id,
-          playerName: player.fullName || `${player.firstName || ""} ${player.lastName || ""}`.trim(),
+          playerName: player.fullName || `${player.firstName || ""} ${player.lastName || ""}`.trim() || "Player",
           playerEmail: player.email || null,
+          parentName: parent.fullName || null,
+          parentPhone: parent.phone || player.phone || null,
           class: {
             id: classDoc._id,
             name: classDoc.name,
           },
-          term: {
-            id: termDoc._id,
-            name: termDoc.name,
-          },
-          expectedAmount,
-          paidAmount,
-          pendingAmount,
-          refundedAmount,
-          paymentStatus,
+          term: termInfo,
+          expectedAmount: expected,
+          handshakeAmount: handshake,
+          netAmount: Math.max(0, expected - handshake),
+          paidAmount: paid,
+          pendingAmount: pending,
+          paymentStatus: pStatus,
         };
+        playerReports.push(pReport);
 
-        if (!status || paymentStatus.toUpperCase() === status.toUpperCase()) {
-          totalEnrolledPlayersSet.add(player._id.toString());
-          playerReports.push(reportItem);
+        allRecords.push({
+          id: `class-${classDoc._id}-${player._id}`,
+          stream: "ACADEMY",
+          streamLabel: "Academy Class",
+          playerId: player._id.toString(),
+          playerName: pReport.playerName,
+          playerEmail: pReport.playerEmail,
+          parentName: pReport.parentName,
+          parentPhone: pReport.parentPhone,
+          avatar: player.profileImage || "",
+          title: classDoc.name,
+          categoryOrProgram: `${classDoc.category?.name || "Academy"} › ${classDoc.program?.name || "Program"}`,
+          termName: termInfo.name,
+          price: expected,
+          handshakeAmount: handshake,
+          netAmount: Math.max(0, expected - handshake),
+          paidAmount: paid,
+          pendingAmount: pending,
+          paymentStatus: pStatus,
+          createdAt: classDoc.createdAt,
+        });
+      }
+    }
 
-          classExpected += expectedAmount;
-          classPaid += paidAmount;
-          classPending += pendingAmount;
-          classRefunded += refundedAmount;
-        }
+    if (!status || status === "ALL" || playerReports.length > 0) {
+      classReports.push({
+        classId: classDoc._id,
+        className: classDoc.name,
+        program: classDoc.program?.name || null,
+        category: classDoc.category?.name || null,
+        coach: classDoc.coach ? { id: classDoc.coach._id, name: classDoc.coach.name } : null,
+        price: classDoc.price || 0,
+        totalPlayers: playerReports.length,
+        expectedAmount: cExpected,
+        handshakeAmount: cHandshake,
+        paidAmount: cPaid,
+        pendingAmount: cPending,
+        refundedAmount: 0,
+        outstandingAmount: cPending,
+        players: playerReports,
+      });
+
+      academyExpected += cExpected;
+      academyHandshake += cHandshake;
+      academyPaid += cPaid;
+      academyPending += cPending;
+    }
+  }
+
+  // 2. Leagues Stream
+  const teamFilter = isAllTime ? {} : { term: termDoc._id };
+  const teams = await Team.find(teamFilter)
+    .populate("coach", "name")
+    .populate("leagues.league", "name fee")
+    .populate({
+      path: "players.player",
+      select: "firstName lastName fullName email phone profileImage parentId",
+      populate: { path: "parentId", select: "fullName email phone" }
+    })
+    .lean();
+
+  let leagueExpected = 0;
+  let leagueHandshake = 0;
+  let leaguePaid = 0;
+  let leaguePending = 0;
+  let leagueTrialPotential = 0;
+  let leagueTrialCount = 0;
+  let leagueHandshakeCount = 0;
+  const leaguePlayersSet = new Set();
+  const leagueReports = [];
+
+  for (const team of teams) {
+    const primaryLeague = team.leagues && team.leagues[0]?.league;
+    const leagueFee = (primaryLeague && primaryLeague.fee) ? primaryLeague.fee : 150;
+    const teamName = team.teamName || "Team";
+    const leagueName = primaryLeague?.name || "League Tournament";
+
+    for (const item of (team.players || [])) {
+      const pl = item.player;
+      if (!pl) continue;
+      const plIdStr = pl._id.toString();
+      const parent = pl.parentId || {};
+      const rawStatus = (item.paymentStatus || "UNPAID").toUpperCase();
+
+      let expected = leagueFee;
+      let handshake = 0;
+      let paid = 0;
+      let pending = 0;
+      let pStatus = rawStatus;
+
+      if (rawStatus === "HANDSHAKE") {
+        handshake = leagueFee;
+        pStatus = "HANDSHAKE";
+        leagueHandshakeCount++;
+      } else if (rawStatus === "TRIAL") {
+        pStatus = "TRIAL";
+        leagueTrialCount++;
+        leagueTrialPotential += leagueFee;
+      } else if (rawStatus === "PAID" || rawStatus === "APPROVED") {
+        paid = leagueFee;
+        pStatus = "PAID";
+      } else if (rawStatus === "PENDING" || rawStatus === "PAYMENT_PENDING") {
+        pending = leagueFee;
+        pStatus = "PENDING";
+      } else {
+        pending = leagueFee;
+        pStatus = "UNPAID";
       }
 
-      if (!status || playerReports.length > 0) {
-        classReports.push({
-          classId: classDoc._id,
-          className: classDoc.name,
-          program: classDoc.program?.name || null,
-          category: classDoc.category?.name || null,
-          coach: classDoc.coach ? {
-            id: classDoc.coach._id,
-            name: classDoc.coach.name,
-          } : null,
-          price: classDoc.price || 0,
-          totalPlayers: playerReports.length,
-          expectedAmount: classExpected,
-          paidAmount: classPaid,
-          pendingAmount: classPending,
-          refundedAmount: classRefunded,
-          outstandingAmount: classPending,
-          players: playerReports,
-        });
+      if (!status || status === "ALL" || pStatus.toUpperCase() === status.toUpperCase()) {
+        leaguePlayersSet.add(plIdStr);
+        leagueExpected += expected;
+        leagueHandshake += handshake;
+        leaguePaid += paid;
+        leaguePending += pending;
 
-        termExpected += classExpected;
-        termPaid += classPaid;
-        termPending += classPending;
-        termRefunded += classRefunded;
+        allRecords.push({
+          id: `league-${team._id}-${pl._id}`,
+          stream: "LEAGUES",
+          streamLabel: "League Team",
+          playerId: plIdStr,
+          playerName: pl.fullName || `${pl.firstName || ""} ${pl.lastName || ""}`.trim() || "Player",
+          playerEmail: pl.email || null,
+          parentName: parent.fullName || null,
+          parentPhone: parent.phone || pl.phone || null,
+          avatar: pl.profileImage || "",
+          title: `${teamName} (${leagueName})`,
+          categoryOrProgram: "Leagues & Tournaments",
+          termName: termInfo.name,
+          price: expected,
+          handshakeAmount: handshake,
+          netAmount: Math.max(0, expected - handshake),
+          paidAmount: paid,
+          pendingAmount: pending,
+          paymentStatus: pStatus,
+          createdAt: team.createdAt,
+        });
+      }
+    }
+  }
+
+  // 3. Holiday Camps & Events Stream
+  const eventDateFilter = {};
+  if (!isAllTime && termDoc.startDate && termDoc.endDate) {
+    eventDateFilter.createdAt = { $gte: new Date(termDoc.startDate), $lte: new Date(termDoc.endDate) };
+  }
+  const eventRegistrations = await EventRegistration.find(eventDateFilter)
+    .populate("event", "title startDate endDate category")
+    .populate({
+      path: "user",
+      select: "firstName lastName fullName email phone profileImage parentId",
+      populate: { path: "parentId", select: "fullName email phone" }
+    })
+    .lean();
+
+  let campExpected = 0;
+  let campHandshake = 0;
+  let campPaid = 0;
+  let campPending = 0;
+  let campTrialPotential = 0;
+  let campTrialCount = 0;
+  let campHandshakeCount = 0;
+  const campPlayersSet = new Set();
+
+  for (const reg of eventRegistrations) {
+    const user = reg.user;
+    if (!user) continue;
+    const userIdStr = user._id.toString();
+    const parent = user.parentId || {};
+    const eventTitle = reg.event?.title || "Holiday Camp / Event";
+    const amount = reg.totalAmount || 0;
+    const rawStatus = (reg.paymentStatus || "UNPAID").toUpperCase();
+
+    let expected = amount;
+    let handshake = 0;
+    let paid = 0;
+    let pending = 0;
+    let pStatus = rawStatus;
+
+    if (rawStatus === "HANDSHAKE") {
+      handshake = amount;
+      pStatus = "HANDSHAKE";
+      campHandshakeCount++;
+    } else if (rawStatus === "TRIAL") {
+      pStatus = "TRIAL";
+      campTrialCount++;
+      campTrialPotential += amount;
+    } else if (rawStatus === "PAID" || rawStatus === "APPROVED") {
+      paid = amount;
+      pStatus = "PAID";
+    } else if (rawStatus === "PENDING" || rawStatus === "PAYMENT_PENDING") {
+      pending = amount;
+      pStatus = "PENDING";
+    } else {
+      pending = amount;
+      pStatus = "UNPAID";
+    }
+
+    if (!status || status === "ALL" || pStatus.toUpperCase() === status.toUpperCase()) {
+      campPlayersSet.add(userIdStr);
+      campExpected += expected;
+      campHandshake += handshake;
+      campPaid += paid;
+      campPending += pending;
+
+      allRecords.push({
+        id: `camp-${reg._id}`,
+        stream: "CAMPS",
+        streamLabel: "Holiday Camp / Event",
+        playerId: userIdStr,
+        playerName: user.fullName || `${user.firstName || ""} ${user.lastName || ""}`.trim() || "Participant",
+        playerEmail: user.email || null,
+        parentName: parent.fullName || null,
+        parentPhone: parent.phone || user.phone || null,
+        avatar: user.profileImage || "",
+        title: eventTitle,
+        categoryOrProgram: reg.event?.category || "Holiday Camps & Events",
+        termName: termInfo.name,
+        price: expected,
+        handshakeAmount: handshake,
+        netAmount: Math.max(0, expected - handshake),
+        paidAmount: paid,
+        pendingAmount: pending,
+        paymentStatus: pStatus,
+        createdAt: reg.createdAt,
+      });
+    }
+  }
+
+  // 4. Store Merchandise Orders Stream
+  const orderDateFilter = {};
+  if (!isAllTime && termDoc.startDate && termDoc.endDate) {
+    orderDateFilter.createdAt = { $gte: new Date(termDoc.startDate), $lte: new Date(termDoc.endDate) };
+  }
+  const orders = await Order.find(orderDateFilter)
+    .populate("parent", "fullName email phone")
+    .populate("items.product", "name price")
+    .lean();
+
+  let storeExpected = 0;
+  let storePaid = 0;
+  let storePending = 0;
+
+  for (const ord of orders) {
+    const parent = ord.parent || {};
+    const ordTotal = ord.totalAmount || 0;
+    const isPaid = ord.paymentStatus === "PAID" || ord.status === "DELIVERED";
+    const isPending = ord.paymentStatus === "PENDING" || ord.status === "PENDING" || ord.status === "PROCESSING";
+
+    let paid = isPaid ? ordTotal : 0;
+    let pending = !isPaid ? ordTotal : 0;
+    let pStatus = isPaid ? "PAID" : isPending ? "PENDING" : "UNPAID";
+
+    if (!status || status === "ALL" || pStatus.toUpperCase() === status.toUpperCase()) {
+      storeExpected += ordTotal;
+      storePaid += paid;
+      storePending += pending;
+
+      const itemTitles = (ord.items || []).map((i) => i.product?.name || "Product").join(", ");
+
+      allRecords.push({
+        id: `order-${ord._id}`,
+        stream: "STORE",
+        streamLabel: "Store Order",
+        playerId: ord._id.toString(),
+        playerName: parent.fullName || "Customer",
+        playerEmail: parent.email || null,
+        parentName: parent.fullName || null,
+        parentPhone: parent.phone || null,
+        avatar: "",
+        title: `Order #${ord.orderNumber || ord._id.toString().slice(-6).toUpperCase()}: ${itemTitles || "Store Merchandise"}`,
+        categoryOrProgram: "Commerce & Merchandise",
+        termName: termInfo.name,
+        price: ordTotal,
+        handshakeAmount: 0,
+        netAmount: ordTotal,
+        paidAmount: paid,
+        pendingAmount: pending,
+        paymentStatus: pStatus,
+        createdAt: ord.createdAt,
+      });
+    }
+  }
+
+  // Aggregate Total Metrics
+  const totalExpected = academyExpected + leagueExpected + campExpected + storeExpected;
+  const totalHandshake = academyHandshake + leagueHandshake + campHandshake;
+  const totalNetExpected = Math.max(0, totalExpected - totalHandshake);
+  const totalPaid = academyPaid + leaguePaid + campPaid + storePaid;
+  const totalPending = academyPending + leaguePending + campPending + storePending;
+  const totalTrialPotential = academyTrialPotential + leagueTrialPotential + campTrialPotential;
+  const totalTrialCount = academyTrialCount + leagueTrialCount + campTrialCount;
+  const totalHandshakeCount = academyHandshakeCount + leagueHandshakeCount + campHandshakeCount;
+
+  const totalDistinctPlayers = new Set([
+    ...academyPlayersSet,
+    ...leaguePlayersSet,
+    ...campPlayersSet,
+  ]).size;
+
+  const collectionRate = totalNetExpected > 0 ? Math.round((totalPaid / totalNetExpected) * 100) : 0;
+
+  return {
+    term: termInfo,
+    isAllTime,
+    summary: {
+      totalClasses: classReports.length,
+      totalPlayers: totalDistinctPlayers || allRecords.length,
+      totalExpected,
+      totalHandshake,
+      totalNetExpected,
+      totalPaid,
+      totalPending,
+      totalOutstanding: totalPending,
+      totalRefunded: 0,
+      totalTrialPotential,
+      totalTrialCount,
+      totalHandshakeCount,
+      collectionRate,
+      streams: {
+        academy: {
+          label: "Academy Classes",
+          expected: academyExpected,
+          handshake: academyHandshake,
+          netExpected: Math.max(0, academyExpected - academyHandshake),
+          paid: academyPaid,
+          pending: academyPending,
+          trials: academyTrialPotential,
+          count: academyPlayersSet.size,
+        },
+        leagues: {
+          label: "Leagues & Tournaments",
+          expected: leagueExpected,
+          handshake: leagueHandshake,
+          netExpected: Math.max(0, leagueExpected - leagueHandshake),
+          paid: leaguePaid,
+          pending: leaguePending,
+          trials: leagueTrialPotential,
+          count: leaguePlayersSet.size,
+        },
+        camps: {
+          label: "Holiday Camps & Events",
+          expected: campExpected,
+          handshake: campHandshake,
+          netExpected: Math.max(0, campExpected - campHandshake),
+          paid: campPaid,
+          pending: campPending,
+          trials: campTrialPotential,
+          count: campPlayersSet.size,
+        },
+        store: {
+          label: "Store Merchandise",
+          expected: storeExpected,
+          handshake: 0,
+          netExpected: storeExpected,
+          paid: storePaid,
+          pending: storePending,
+          trials: 0,
+          count: orders.length,
+        },
+      },
+    },
+    classes: classReports,
+    allRecords,
+  };
+};
+
+exports.getTermEarningsReport = async (req, res) => {
+  try {
+    const { termId } = req.params;
+    const { classId, status, compareTermId } = req.query;
+
+    const mainResult = await computeEarningsForTerm({
+      termId,
+      classId,
+      status,
+    });
+
+    let comparison = null;
+    if (compareTermId && compareTermId !== "NONE" && mongoose.Types.ObjectId.isValid(compareTermId)) {
+      try {
+        const compareResult = await computeEarningsForTerm({
+          termId: compareTermId,
+          classId: "ALL",
+          status: "ALL",
+        });
+        comparison = {
+          termA: mainResult.summary,
+          termB: compareResult.summary,
+          termAName: mainResult.term.name,
+          termBName: compareResult.term.name,
+          growthExpected: compareResult.summary.totalExpected - mainResult.summary.totalExpected,
+          growthPaid: compareResult.summary.totalPaid - mainResult.summary.totalPaid,
+          growthPercent: mainResult.summary.totalPaid > 0
+            ? Math.round(((compareResult.summary.totalPaid - mainResult.summary.totalPaid) / mainResult.summary.totalPaid) * 100)
+            : 0,
+        };
+      } catch (err) {
+        console.warn("Failed to calculate comparison:", err.message);
       }
     }
 
     return res.status(200).json({
       success: true,
       data: {
-        term: {
-          id: termDoc._id,
-          name: termDoc.name,
-        },
-        summary: {
-          totalClasses: classReports.length,
-          totalPlayers: totalEnrolledPlayersSet.size,
-          totalExpected: termExpected,
-          totalPaid: termPaid,
-          totalPending: termPending,
-          totalRefunded: termRefunded,
-          totalOutstanding: termPending,
-        },
-        classes: classReports,
+        ...mainResult,
+        comparison,
       },
     });
   } catch (error) {
@@ -5153,3 +6248,396 @@ exports.getTermEarningsReport = async (req, res) => {
   }
 };
 
+exports.updatePlayer = async (req, res) => {
+  try {
+    const { playerId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(playerId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid player ID format.",
+      });
+    }
+
+    const player = await User.findById(playerId);
+
+    if (!player) {
+      return res.status(404).json({
+        success: false,
+        message: "Player not found.",
+      });
+    }
+
+    const updateFields = {};
+
+    // Full Name & First/Last Name
+    if (req.body.fullName !== undefined) {
+      updateFields.fullName =
+        typeof req.body.fullName === "string"
+          ? req.body.fullName.trim()
+          : req.body.fullName;
+      const parts = (updateFields.fullName || "").split(" ");
+      updateFields.firstName = parts[0] || "";
+      updateFields.lastName = parts.slice(1).join(" ") || "";
+    } else {
+      if (req.body.firstName !== undefined) {
+        updateFields.firstName =
+          typeof req.body.firstName === "string"
+            ? req.body.firstName.trim()
+            : req.body.firstName;
+      }
+
+      if (req.body.lastName !== undefined) {
+        updateFields.lastName =
+          typeof req.body.lastName === "string"
+            ? req.body.lastName.trim()
+            : req.body.lastName;
+      }
+
+      if (
+        req.body.firstName !== undefined ||
+        req.body.lastName !== undefined
+      ) {
+        const first =
+          req.body.firstName !== undefined
+            ? updateFields.firstName
+            : player.firstName || "";
+        const last =
+          req.body.lastName !== undefined
+            ? updateFields.lastName
+            : player.lastName || "";
+        updateFields.fullName = `${first || ""} ${last || ""}`.trim();
+      }
+    }
+
+    // Email & Phone
+    if (req.body.email !== undefined) {
+      updateFields.email = req.body.email
+        ? req.body.email.trim().toLowerCase()
+        : null;
+    }
+
+    if (req.body.phone !== undefined) {
+      updateFields.phone = req.body.phone ? req.body.phone.trim() : null;
+    }
+
+    // School
+    if (req.body.school !== undefined) {
+      updateFields.school = req.body.school;
+    }
+
+    // Gender enum validation ["MALE", "FEMALE", "OTHER"]
+    if (req.body.gender !== undefined) {
+      updateFields.gender = req.body.gender
+        ? req.body.gender.toUpperCase()
+        : null;
+    }
+
+    // Preferred Foot enum ["LEFT", "RIGHT", "BOTH"]
+    const footVal = req.body.prefferedFoot !== undefined ? req.body.prefferedFoot : req.body.preferredFoot;
+    if (footVal !== undefined) {
+      updateFields.prefferedFoot = footVal
+        ? footVal.toUpperCase()
+        : null;
+    }
+
+    // Jersey Number
+    if (req.body.jerseyNumber !== undefined) {
+      updateFields.jerseyNumber =
+        req.body.jerseyNumber === "" || req.body.jerseyNumber === null
+          ? null
+          : Number(req.body.jerseyNumber);
+    }
+
+    // Medical conditions
+    if (req.body.isMedicalCondition !== undefined) {
+      updateFields.isMedicalCondition =
+        req.body.isMedicalCondition === true ||
+        req.body.isMedicalCondition === "true";
+    }
+
+    if (req.body.medicalConditionDetails !== undefined) {
+      updateFields.medicalConditionDetails = req.body.medicalConditionDetails;
+    }
+
+    // Comments & Guardian details
+    if (req.body.comments !== undefined) {
+      updateFields.comments = req.body.comments;
+    }
+
+    if (req.body.additionalComments !== undefined) {
+      updateFields.additionalComments = req.body.additionalComments;
+    }
+
+    if (req.body.contactName !== undefined) {
+      updateFields.contactName = req.body.contactName;
+    }
+
+    if (req.body.relationship !== undefined) {
+      updateFields.relationship = req.body.relationship;
+    }
+
+    if (req.body.club !== undefined) {
+      updateFields.club = req.body.club;
+    }
+
+    // Admin-specific controls: rating, playerStatus, isBlocked
+    if (req.body.rating !== undefined && req.body.rating !== "") {
+      const rating = Number(req.body.rating);
+      if (!isNaN(rating) && rating >= 1 && rating <= 5) {
+        updateFields.rating = rating;
+      }
+    }
+
+    if (req.body.playerStatus !== undefined) {
+      updateFields.playerStatus = req.body.playerStatus
+        ? req.body.playerStatus.toUpperCase()
+        : null;
+    }
+
+    if (req.body.isBlocked !== undefined) {
+      updateFields.isBlocked =
+        req.body.isBlocked === true || req.body.isBlocked === "true";
+    }
+
+    // References: term, category, parentId
+    if (req.body.term !== undefined) {
+      updateFields.term =
+        req.body.term && mongoose.Types.ObjectId.isValid(req.body.term)
+          ? req.body.term
+          : null;
+    }
+
+    if (req.body.category !== undefined) {
+      updateFields.category =
+        req.body.category && mongoose.Types.ObjectId.isValid(req.body.category)
+          ? req.body.category
+          : null;
+    }
+
+    // Programs
+    if (req.body.programs !== undefined) {
+      let progs = req.body.programs;
+      if (typeof progs === "string") {
+        try {
+          progs = JSON.parse(progs);
+        } catch {
+          progs = progs.split(",").map((p) => p.trim());
+        }
+      }
+      if (Array.isArray(progs)) {
+        updateFields.programs = progs.filter((p) =>
+          mongoose.Types.ObjectId.isValid(p)
+        );
+      } else if (mongoose.Types.ObjectId.isValid(progs)) {
+        updateFields.programs = [progs];
+      }
+    } else if (
+      req.body.program !== undefined &&
+      mongoose.Types.ObjectId.isValid(req.body.program)
+    ) {
+      updateFields.programs = [req.body.program];
+    }
+
+    if (
+      req.body.parentId &&
+      mongoose.Types.ObjectId.isValid(req.body.parentId)
+    ) {
+      updateFields.parentId = req.body.parentId;
+    }
+
+    // Optional: update parent contact if provided
+    if (player.parentId) {
+      const parentUpdate = {};
+      if (req.body.parentFullName) {
+        parentUpdate.fullName = req.body.parentFullName.trim();
+      }
+      if (req.body.parentPhone) {
+        parentUpdate.phone = req.body.parentPhone.trim();
+      }
+      if (req.body.parentEmail) {
+        parentUpdate.email = req.body.parentEmail.trim().toLowerCase();
+      }
+      if (req.body.emergencyContact) {
+        parentUpdate.emergencyContact = req.body.emergencyContact.trim();
+      }
+      if (req.body.parentRelationship) {
+        parentUpdate.relationship = req.body.parentRelationship.trim();
+      }
+      if (Object.keys(parentUpdate).length > 0) {
+        await Parent.findByIdAndUpdate(player.parentId, parentUpdate);
+      }
+    }
+
+    // Date of Birth parsing (supports DD/MM/YYYY and YYYY-MM-DD / ISO)
+    if (req.body.dob) {
+      let parsedDob;
+      if (typeof req.body.dob === "string" && req.body.dob.includes("/")) {
+        const parts = req.body.dob.split("/");
+        if (parts.length === 3) {
+          // DD/MM/YYYY -> YYYY-MM-DD
+          parsedDob = new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
+        } else {
+          parsedDob = new Date(req.body.dob);
+        }
+      } else {
+        parsedDob = new Date(req.body.dob);
+      }
+
+      if (isNaN(parsedDob.getTime())) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Invalid date format for dob. Expected DD/MM/YYYY or YYYY-MM-DD.",
+        });
+      }
+      updateFields.dob = parsedDob;
+    }
+
+    // Profile Image: supports req.file or req.files (from multer) or direct profileImage URL / path
+    const uploadedFile =
+      req.file ||
+      req.files?.profileImage?.[0] ||
+      req.files?.profile?.[0] ||
+      req.files?.profiles?.[0];
+
+    if (uploadedFile) {
+      updateFields.profileImage = `uploads/profiles/${uploadedFile.filename}`;
+
+      if (player.profileImage) {
+        const oldPath = path.resolve(process.cwd(), player.profileImage);
+        fs.access(oldPath, fs.constants.F_OK, (err) => {
+          if (!err) {
+            fs.unlink(oldPath, () => { });
+          }
+        });
+      }
+    } else if (req.body.profileImage !== undefined) {
+      updateFields.profileImage = req.body.profileImage;
+    }
+
+    const updatedPlayer = await User.findByIdAndUpdate(
+      playerId,
+      updateFields,
+      {
+        new: true,
+        runValidators: true,
+      }
+    )
+      .populate(
+        "parentId",
+        "fullName firstName lastName email phone emergencyContact relationship profileImage"
+      )
+      .populate("category", "name")
+      .populate("programs", "name")
+      .populate("term", "name");
+
+    return res.status(200).json({
+      success: true,
+      message: "Player updated successfully.",
+      data: updatedPlayer,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+/**
+ * Calculate dynamic badge counts for sidebar navigation
+ */
+const calculateSidebarBadges = async () => {
+  const [
+    verificationRequestDocs,
+    temporaryPlayerDocs,
+    unallocatedPlayerDocs,
+    unpaidInvoiceDocs,
+    pendingPaymentDocs,
+    eventRegistrationDocs,
+    orderDocs,
+  ] = await Promise.all([
+    // 1. Verification requests (parent/player registration requests pending review)
+    RegistrationRequest.find({
+      status: "PENDING",
+      requestType: { $nin: ["TEMPORARY_PLAYER", "TEMPORARY"] },
+    })
+      .select("_id")
+      .lean(),
+    // 2. Temporary players (pending coach temporary player approvals)
+    User.find({ playerStatus: "PENDING_APPROVAL" }).select("_id").lean(),
+    // 3. Unallocated players (players without assigned classes or with pending class requests)
+    User.find({
+      parentId: { $exists: true },
+      isBlocked: false,
+      $or: [
+        { assignedClasses: { $exists: false } },
+        { assignedClasses: { $size: 0 } },
+        { assignedClasses: null },
+        { hasPendingRequest: true },
+      ],
+    })
+      .select("_id")
+      .lean(),
+    // 4. Invoices needing payment / action
+    Invoice.find({ status: "ACTIVE", paymentStatus: { $ne: "PAID" } })
+      .select("_id")
+      .lean(),
+    // 5. Payments pending admin approval
+    Payment.find({ status: "PENDING" }).select("_id").lean(),
+    // 6. Event registrations pending payment / approval
+    EventRegistration.find({
+      status: { $in: ["REGISTERED", "PENDING"] },
+      paymentStatus: { $ne: "PAID" },
+    })
+      .select("_id")
+      .lean(),
+    // 7. Store orders pending processing / placed
+    Order.find({ status: { $in: ["PENDING", "PROCESSING"] } })
+      .select("_id")
+      .lean(),
+  ]);
+
+  const pendingItemIds = {
+    verificationRequests: verificationRequestDocs.map((d) => d._id.toString()),
+    temporaryPlayers: temporaryPlayerDocs.map((d) => d._id.toString()),
+    unallocatedPlayers: unallocatedPlayerDocs.map((d) => d._id.toString()),
+    unpaidInvoices: unpaidInvoiceDocs.map((d) => d._id.toString()),
+    pendingPayments: pendingPaymentDocs.map((d) => d._id.toString()),
+    eventRegistrations: eventRegistrationDocs.map((d) => d._id.toString()),
+    orders: orderDocs.map((d) => d._id.toString()),
+  };
+
+  return {
+    verificationRequests: verificationRequestDocs.length,
+    temporaryPlayers: temporaryPlayerDocs.length,
+    unallocatedPlayers: unallocatedPlayerDocs.length,
+    unpaidInvoices: unpaidInvoiceDocs.length,
+    pendingPayments: pendingPaymentDocs.length,
+    eventRegistrations: eventRegistrationDocs.length,
+    orders: orderDocs.length,
+    pendingItemIds,
+    playersManagementTotal:
+      verificationRequestDocs.length + temporaryPlayerDocs.length,
+    financeTotal: unpaidInvoiceDocs.length + pendingPaymentDocs.length,
+  };
+};
+
+exports.calculateSidebarBadges = calculateSidebarBadges;
+
+exports.getSidebarBadges = async (req, res) => {
+  try {
+    const badges = await calculateSidebarBadges();
+    return res.status(200).json({
+      success: true,
+      data: badges,
+    });
+  } catch (error) {
+    console.error("getSidebarBadges error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};

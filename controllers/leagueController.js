@@ -2418,6 +2418,9 @@ exports.getFixtures = async (req, res) => {
     const fixtures = await Fixture.find({ league: leagueId })
       .populate("homeTeam", "teamName logo")
       .populate("awayTeam", "teamName logo")
+      .populate("goals.scorer", "firstName lastName fullName profileImage")
+      .populate("goals.assist", "firstName lastName fullName profileImage")
+      .populate("goals.team", "teamName logo")
       .sort({ kickoffTime: 1 });
 
     const filtered = fixtures.filter((f) => {
@@ -3845,6 +3848,112 @@ exports.getAdminLeagueData = async (req, res) => {
       totalCompleted: matchesPlayed,
     };
 
+    // Compute Player Leaderboards from completed fixtures & player statistics
+    const playerTelemetryMap = {};
+
+    completedFixtures.forEach((f) => {
+      if (Array.isArray(f.goals)) {
+        f.goals.forEach((g) => {
+          // Scorer
+          if (g.scorer && g.scorer._id) {
+            const pId = g.scorer._id.toString();
+            const teamIdStr = (g.team?._id || g.team)?.toString() || "";
+            const teamNameStr = g.team?.teamName || (f.homeTeam?._id?.toString() === teamIdStr ? f.homeTeam?.teamName : f.awayTeam?.teamName) || "Team";
+            const teamLogoStr = g.team?.logo || (f.homeTeam?._id?.toString() === teamIdStr ? f.homeTeam?.logo : f.awayTeam?.logo) || "";
+
+            if (!playerTelemetryMap[pId]) {
+              playerTelemetryMap[pId] = {
+                playerId: pId,
+                playerName: g.scorer.fullName || [g.scorer.firstName, g.scorer.lastName].filter(Boolean).join(" ") || "Player",
+                profileImage: g.scorer.profileImage || "",
+                teamId: teamIdStr,
+                teamName: teamNameStr,
+                teamLogo: teamLogoStr,
+                goals: 0,
+                assists: 0,
+                appearances: 0,
+                totalPoints: 0,
+              };
+            }
+            playerTelemetryMap[pId].goals += 1;
+            playerTelemetryMap[pId].totalPoints += 1;
+          }
+
+          // Assist
+          if (g.assist && g.assist._id) {
+            const pId = g.assist._id.toString();
+            const teamIdStr = (g.team?._id || g.team)?.toString() || "";
+            const teamNameStr = g.team?.teamName || (f.homeTeam?._id?.toString() === teamIdStr ? f.homeTeam?.teamName : f.awayTeam?.teamName) || "Team";
+            const teamLogoStr = g.team?.logo || (f.homeTeam?._id?.toString() === teamIdStr ? f.homeTeam?.logo : f.awayTeam?.logo) || "";
+
+            if (!playerTelemetryMap[pId]) {
+              playerTelemetryMap[pId] = {
+                playerId: pId,
+                playerName: g.assist.fullName || [g.assist.firstName, g.assist.lastName].filter(Boolean).join(" ") || "Player",
+                profileImage: g.assist.profileImage || "",
+                teamId: teamIdStr,
+                teamName: teamNameStr,
+                teamLogo: teamLogoStr,
+                goals: 0,
+                assists: 0,
+                appearances: 0,
+                totalPoints: 0,
+              };
+            }
+            playerTelemetryMap[pId].assists += 1;
+            playerTelemetryMap[pId].totalPoints += 1;
+          }
+        });
+      }
+    });
+
+    try {
+      const dbPlayerStats = await PlayerStatistics.find({ league: leagueId })
+        .populate("player", "fullName firstName lastName profileImage")
+        .populate("team", "teamName logo");
+
+      dbPlayerStats.forEach((ps) => {
+        if (!ps.player || !ps.player._id) return;
+        const pId = ps.player._id.toString();
+        if (!playerTelemetryMap[pId]) {
+          playerTelemetryMap[pId] = {
+            playerId: pId,
+            playerName: ps.player.fullName || [ps.player.firstName, ps.player.lastName].filter(Boolean).join(" ") || "Player",
+            profileImage: ps.player.profileImage || "",
+            teamId: ps.team?._id?.toString() || "",
+            teamName: ps.team?.teamName || "Team",
+            teamLogo: ps.team?.logo || "",
+            goals: ps.goals || 0,
+            assists: ps.assists || 0,
+            appearances: ps.appearances || 0,
+            totalPoints: (ps.goals || 0) + (ps.assists || 0),
+          };
+        } else {
+          if ((ps.goals || 0) > playerTelemetryMap[pId].goals) playerTelemetryMap[pId].goals = ps.goals;
+          if ((ps.assists || 0) > playerTelemetryMap[pId].assists) playerTelemetryMap[pId].assists = ps.assists;
+          playerTelemetryMap[pId].appearances = Math.max(playerTelemetryMap[pId].appearances, ps.appearances || 0);
+          playerTelemetryMap[pId].totalPoints = playerTelemetryMap[pId].goals + playerTelemetryMap[pId].assists;
+        }
+      });
+    } catch (e) {}
+
+    const allPlayerStatsList = Object.values(playerTelemetryMap);
+
+    const topScorers = [...allPlayerStatsList]
+      .filter((p) => p.goals > 0)
+      .sort((a, b) => b.goals - a.goals || b.assists - a.assists)
+      .slice(0, 10);
+
+    const topAssists = [...allPlayerStatsList]
+      .filter((p) => p.assists > 0)
+      .sort((a, b) => b.assists - a.assists || b.goals - a.goals)
+      .slice(0, 10);
+
+    const topPerformers = [...allPlayerStatsList]
+      .filter((p) => p.totalPoints > 0)
+      .sort((a, b) => b.totalPoints - a.totalPoints || b.goals - a.goals)
+      .slice(0, 10);
+
     // 7. Visual Analytics & Trends (Graphs)
     // Goals Per Round Trend
     const roundGoalsMap = {};
@@ -3972,6 +4081,9 @@ exports.getAdminLeagueData = async (req, res) => {
         teamVsGoals,
         resultsDistribution,
         topScoringTeams,
+        topScorers,
+        topAssists,
+        topPerformers,
       },
       graphs: {
         pointsProgression,

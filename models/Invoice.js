@@ -64,6 +64,14 @@ const invoiceSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "League",
     },
+    event: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Event",
+    },
+    eventRegistration: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "EventRegistration",
+    },
     dueDate: {
       type: Date,
       required: true,

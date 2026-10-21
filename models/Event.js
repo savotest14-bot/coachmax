@@ -48,6 +48,15 @@ const eventSchema = new mongoose.Schema(
       type: String,
       default: "TOURNAMENT",
     },
+    // Holiday Camp specific settings
+    campConfig: {
+      defaultFullDayPrice: { type: Number, default: 90 },
+      defaultHalfDayPrice: { type: Number, default: 70 },
+      defaultFullDayStartTime: { type: String, default: "08:00 AM" },
+      defaultFullDayEndTime: { type: String, default: "04:00 PM" },
+      defaultHalfDayStartTime: { type: String, default: "08:00 AM" },
+      defaultHalfDayEndTime: { type: String, default: "02:00 PM" },
+    },
     registrationFee: {
       type: Number,
       default: 0,

@@ -28,6 +28,7 @@ const userSchema = new mongoose.Schema(
     },
 
     club: String,
+    school: String,
     contactName: String,
     relationship: String,
     additionalComments: {

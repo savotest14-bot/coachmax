@@ -100,6 +100,7 @@ const {
   cancelRegistration,
   getMyEvents,
   getEventDetails,
+  getEventRegistrationDetails,
 } = require("../controllers/eventController");
 const { getPlayerAssessments, getSkillProgress } = require("../controllers/assessmentController");
 
@@ -160,6 +161,7 @@ router.post("/registerForEvent", auth, registerForEvent);
 router.post("/cancelRegistration", auth, cancelRegistration);
 router.get("/getMyEvents", auth, getMyEvents);
 router.get("/getEventDetails/:eventId", auth, getEventDetails);
+router.get("/events/registrations/:registrationId", auth, getEventRegistrationDetails);
 
 // League Statistics
 router.get("/leagues/:leagueId/standings", getLeagueStandings);

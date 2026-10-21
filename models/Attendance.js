@@ -17,6 +17,16 @@ const attendanceSchema = new mongoose.Schema(
       ref: "League",
     },
 
+    event: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Event",
+    },
+
+    campSession: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CampSession",
+    },
+
     sessionDate: {
       type: Date,
       required: true,
@@ -90,5 +100,14 @@ attendanceSchema.index(
   }
 );
 attendanceSchema.index({ trainingSessionId: 1 }, { unique: true, sparse: true });
+attendanceSchema.index(
+  { event: 1, sessionDate: 1, campSession: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      event: { $type: "objectId" },
+    },
+  }
+);
 
 module.exports = mongoose.model("Attendance", attendanceSchema);
