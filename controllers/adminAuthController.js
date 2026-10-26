@@ -29,10 +29,16 @@ const Product = require("../models/Product");
 const News = require("../models/News");
 const AttendanceHistory = require("../models/AttendanceHistory");
 const CoachNote = require("../models/CoachNote");
+const PlayerStatistics = require("../models/PlayerStatistics");
 const TrainingSession = require("../models/TrainingSession");
 const Message = require("../models/Message");
 const AuditLog = require("../models/AuditLog");
 const { generateClassInvoice, generateTransferInvoice, generateTeamInvoice, generateLeagueInvoice } = require("../services/invoiceService");
+const {
+  normalizePaymentStatus,
+  comparePlayersByPaymentStatus,
+  paymentStatusRankExpression,
+} = require("../utils/paymentStatus");
 
 exports.adminLogin = async (req, res) => {
   try {
@@ -119,19 +125,40 @@ exports.getUsers = async (req, res) => {
       term,
       medical,
       ageGroup,
+      subProgram,
       unallocated,
       page = 1,
       limit = 10,
       search = "",
     } = req.query;
 
-    const validPaymentStatus = ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "ALL"];
+    const validPaymentStatus = [
+      "TRIAL",
+      "UNPAID",
+      "PAID",
+      "OVER_DUE",
+      "HANDSHAKE",
+      "TBC",
+      "EXTRA",
+      "SUBSTITUTE",
+      "PAYMENT_PENDING",
+      "FAILED",
+      "REFUNDED",
+      "APPROVED",
+      "ACTIVE",
+      "OTHERS",
+      "ALL",
+    ];
 
     if (paymentStatus && !validPaymentStatus.includes(paymentStatus.toUpperCase())) {
       return res.status(400).json({
         message: "Invalid paymentStatus",
       });
     }
+
+    const requestedPaymentStatus = paymentStatus && paymentStatus.toUpperCase() !== "ALL"
+      ? normalizePaymentStatus(paymentStatus, paymentStatus.toUpperCase())
+      : paymentStatus;
 
     page = Math.max(1, parseInt(page, 10) || 1);
     limit = Math.max(1, Math.min(100, parseInt(limit, 10) || 10));
@@ -159,8 +186,11 @@ exports.getUsers = async (req, res) => {
     }
 
     // Payment Status filtering (supports term-wise when term is selected)
-    if (paymentStatus && paymentStatus !== "All") {
-      const statusUpper = paymentStatus.toUpperCase();
+    if (requestedPaymentStatus && requestedPaymentStatus.toUpperCase() !== "ALL") {
+      const statusUpper = normalizePaymentStatus(
+        requestedPaymentStatus,
+        requestedPaymentStatus.toUpperCase()
+      );
       if (termClassIds.length > 0) {
         if (statusUpper === "UNPAID") {
           andConditions.push({
@@ -239,6 +269,25 @@ exports.getUsers = async (req, res) => {
       }
     }
 
+    // Sub-program filtering is separate from the broad Academy/School program type.
+    if (subProgram && subProgram !== "All") {
+      const subProgramRegex = new RegExp(subProgram, "i");
+      const matchingSubPrograms = [];
+
+      if (mongoose.Types.ObjectId.isValid(subProgram)) {
+        matchingSubPrograms.push(subProgram);
+      }
+
+      const namedSubPrograms = await Program.find({ name: subProgramRegex }).distinct("_id");
+      matchingSubPrograms.push(...namedSubPrograms);
+
+      if (matchingSubPrograms.length > 0) {
+        andConditions.push({ programs: { $in: matchingSubPrograms } });
+      } else {
+        andConditions.push({ programs: { $in: [] } });
+      }
+    }
+
     if (category && category !== "All") {
       if (mongoose.Types.ObjectId.isValid(category)) {
         andConditions.push({ $or: [{ category }, { categories: category }] });
@@ -277,22 +326,24 @@ exports.getUsers = async (req, res) => {
         ],
       }).distinct("_id");
 
-      if (matchingAgePrograms.length > 0) {
+      // Keep support for named/range age groups, while single values such as
+      // U6 and U7 are resolved from the player's actual date of birth below.
+      if (matchingAgePrograms.length > 0 && (!ageMatches || ageMatches.length === 0 || ageGroup.includes("-"))) {
         orAgeList.push({ programs: { $in: matchingAgePrograms } });
       }
 
       if (ageMatches && ageMatches.length > 0) {
-        const currentYear = new Date().getFullYear();
+        const today = new Date();
         if (ageMatches.length >= 2) {
           const minAge = parseInt(ageMatches[0], 10);
           const maxAge = parseInt(ageMatches[1], 10);
-          const minDob = new Date(currentYear - maxAge - 1, 0, 1);
-          const maxDob = new Date(currentYear - minAge + 1, 11, 31);
+          const minDob = new Date(today.getFullYear() - maxAge - 1, today.getMonth(), today.getDate() + 1);
+          const maxDob = new Date(today.getFullYear() - minAge, today.getMonth(), today.getDate());
           orAgeList.push({ dob: { $gte: minDob, $lte: maxDob } });
         } else {
           const targetAge = parseInt(ageMatches[0], 10);
-          const minDob = new Date(currentYear - targetAge - 1, 0, 1);
-          const maxDob = new Date(currentYear - (targetAge > 2 ? targetAge - 2 : 0), 11, 31);
+          const minDob = new Date(today.getFullYear() - targetAge - 1, today.getMonth(), today.getDate() + 1);
+          const maxDob = new Date(today.getFullYear() - targetAge, today.getMonth(), today.getDate());
           orAgeList.push({ dob: { $gte: minDob, $lte: maxDob } });
         }
       }
@@ -358,18 +409,60 @@ exports.getUsers = async (req, res) => {
 
     const total = await User.countDocuments(query);
 
-    const users = await User.find(query)
-      .populate("parentId", "fullName email phone address city state postcode country emergencyContact relationship")
-      .populate("category", "name")
-      .populate("categories", "name")
-      .populate("programs", "name")
-      .populate("term", "name year")
-      .populate({
+    // Rank the effective status before pagination. Sorting after skip/limit would
+    // only order one page and would make the player list change between pages.
+    const paymentStatusExpression = termClassIds.length > 0
+      ? {
+        $let: {
+          vars: {
+            termStatuses: {
+              $filter: {
+                input: { $ifNull: ["$classPaymentStatuses", []] },
+                as: "classStatus",
+                cond: { $in: ["$$classStatus.class", termClassIds] },
+              },
+            },
+          },
+          in: {
+            $ifNull: [
+              { $arrayElemAt: ["$$termStatuses.paymentStatus", 0] },
+              { $ifNull: ["$paymentStatus", "TRIAL"] },
+            ],
+          },
+        },
+      }
+      : { $ifNull: ["$paymentStatus", { $arrayElemAt: ["$classPaymentStatuses.paymentStatus", 0] }] };
+
+    const users = await User.aggregate([
+      { $match: query },
+      { $addFields: { _paymentSortStatus: paymentStatusExpression } },
+      {
+        $addFields: {
+          _paymentStatusRank: paymentStatusRankExpression({
+            $toUpper: {
+              $trim: { input: { $ifNull: ["$_paymentSortStatus", ""] } },
+            },
+          }),
+        },
+      },
+      { $sort: { _paymentStatusRank: 1, fullName: 1, firstName: 1, createdAt: -1, _id: 1 } },
+      { $skip: (page - 1) * limit },
+      { $limit: limit },
+      { $project: { password: 0, tokens: 0, _paymentSortStatus: 0, _paymentStatusRank: 0 } },
+    ]);
+
+    await User.populate(users, [
+      { path: "parentId", select: "fullName email phone address city state postcode country emergencyContact relationship" },
+      { path: "category", select: "name" },
+      { path: "categories", select: "name" },
+      { path: "programs", select: "name" },
+      { path: "term", select: "name year" },
+      {
         path: "classPaymentStatuses.class",
         select: "name term program category",
         populate: { path: "term", select: "name year" },
-      })
-      .populate({
+      },
+      {
         path: "assignedClasses",
         populate: [
           { path: "term", select: "name year" },
@@ -377,11 +470,19 @@ exports.getUsers = async (req, res) => {
           { path: "program", select: "name" },
           { path: "category", select: "name" },
         ],
-      })
-      .select("-password -tokens")
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit);
+      },
+    ]);
+
+    users.forEach((user) => {
+      if (user.paymentStatus) {
+        user.paymentStatus = normalizePaymentStatus(user.paymentStatus);
+      }
+      if (Array.isArray(user.classPaymentStatuses)) {
+        user.classPaymentStatuses.forEach((entry) => {
+          entry.paymentStatus = normalizePaymentStatus(entry.paymentStatus, "TRIAL");
+        });
+      }
+    });
 
     // Compute dynamic player stats scoped to term (or all database players if term is not specified)
     const termAndConditions = [{ parentId: { $exists: true } }];
@@ -578,7 +679,7 @@ exports.getPlayerStats = async (req, res) => {
 exports.updatePaymentStatus = async (req, res) => {
   try {
     const userId = req.params.userId;
-    const { paymentStatus, classId, teamId } = req.body;
+    let { paymentStatus, classId, teamId } = req.body;
 
     const leagueId =
       req.body?.leagueId ||
@@ -601,6 +702,10 @@ exports.updatePaymentStatus = async (req, res) => {
       "TBC",
       "HANDSHAKE",
     ];
+
+    paymentStatus = paymentStatus
+      ? normalizePaymentStatus(paymentStatus, String(paymentStatus).toUpperCase())
+      : paymentStatus;
 
     if (!paymentStatus || !validStatus.includes(paymentStatus)) {
       return res.status(400).json({
@@ -2833,6 +2938,146 @@ exports.updateClass = async (req, res) => {
   }
 };
 
+exports.duplicateClass = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const sourceClass = await Class.findById(req.params.id).session(session);
+    if (!sourceClass) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: "Class not found" });
+    }
+
+    const body = req.body || {};
+    const copyPlayers = body.copyPlayers === true || body.copyPlayers === "true";
+    const className = String(body.name || `${sourceClass.name || "Class"} Copy`).trim();
+    const targetTerm = body.term || sourceClass.term;
+    const targetProgram = body.program || sourceClass.program;
+    const targetCategory = body.category || sourceClass.category;
+    const targetCoach = body.coach || sourceClass.coach;
+    const targetDay = String(body.dayOfWeek || sourceClass.dayOfWeek || "").toUpperCase();
+    const targetStart = body.startTime || sourceClass.startTime;
+    const targetEnd = body.endTime || sourceClass.endTime;
+    const targetCapacity = Number(body.capacity ?? sourceClass.capacity ?? 20);
+
+    if (!className || !targetTerm || !targetProgram || !targetCategory || !targetDay || !targetStart || !targetEnd) {
+      await session.abortTransaction();
+      return res.status(400).json({ message: "Class name, term, category, program, schedule, and times are required" });
+    }
+
+    if (!Number.isFinite(targetCapacity) || targetCapacity < 1 || targetCapacity > 200) {
+      await session.abortTransaction();
+      return res.status(400).json({ message: "Capacity must be between 1 and 200" });
+    }
+
+    const sourcePlayerIds = (sourceClass.players || []).map((playerId) => String(playerId));
+    if (copyPlayers && sourcePlayerIds.length > targetCapacity) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        message: `The duplicate capacity (${targetCapacity}) is smaller than the ${sourcePlayerIds.length} assigned players.`,
+      });
+    }
+
+    if (targetCoach) {
+      const overlappingClass = await Class.findOne({
+        _id: { $ne: sourceClass._id },
+        coach: targetCoach,
+        term: targetTerm,
+        dayOfWeek: targetDay,
+        startTime: { $lt: targetEnd },
+        endTime: { $gt: targetStart },
+      }).session(session);
+      if (overlappingClass) {
+        await session.abortTransaction();
+        return res.status(409).json({
+          message: `Coach already has an overlapping class on ${targetDay} (${targetStart}-${targetEnd})`,
+        });
+      }
+    }
+
+    const duplicateMatch = await Class.findOne({
+      term: targetTerm,
+      category: targetCategory,
+      program: targetProgram,
+      name: className,
+      dayOfWeek: targetDay,
+      startTime: targetStart,
+    }).session(session);
+    if (duplicateMatch) {
+      await session.abortTransaction();
+      return res.status(409).json({ message: "A class with the same name, program, term, day, and start time already exists" });
+    }
+
+    const sourceSchedule = Array.isArray(sourceClass.schedule) ? sourceClass.schedule : [];
+    const schedule = Array.isArray(body.schedule) ? body.schedule : sourceSchedule;
+    const [newClass] = await Class.create([{
+      name: className,
+      term: targetTerm,
+      program: targetProgram,
+      category: targetCategory,
+      dayOfWeek: targetDay,
+      startTime: targetStart,
+      endTime: targetEnd,
+      location: body.location ?? sourceClass.location,
+      venue: body.venue ?? sourceClass.venue,
+      coach: targetCoach,
+      assistantCoach: body.assistantCoach ?? sourceClass.assistantCoach,
+      capacity: targetCapacity,
+      price: Number(body.price ?? sourceClass.price ?? 0),
+      players: copyPlayers ? sourceClass.players : [],
+      trainingType: sourceClass.trainingType,
+      sessionDuration: sourceClass.sessionDuration,
+      equipmentRequired: sourceClass.equipmentRequired || [],
+      status: sourceClass.status,
+      scheduleType: body.scheduleType || sourceClass.scheduleType || "SINGLE_DAY",
+      schedule,
+    }], { session });
+
+    let copiedPlayers = 0;
+    if (copyPlayers && sourcePlayerIds.length > 0) {
+      const users = await User.find({ _id: { $in: sourcePlayerIds } }).session(session);
+      for (const user of users) {
+        const sourcePayment = (user.classPaymentStatuses || []).find(
+          (entry) => String(entry.class) === String(sourceClass._id)
+        );
+        user.assignedClasses = user.assignedClasses || [];
+        const hasNewClass = user.assignedClasses.some(
+          (assignedClass) => String(assignedClass) === String(newClass._id)
+        );
+        if (!hasNewClass) user.assignedClasses.push(newClass._id);
+        user.classPaymentStatuses = user.classPaymentStatuses || [];
+        const existingPayment = user.classPaymentStatuses.find(
+          (entry) => String(entry.class) === String(newClass._id)
+        );
+        if (!existingPayment) {
+          user.classPaymentStatuses.push({
+            class: newClass._id,
+            paymentStatus: sourcePayment?.paymentStatus || "TRIAL",
+          });
+        }
+        await user.save({ session });
+        copiedPlayers += 1;
+      }
+    }
+
+    await session.commitTransaction();
+    return res.status(201).json({
+      message: copyPlayers
+        ? `Class duplicated with ${copiedPlayers} players and payment statuses copied`
+        : "Class duplicated successfully",
+      data: newClass,
+      copiedPlayers,
+      copyPlayers,
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    return res.status(500).json({ message: error.message });
+  } finally {
+    await session.endSession();
+  }
+};
+
 exports.getCurrentYearTerms = async (req, res) => {
   try {
     const currentYear = new Date().getFullYear();
@@ -3335,7 +3580,7 @@ exports.getAttendanceByDate = async (req, res) => {
 
 exports.createCoach = async (req, res) => {
   try {
-    const { fullName, email, phone, password } = req.body;
+    const { fullName, email, phone, password } = req.body || {};
 
     if (!fullName || !email || !phone || !password) {
       return res.status(400).json({
@@ -3361,6 +3606,7 @@ exports.createCoach = async (req, res) => {
       mobile: phone,
       password: hashedPassword,
       role: "COACH",
+      profileImage: req.file ? `uploads/profiles/${req.file.filename}` : null,
     });
 
     res.json({
@@ -3405,11 +3651,168 @@ exports.getCoachById = async (req, res) => {
   }
 };
 
+exports.getCoachDetail = async (req, res) => {
+  try {
+    const { coachId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(coachId)) {
+      return res.status(400).json({ success: false, message: "Invalid coach id" });
+    }
+
+    const coach = await Admin.findOne({ _id: coachId, role: "COACH" })
+      .select("name email mobile profileImage isActive createdAt")
+      .lean();
+    if (!coach) {
+      return res.status(404).json({ success: false, message: "Coach not found" });
+    }
+
+    const classes = await Class.find({
+      $or: [{ coach: coach._id }, { assistantCoach: coach._id }],
+    })
+      .populate("term", "name year startDate endDate")
+      .populate("program", "name")
+      .populate("category", "name")
+      .populate("coach", "name profileImage")
+      .populate("assistantCoach", "name profileImage")
+      .populate("players", "fullName firstName lastName profileImage")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const classIds = classes.map((item) => item._id);
+    const [attendanceRecords, notes] = await Promise.all([
+      classIds.length
+        ? Attendance.find({ class: { $in: classIds } })
+            .populate("markedBy", "name")
+            .sort({ sessionDate: -1, updatedAt: -1 })
+            .lean()
+        : [],
+      CoachNote.find({ coach: coach._id })
+        .populate("classId", "name")
+        .sort({ createdAt: -1 })
+        .limit(30)
+        .lean(),
+    ]);
+
+    const classById = new Map(classes.map((item) => [String(item._id), item]));
+    const rollup = () => ({ sessions: 0, present: 0, late: 0, absent: 0, notMarked: 0 });
+    const totals = rollup();
+    const perClass = new Map(classes.map((item) => [String(item._id), rollup()]));
+
+    const sessionSummaries = attendanceRecords.map((attendance) => {
+      const counts = rollup();
+      counts.sessions = 1;
+      for (const record of attendance.records || []) {
+        const status = String(record.status || "NOT_MARKED").toUpperCase();
+        if (status === "PRESENT") counts.present += 1;
+        else if (status === "LATE") counts.late += 1;
+        else if (status === "ABSENT") counts.absent += 1;
+        else counts.notMarked += 1;
+      }
+      const id = String(attendance.class?._id || attendance.class || "");
+      const bucket = perClass.get(id);
+      if (bucket) {
+        bucket.sessions += 1;
+        bucket.present += counts.present;
+        bucket.late += counts.late;
+        bucket.absent += counts.absent;
+        bucket.notMarked += counts.notMarked;
+      }
+      totals.sessions += 1;
+      totals.present += counts.present;
+      totals.late += counts.late;
+      totals.absent += counts.absent;
+      totals.notMarked += counts.notMarked;
+      const cls = classById.get(id);
+      return {
+        id: attendance._id,
+        classId: id,
+        className: cls?.name || "Class",
+        sessionDate: attendance.sessionDate,
+        updatedAt: attendance.updatedAt,
+        markedByCoach: String(attendance.markedBy?._id || attendance.markedBy || "") === String(coach._id),
+        markedBy: attendance.markedBy?.name || "Unknown",
+        ...counts,
+      };
+    });
+
+    const attendanceRate = (counts) => {
+      const marked = counts.present + counts.late + counts.absent;
+      return marked ? Math.round(((counts.present + counts.late) / marked) * 100) : 0;
+    };
+    const formattedClasses = classes.map((item) => {
+      const stats = perClass.get(String(item._id)) || rollup();
+      return {
+        id: item._id,
+        name: item.name || "Unnamed class",
+        role: String(item.coach?._id || item.coach || "") === String(coach._id) ? "HEAD" : "ASSISTANT",
+        term: item.term,
+        program: item.program,
+        category: item.category,
+        dayOfWeek: item.dayOfWeek,
+        schedule: item.schedule || [],
+        startTime: item.startTime,
+        endTime: item.endTime,
+        location: item.location || item.venue || "",
+        status: item.status,
+        playerCount: Array.isArray(item.players) ? item.players.length : 0,
+        players: (item.players || []).map((player) => ({
+          id: player._id,
+          name: player.fullName || [player.firstName, player.lastName].filter(Boolean).join(" ") || "Player",
+          profileImage: player.profileImage || null,
+        })),
+        coach: item.coach,
+        assistantCoach: item.assistantCoach,
+        attendance: { ...stats, rate: attendanceRate(stats) },
+      };
+    });
+
+    const activity = [
+      ...sessionSummaries.map((session) => ({
+        id: `attendance-${session.id}`,
+        type: "ATTENDANCE",
+        title: "Class attendance recorded",
+        description: `${session.present} present, ${session.late} late, ${session.absent} absent · marked by ${session.markedBy}`,
+        date: session.updatedAt || session.sessionDate,
+        classId: session.classId,
+        className: session.className,
+      })),
+      ...notes.map((note) => ({
+        id: `note-${note._id}`,
+        type: "COACH_NOTE",
+        title: String(note.noteType || "Coach note").replace(/_/g, " ").toLowerCase(),
+        description: note.description || "Coach note added",
+        date: note.createdAt,
+        classId: note.classId?._id ? String(note.classId._id) : null,
+        className: note.classId?.name || null,
+      })),
+    ].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0)).slice(0, 40);
+
+    res.json({
+      success: true,
+      data: {
+        coach,
+        summary: {
+          assignedClasses: formattedClasses.length,
+          playerEnrollments: formattedClasses.reduce((sum, item) => sum + item.playerCount, 0),
+          attendanceSessions: totals.sessions,
+          attendanceRate: attendanceRate(totals),
+          sessionsMarkedByCoach: sessionSummaries.filter((item) => item.markedByCoach).length,
+        },
+        classes: formattedClasses,
+        attendance: sessionSummaries,
+        activity,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 exports.updateCoach = async (req, res) => {
   try {
     const coachId = req.params.id;
-    const newMobile = req.body.mobile || req.body.phone;
-    const newEmail = req.body.email;
+    const body = req.body || {};
+    const newMobile = body.mobile || body.phone;
+    const newEmail = body.email;
 
     if (newMobile) {
       const existingAdminMobile = await Admin.findOne({
@@ -3443,9 +3846,14 @@ exports.updateCoach = async (req, res) => {
       }
     }
 
+    const updateData = { ...body };
+    if (req.file) {
+      updateData.profileImage = `uploads/profiles/${req.file.filename}`;
+    }
+
     const coach = await Admin.findOneAndUpdate(
       { _id: coachId, role: "COACH" },
-      req.body,
+      updateData,
       { new: true, runValidators: true }
     ).select("-password");
 
@@ -3569,9 +3977,9 @@ exports.getClassPlayers = async (req, res) => {
       const cps = (p.classPaymentStatuses || []).find(
         (item) => item.class && item.class.toString() === classId.toString()
       );
-      pObj.paymentStatus = cps ? cps.paymentStatus : "TRIAL";
+      pObj.paymentStatus = normalizePaymentStatus(cps?.paymentStatus, "TRIAL");
       return pObj;
-    });
+    }).sort(comparePlayersByPaymentStatus);
 
     res.json({
       class: {
@@ -3812,7 +4220,12 @@ exports.getClassFullTable = async (req, res) => {
         medicalConditionDetails: player.medicalConditionDetails,
         rating: player.rating,
         prefferedFoot: player.prefferedFoot,
-        paymentStatus: (player.classPaymentStatuses || []).find((item) => item.class && item.class.toString() === classId.toString())?.paymentStatus || "TRIAL",
+        paymentStatus: normalizePaymentStatus(
+          (player.classPaymentStatuses || []).find(
+            (item) => item.class && item.class.toString() === classId.toString()
+          )?.paymentStatus,
+          "TRIAL"
+        ),
         parent: player.parentId
           ? {
             id: player.parentId._id,
@@ -3825,7 +4238,7 @@ exports.getClassFullTable = async (req, res) => {
         attendance,
         attendanceDetails,
       };
-    });
+    }).sort(comparePlayersByPaymentStatus);
 
     const broadcastRoom = await ChatRoom.findOne({
       classId: classId,
@@ -4158,7 +4571,7 @@ exports.getTeamFullTable = async (req, res) => {
         medicalConditionDetails: player.medicalConditionDetails,
         rating: player.rating,
         prefferedFoot: player.prefferedFoot,
-        paymentStatus: item.paymentStatus || "TRIAL",
+        paymentStatus: normalizePaymentStatus(item.paymentStatus, "TRIAL"),
         statistics: playerStats,
         parent: player.parentId
           ? {
@@ -4178,7 +4591,7 @@ exports.getTeamFullTable = async (req, res) => {
       }
 
       return playerRecord;
-    });
+    }).sort(comparePlayersByPaymentStatus);
 
     const broadcastRoom = await ChatRoom.findOne({
       teamId: teamId,
@@ -4432,14 +4845,18 @@ exports.getPlayerDetails = async (req, res) => {
         parentId: parentId,
         _id: { $ne: player._id },
       })
-        .select("_id fullName")
+        .select("_id fullName firstName lastName profileImage playerStatus")
         .lean()
       : [];
 
     const attendanceRecords = await Attendance.find({
       "records.player": playerId,
     })
-      .populate("class", "name dayOfWeek startTime endTime")
+      .populate({ path: "class", select: "name dayOfWeek startTime endTime term" , populate: { path: "term", select: "name year startDate endDate isEvent" } })
+      .populate({ path: "team", select: "teamName term" , populate: { path: "term", select: "name year startDate endDate isEvent" } })
+      .populate({ path: "league", select: "name season term startDate endDate", populate: { path: "term", select: "name year startDate endDate isEvent" } })
+      .populate({ path: "event", select: "title eventType category termId startDate endDate", populate: { path: "termId", select: "name year startDate endDate isEvent" } })
+      .populate("campSession", "sessionDate sessionLabel sessionType")
       .sort({ sessionDate: -1 })
       .lean();
 
@@ -4447,10 +4864,30 @@ exports.getPlayerDetails = async (req, res) => {
       const playerRecord = att.records.find(
         (r) => r.player && r.player.toString() === playerId.toString()
       );
+      const contextType = att.event ? (/(camp|holiday)/i.test(`${att.event.eventType || ""} ${att.event.category || ""} ${att.event.title || ""}`) ? "HOLIDAY_PROGRAM" : "EVENT") : att.league ? "LEAGUE" : att.team ? "TEAM" : "CLASS";
+      const context = att.event || att.league || att.team || att.class || null;
+      const term = att.class?.term || att.team?.term || att.league?.term || att.event?.termId || null;
+      const contextName = contextType === "HOLIDAY_PROGRAM" || contextType === "EVENT"
+        ? context?.title || "Event"
+        : contextType === "LEAGUE"
+          ? context?.name || "League"
+          : contextType === "TEAM"
+            ? context?.teamName || "Team"
+            : context?.name || "Class";
       return {
         attendanceId: att._id,
         class: att.class,
+        contextType,
+        contextId: context?._id || null,
+        contextName,
         className: att.class?.name || "",
+        teamName: att.team?.teamName || "",
+        leagueName: att.league?.name || "",
+        eventName: att.event?.title || "",
+        eventType: att.event?.eventType || att.event?.category || "",
+        termId: term?._id ? term._id.toString() : null,
+        termName: term?.name || null,
+        year: term?.year || null,
         sessionDate: att.sessionDate,
         status: playerRecord?.status || "NOT_MARKED",
         comment: playerRecord?.comment || "",
@@ -4462,17 +4899,17 @@ exports.getPlayerDetails = async (req, res) => {
       };
     });
 
-    const totalSessions = perDayAttendance.length;
-    const presentCount = perDayAttendance.filter((a) => a.status === "PRESENT").length;
-    const absentCount = perDayAttendance.filter((a) => a.status === "ABSENT").length;
-    const lateCount = perDayAttendance.filter((a) => a.status === "LATE").length;
+    const markedAttendance = perDayAttendance.filter((item) => ["PRESENT", "ABSENT", "LATE"].includes(String(item.status).toUpperCase()));
+    const totalSessions = markedAttendance.length;
+    const presentCount = markedAttendance.filter((a) => a.status === "PRESENT").length;
+    const absentCount = markedAttendance.filter((a) => a.status === "ABSENT").length;
+    const lateCount = markedAttendance.filter((a) => a.status === "LATE").length;
     const trialCount = perDayAttendance.filter((a) => a.status === "TRIAL").length;
     const attendedCount = presentCount + lateCount;
 
-    const overallAttendancePercentage =
-      totalSessions > 0
-        ? Number(((attendedCount / totalSessions) * 100).toFixed(2))
-        : 0;
+    const overallAttendancePercentage = totalSessions > 0
+      ? Number(((attendedCount / totalSessions) * 100).toFixed(2))
+      : 0;
 
     const overallAttendance = {
       totalSessions,
@@ -4484,20 +4921,68 @@ exports.getPlayerDetails = async (req, res) => {
       percentage: overallAttendancePercentage,
     };
 
-    // Load active player invoices
-    const InvoiceModel = require("../models/Invoice");
-    const playerInvoices = await InvoiceModel.find({
+    // Include invoices and actual receipts so partial payments and discounts are
+    // reported from finance records rather than inferred from a status flag.
+    const playerInvoices = await Invoice.find({
       $or: [
         { players: playerId },
         ...(parentId ? [{ parent: parentId, $or: [{ players: { $exists: false } }, { players: { $size: 0 } }] }] : []),
       ],
-      status: "ACTIVE",
     })
-      .populate("class", "name term price")
-      .populate("team", "teamName teamFee")
-      .populate("league", "name fee")
+      .populate({ path: "class", select: "name term price", populate: { path: "term", select: "name year startDate endDate isEvent" } })
+      .populate({ path: "team", select: "teamName teamFee term", populate: { path: "term", select: "name year startDate endDate isEvent" } })
+      .populate({ path: "league", select: "name fee term season", populate: { path: "term", select: "name year startDate endDate isEvent" } })
+      .populate({ path: "event", select: "title eventType category termId", populate: { path: "termId", select: "name year startDate endDate isEvent" } })
       .sort({ createdAt: -1 })
       .lean();
+
+    const invoiceIds = playerInvoices.map((invoice) => invoice._id);
+    const [availableTerms, productOrders, eventRegistrations, leaguePlayerStatistics] = await Promise.all([
+      Term.find({}).select("name year startDate endDate isEvent status").sort({ startDate: -1 }).lean(),
+      parentId
+        ? Order.find({ parent: parentId }).populate("items.product", "name image sku").populate("invoice").sort({ createdAt: -1 }).lean()
+        : [],
+      EventRegistration.find({ user: playerId, status: { $ne: "CANCELLED" } })
+        .populate({ path: "event", select: "title eventType category termId startDate endDate", populate: { path: "termId", select: "name year startDate endDate isEvent" } })
+        .populate("invoice")
+        .sort({ createdAt: -1 }).lean(),
+      PlayerStatistics.find({ player: playerId })
+        .populate({ path: "league", select: "name season term startDate endDate", populate: { path: "term", select: "name year startDate endDate isEvent" } })
+        .populate("team", "teamName")
+        .sort({ updatedAt: -1 }).lean(),
+    ]);
+
+    const allInvoiceIds = [...new Set([
+      ...invoiceIds.map((id) => id.toString()),
+      ...productOrders.map((order) => String(order.invoice?._id || order.invoice || "")),
+      ...eventRegistrations.map((registration) => String(registration.invoice?._id || registration.invoice || "")),
+    ].filter(Boolean))];
+    const invoicePayments = allInvoiceIds.length
+      ? await Payment.find({ invoice: { $in: allInvoiceIds } })
+        .select("invoice amount status approvedAt createdAt paymentMethod transactionId remarks")
+        .lean()
+      : [];
+
+    const invoiceReceipts = new Map();
+    invoicePayments.forEach((payment) => {
+      const key = payment.invoice?.toString();
+      if (!key) return;
+      if (!invoiceReceipts.has(key)) invoiceReceipts.set(key, { received: 0, awaitingApproval: 0, payments: [] });
+      const entry = invoiceReceipts.get(key);
+      if (payment.status === "APPROVED") entry.received += Number(payment.amount) || 0;
+      if (payment.status === "PENDING") entry.awaitingApproval += Number(payment.amount) || 0;
+      entry.payments.push(payment);
+    });
+    const getInvoiceAmounts = (invoice) => {
+      if (!invoice) return { received: 0, pending: 0, awaitingApproval: 0, discount: 0 };
+      const amount = Number(invoice.totalAmount ?? invoice.amount ?? 0);
+      const receipt = invoiceReceipts.get(invoice._id.toString()) || { received: 0, awaitingApproval: 0 };
+      const received = receipt.received > 0 ? Math.min(receipt.received, amount) : invoice.paymentStatus === "PAID" ? amount : 0;
+      const remaining = Math.max(0, amount - received);
+      const awaitingApproval = Math.min(remaining, receipt.awaitingApproval);
+      const pending = Math.max(0, remaining - awaitingApproval);
+      return { received, pending, awaitingApproval, discount: Number(invoice.discount) || 0 };
+    };
 
     const classPaymentStatuses = player.classPaymentStatuses || [];
     
@@ -4538,23 +5023,12 @@ exports.getPlayerDetails = async (req, res) => {
         return invClassId === classIdStr;
       });
 
-      let amountReceived = 0;
-      let amountPending = 0;
       const fee = matchingInvoice && typeof matchingInvoice.totalAmount === "number"
         ? matchingInvoice.totalAmount
         : classPrice;
-
-      if (stUpper === "PAID" || matchingInvoice?.paymentStatus === "PAID") {
-        amountReceived = fee;
-        amountPending = 0;
-      } else if (stUpper === "UNPAID" || stUpper === "OVER_DUE" || matchingInvoice?.paymentStatus === "UNPAID") {
-        amountReceived = 0;
-        amountPending = fee;
-      } else {
-        // TRIAL, HANDSHAKE, TBC, etc.
-        amountReceived = 0;
-        amountPending = 0;
-      }
+      const invoiceAmounts = getInvoiceAmounts(matchingInvoice);
+      const amountReceived = matchingInvoice ? invoiceAmounts.received : stUpper === "PAID" ? fee : 0;
+      const amountPending = matchingInvoice ? invoiceAmounts.pending : ["UNPAID", "OVER_DUE"].includes(stUpper) ? fee : 0;
 
       const effectiveStatus = stUpper === "PAID" || matchingInvoice?.paymentStatus === "PAID" ? "PAID" : stUpper;
 
@@ -4572,14 +5046,20 @@ exports.getPlayerDetails = async (req, res) => {
         } : null,
         termId: classTerm?._id ? classTerm._id.toString() : null,
         termName: classTerm?.name || (classTerm?.year ? `Term (${classTerm.year})` : "General"),
+        year: classTerm?.year || null,
+        program: cls.program || null,
+        category: cls.category || null,
         fee,
+        discount: invoiceAmounts.discount,
         amountReceived,
         amountPending,
+        amountAwaitingApproval: invoiceAmounts.awaitingApproval,
         paymentStatus: effectiveStatus,
         invoiceId: matchingInvoice?._id || null,
         invoiceNumber: matchingInvoice?.invoiceNumber || null,
         invoiceStatus: matchingInvoice?.paymentStatus || null,
         dueDate: matchingInvoice?.dueDate || null,
+        createdAt: matchingInvoice?.createdAt || null,
       };
     });
 
@@ -4605,7 +5085,9 @@ exports.getPlayerDetails = async (req, res) => {
     };
 
     const assignedTeams = await Team.find({ "players.player": playerId })
-      .select("teamName teamFee logo players ageGroup")
+      .select("teamName teamFee logo players ageGroup term leagues")
+      .populate("term", "name year startDate endDate isEvent")
+      .populate({ path: "leagues.league", select: "name season term startDate endDate", populate: { path: "term", select: "name year startDate endDate isEvent" } })
       .lean();
 
     const assignedTeamsPaymentInfo = assignedTeams.map((team) => {
@@ -4618,23 +5100,16 @@ exports.getPlayerDetails = async (req, res) => {
         const invTeamId = inv.team
           ? (inv.team._id ? inv.team._id.toString() : inv.team.toString())
           : null;
-        return invTeamId === team._id.toString();
+        return invTeamId === team._id.toString() && !inv.league;
       });
 
       const fee = matchingInvoice && typeof matchingInvoice.totalAmount === "number"
         ? matchingInvoice.totalAmount
         : teamFee;
 
-      let amountReceived = 0;
-      let amountPending = 0;
-
-      if (rawStatus === "PAID" || matchingInvoice?.paymentStatus === "PAID") {
-        amountReceived = fee;
-        amountPending = 0;
-      } else {
-        amountReceived = 0;
-        amountPending = fee;
-      }
+      const invoiceAmounts = getInvoiceAmounts(matchingInvoice);
+      const amountReceived = matchingInvoice ? invoiceAmounts.received : rawStatus === "PAID" ? fee : 0;
+      const amountPending = matchingInvoice ? invoiceAmounts.pending : ["UNPAID", "OVER_DUE"].includes(rawStatus) ? fee : 0;
 
       const effectiveStatus = rawStatus === "PAID" || matchingInvoice?.paymentStatus === "PAID" ? "PAID" : rawStatus;
 
@@ -4642,15 +5117,54 @@ exports.getPlayerDetails = async (req, res) => {
         teamId: team._id,
         teamName: team.teamName,
         teamFee: fee,
+        term: team.term || null,
+        termId: team.term?._id ? team.term._id.toString() : null,
+        termName: team.term?.name || "No term linked",
+        year: team.term?.year || null,
         fee,
+        discount: invoiceAmounts.discount,
         amountReceived,
         amountPending,
+        amountAwaitingApproval: invoiceAmounts.awaitingApproval,
         paymentStatus: effectiveStatus,
         invoiceId: matchingInvoice?._id || null,
         invoiceNumber: matchingInvoice?.invoiceNumber || null,
         invoiceStatus: matchingInvoice?.paymentStatus || null,
       };
     });
+
+    const assignedLeagueInfo = assignedTeams.flatMap((team) => (team.leagues || [])
+      .filter((leagueEntry) => (leagueEntry.players || []).some((entry) => String(entry.player?._id || entry.player) === String(playerId)))
+      .map((leagueEntry) => {
+        const league = leagueEntry.league;
+        const leagueId = String(league?._id || "");
+        const playerEntry = (leagueEntry.players || []).find((entry) => String(entry.player?._id || entry.player) === String(playerId));
+        const rawStatus = String(playerEntry?.paymentStatus || "UNPAID").toUpperCase();
+        const invoice = playerInvoices.find((item) => String(item.league?._id || item.league || "") === leagueId && String(item.team?._id || item.team || "") === String(team._id));
+        const amounts = getInvoiceAmounts(invoice);
+        const fee = Number(invoice?.totalAmount ?? leagueEntry.teamFee ?? league?.fee ?? 0);
+        const term = league?.term || team.term || null;
+        return {
+          leagueId,
+          leagueName: league?.name || "League",
+          season: league?.season || "",
+          teamId: team._id,
+          teamName: team.teamName,
+          termId: term?._id ? term._id.toString() : null,
+          termName: term?.name || "No term linked",
+          year: term?.year || null,
+          status: leagueEntry.status || "ACTIVE",
+          paymentStatus: invoice?.paymentStatus === "PAID" ? "PAID" : rawStatus,
+          fee,
+          discount: amounts.discount,
+          amountReceived: invoice ? amounts.received : rawStatus === "PAID" ? fee : 0,
+          amountPending: invoice ? amounts.pending : ["UNPAID", "OVER_DUE"].includes(rawStatus) ? fee : 0,
+          amountAwaitingApproval: amounts.awaitingApproval,
+          invoiceId: invoice?._id || null,
+          invoiceNumber: invoice?.invoiceNumber || null,
+          statistics: playerEntry?.statistics || {},
+        };
+      }));
 
     const paidTeams = assignedTeamsPaymentInfo.filter((item) => item.paymentStatus === "PAID");
     const unpaidTeams = assignedTeamsPaymentInfo.filter((item) => item.paymentStatus === "UNPAID");
@@ -4695,6 +5209,9 @@ exports.getPlayerDetails = async (req, res) => {
         dueDate: cls.dueDate,
         dayOfWeek: cls.dayOfWeek,
         startTime: cls.startTime,
+        category: cls.category?.name || "",
+        program: cls.program?.name || "",
+        discount: cls.discount || 0,
       });
     });
 
@@ -4705,41 +5222,155 @@ exports.getPlayerDetails = async (req, res) => {
         type: "TEAM",
         teamId: tm.teamId,
         name: tm.teamName,
-        termId: null,
-        termName: "Team Tournament",
+        termId: tm.termId,
+        termName: tm.termName,
+        year: tm.year,
         fee: tm.fee,
+        discount: tm.discount,
         amountReceived: tm.amountReceived,
         amountPending: tm.amountPending,
+        amountAwaitingApproval: tm.amountAwaitingApproval,
         paymentStatus: tm.paymentStatus,
         invoiceNumber: tm.invoiceNumber,
         invoiceId: tm.invoiceId,
         invoiceStatus: tm.invoiceStatus,
+        createdAt: tm.createdAt || null,
+      });
+    });
+
+    assignedLeagueInfo.forEach((league) => {
+      paymentHistory.push({
+        id: `league-${league.leagueId}-${league.teamId}`,
+        type: "LEAGUE",
+        leagueId: league.leagueId,
+        teamId: league.teamId,
+        teamName: league.teamName,
+        name: league.leagueName,
+        termId: league.termId,
+        termName: league.termName,
+        year: league.year,
+        fee: league.fee,
+        discount: league.discount,
+        amountReceived: league.amountReceived,
+        amountPending: league.amountPending,
+        amountAwaitingApproval: league.amountAwaitingApproval,
+        paymentStatus: league.paymentStatus,
+        invoiceNumber: league.invoiceNumber,
+        invoiceId: league.invoiceId,
+        invoiceStatus: league.paymentStatus,
+      });
+    });
+
+    eventRegistrations.forEach((registration) => {
+      const event = registration.event;
+      if (!event) return;
+      const invoice = registration.invoice?._id
+        ? registration.invoice
+        : playerInvoices.find((item) => String(item._id) === String(registration.invoice || ""));
+      const amounts = getInvoiceAmounts(invoice);
+      const registrationStatus = String(invoice?.paymentStatus || registration.paymentStatus || "UNPAID").toUpperCase();
+      const term = event.termId || null;
+      paymentHistory.push({
+        id: `event-registration-${registration._id}`,
+        type: /(camp|holiday)/i.test(`${event.eventType || ""} ${event.category || ""} ${event.title || ""}`) ? "HOLIDAY_PROGRAM" : "EVENT",
+        eventId: event._id,
+        registrationId: registration._id,
+        name: event.title || "Event registration",
+        termId: term?._id ? term._id.toString() : null,
+        termName: term?.name || "No term linked",
+        year: term?.year || null,
+        fee: Number(invoice?.totalAmount ?? registration.totalAmount ?? 0),
+        discount: amounts.discount,
+        amountReceived: invoice ? amounts.received : registrationStatus === "PAID" || registrationStatus === "APPROVED" ? Number(registration.totalAmount) || 0 : 0,
+        amountPending: invoice ? amounts.pending : ["UNPAID", "OVER_DUE", "PAYMENT_PENDING"].includes(registrationStatus) ? Number(registration.totalAmount) || 0 : 0,
+        amountAwaitingApproval: amounts.awaitingApproval,
+        paymentStatus: registrationStatus,
+        invoiceNumber: invoice?.invoiceNumber || null,
+        invoiceId: invoice?._id || null,
+        invoiceStatus: invoice?.paymentStatus || registrationStatus,
+        selectedSessions: (registration.selectedSessions || []).map((session) => ({
+          date: session.sessionDate,
+          label: session.sessionLabel || session.sessionType || "Camp session",
+          fee: Number(session.fee) || 0,
+        })),
+        createdAt: registration.createdAt,
+      });
+    });
+
+    const orderInvoiceIds = new Set();
+    productOrders.forEach((order) => {
+      const invoiceId = order.invoice?._id || order.invoice;
+      if (invoiceId) orderInvoiceIds.add(String(invoiceId));
+      const status = String(order.paymentStatus === "REFUNDED" || order.paymentStatus === "FAILED"
+        ? order.paymentStatus
+        : order.invoice?.paymentStatus || order.paymentStatus || "PENDING").toUpperCase();
+      const amount = Number(order.totalAmount || order.invoice?.totalAmount || 0);
+      const receiptAmounts = getInvoiceAmounts(order.invoice);
+      const orderIsPaid = status === "PAID" || order.invoice?.paymentStatus === "PAID";
+      paymentHistory.push({
+        id: `order-${order._id}`,
+        type: "STORE_ORDER",
+        orderId: order._id,
+        name: (order.items || []).map((entry) => entry.product?.name || "Product").join(", ") || "Store order",
+        products: (order.items || []).map((entry) => ({
+          name: entry.product?.name || "Product",
+          quantity: Number(entry.quantity) || 1,
+          price: Number(entry.price) || 0,
+          size: entry.selectedSize || "",
+          color: entry.selectedColor || "",
+        })),
+        termId: null,
+        termName: "Family purchase · no term linked",
+        fee: amount,
+        discount: receiptAmounts.discount || Number(order.invoice?.discount) || 0,
+        amountReceived: order.invoice ? receiptAmounts.received : orderIsPaid ? amount : 0,
+        amountPending: order.invoice ? receiptAmounts.pending : orderIsPaid || status === "PENDING" ? 0 : amount,
+        amountAwaitingApproval: order.invoice ? receiptAmounts.awaitingApproval : status === "PENDING" ? amount : 0,
+        paymentStatus: status,
+        invoiceNumber: order.invoice?.invoiceNumber || null,
+        invoiceId: invoiceId || null,
+        invoiceStatus: order.invoice?.paymentStatus || status,
+        createdAt: order.createdAt,
+        householdPurchase: true,
       });
     });
 
     // Add any remaining invoices not matched
-    const matchedInvoiceIds = new Set(
+    const matchedInvoiceIds = new Set([
       paymentHistory.map((p) => p.invoiceId?.toString()).filter(Boolean)
-    );
+    ].flat().concat(Array.from(orderInvoiceIds)));
 
     playerInvoices.forEach((inv) => {
       if (!matchedInvoiceIds.has(inv._id.toString())) {
-        const isPaid = inv.paymentStatus === "PAID";
         const fee = Number(inv.totalAmount || 0);
+        const amounts = getInvoiceAmounts(inv);
+        const invoiceTerm = inv.class?.term || inv.team?.term || inv.league?.term || inv.event?.termId || null;
+        const eventLabel = `${inv.event?.eventType || ""} ${inv.event?.category || ""} ${inv.event?.title || ""}`;
+        const itemType = inv.class ? "CLASS" : inv.league ? "LEAGUE" : inv.team ? "TEAM" : inv.event ? (/(camp|holiday)/i.test(eventLabel) ? "HOLIDAY_PROGRAM" : "EVENT") : inv.type === "STORE_ORDER" ? "STORE_ORDER" : "INVOICE";
+        const contextName = inv.class?.name || inv.league?.name || inv.team?.teamName || inv.event?.title || inv.items?.[0]?.title || inv.description || inv.invoiceNumber;
         paymentHistory.push({
           id: `inv-${inv._id}`,
-          type: "INVOICE",
-          name: inv.items?.[0]?.title || inv.description || inv.invoiceNumber,
-          termId: null,
-          termName: inv.type?.replace("_", " ") || "Other",
+          type: itemType,
+          name: contextName,
+          classId: inv.class?._id || null,
+          teamId: inv.team?._id || null,
+          leagueId: inv.league?._id || null,
+          eventId: inv.event?._id || null,
+          termId: invoiceTerm?._id ? invoiceTerm._id.toString() : null,
+          termName: invoiceTerm?.name || inv.type?.replace(/_/g, " ") || "No term linked",
+          year: invoiceTerm?.year || null,
           fee,
-          amountReceived: isPaid ? fee : 0,
-          amountPending: isPaid ? 0 : fee,
-          paymentStatus: isPaid ? "PAID" : (inv.paymentStatus || "UNPAID"),
+          discount: amounts.discount,
+          amountReceived: amounts.received,
+          amountPending: amounts.pending,
+          amountAwaitingApproval: amounts.awaitingApproval,
+          paymentStatus: inv.paymentStatus || "UNPAID",
           invoiceNumber: inv.invoiceNumber,
           invoiceId: inv._id,
           invoiceStatus: inv.paymentStatus,
           dueDate: inv.dueDate,
+          createdAt: inv.createdAt,
+          invoiceRecordStatus: inv.status,
         });
       }
     });
@@ -4760,12 +5391,16 @@ exports.getPlayerDetails = async (req, res) => {
           totalFees: 0,
           totalReceived: 0,
           totalPending: 0,
+          totalDiscount: 0,
+          awaitingApproval: 0,
           itemsCount: 0,
         };
       }
       termStatsMap[tKey].totalFees += Number(item.fee) || 0;
       termStatsMap[tKey].totalReceived += Number(item.amountReceived) || 0;
       termStatsMap[tKey].totalPending += Number(item.amountPending) || 0;
+      termStatsMap[tKey].totalDiscount += Number(item.discount) || 0;
+      termStatsMap[tKey].awaitingApproval += Number(item.amountAwaitingApproval) || 0;
       termStatsMap[tKey].itemsCount += 1;
     });
 
@@ -4773,9 +5408,32 @@ exports.getPlayerDetails = async (req, res) => {
       totalFees,
       totalReceived,
       totalPending,
+      totalDiscount: paymentHistory.reduce((sum, item) => sum + (Number(item.discount) || 0), 0),
+      totalAwaitingApproval: paymentHistory.reduce((sum, item) => sum + (Number(item.amountAwaitingApproval) || 0), 0),
       byTerm: Object.values(termStatsMap),
       history: paymentHistory,
     };
+
+    const leagueStatistics = leaguePlayerStatistics.map((entry) => ({
+      id: entry._id,
+      leagueId: entry.league?._id || null,
+      leagueName: entry.league?.name || "League",
+      season: entry.league?.season || "",
+      teamId: entry.team?._id || null,
+      teamName: entry.team?.teamName || "",
+      termId: entry.league?.term?._id ? entry.league.term._id.toString() : null,
+      termName: entry.league?.term?.name || "No term linked",
+      year: entry.league?.term?.year || null,
+      statistics: {
+        appearances: Number(entry.appearances) || 0,
+        goals: Number(entry.goals) || 0,
+        assists: Number(entry.assists) || 0,
+        cleanSheets: Number(entry.cleanSheets) || 0,
+        yellowCards: Number(entry.yellowCards) || 0,
+        redCards: Number(entry.redCards) || 0,
+        minutesPlayed: Number(entry.minutesPlayed) || 0,
+      },
+    }));
 
     const teamAttendanceRecords = await Attendance.find({
       team: { $exists: true, $ne: null },
@@ -4833,10 +5491,18 @@ exports.getPlayerDetails = async (req, res) => {
         player,
         parent: player.parentId || null,
         otherPlayers,
+        familyPlayers: [
+          { _id: player._id, fullName: player.fullName || [player.firstName, player.lastName].filter(Boolean).join(" "), profileImage: player.profileImage || null, playerStatus: player.playerStatus || player.status || null },
+          ...otherPlayers.map((child) => ({ ...child, fullName: child.fullName || [child.firstName, child.lastName].filter(Boolean).join(" ") })),
+        ],
+        availableTerms,
         assignedClassesPaymentInfo,
         classPaymentSummary,
         assignedTeamsPaymentInfo,
+        assignedLeagueInfo,
         teamPaymentSummary,
+        leagueStatistics,
+        eventRegistrations,
         paymentFinancialSummary,
         perDayAttendance,
         overallAttendance,

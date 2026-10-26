@@ -7,10 +7,128 @@ const CampSession = require("../models/CampSession");
 const Attendance = require("../models/Attendance");
 const Invoice = require("../models/Invoice");
 const Parent = require("../models/Parent");
+const Term = require("../models/Term");
 const { generateInvoiceNumber } = require("./invoiceController");
 const fs = require("fs");
 const path = require("path");
 const mongoose = require("mongoose");
+const {
+  DEFAULT_TIMEZONE,
+  dateOnly,
+  isDateOnly,
+  dateOnlyToUtc,
+  dateOnlyStartUtc,
+  dateOnlyEndUtc,
+  addDateOnlyDays,
+  formatDateOnly,
+  formatTimestamp,
+  weekdayShort,
+  serializeCampSession,
+  serializeSelectedSession,
+  serializeEvent,
+  serializeRegistration,
+} = require("../utils/dateTime");
+const {
+  normalizePaymentStatus,
+  paymentStatusRankExpression,
+} = require("../utils/paymentStatus");
+
+/**
+ * Resolve which players are allowed to receive attendance for a particular
+ * event calendar date/session. Holiday Camp registrations may contain a
+ * selectedSessions array; a player is eligible only when that array contains
+ * the requested session (or date), while legacy/non-camp registrations with
+ * no selected sessions remain eligible for the event date.
+ */
+async function resolveEventAttendanceScope({ eventId, dateKey, campSessionId }) {
+  const event = await Event.findById(eventId).select("_id");
+  if (!event) {
+    const error = new Error("Event not found");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  let session = null;
+  if (campSessionId) {
+    if (!mongoose.Types.ObjectId.isValid(campSessionId)) {
+      const error = new Error("Invalid camp session ID");
+      error.statusCode = 400;
+      throw error;
+    }
+    session = await CampSession.findOne({ _id: campSessionId, event: eventId });
+    if (!session) {
+      const error = new Error("Camp session not found for this event");
+      error.statusCode = 404;
+      throw error;
+    }
+    if (dateOnly(session.sessionDate, "campSession.sessionDate") !== dateKey) {
+      const error = new Error("Camp session does not match the requested date");
+      error.statusCode = 400;
+      throw error;
+    }
+  }
+
+  const registrations = await EventRegistration.find({
+    event: eventId,
+    status: "REGISTERED",
+  }).select("user selectedSessions");
+
+  const eligiblePlayerIds = new Set();
+  registrations.forEach((registration) => {
+    const selected = Array.isArray(registration.selectedSessions)
+      ? registration.selectedSessions
+      : [];
+
+    // Empty selectedSessions is the legacy regular-event shape: the player
+    // is registered for the event as a whole.
+    const eligible = selected.length === 0
+      ? true
+      : selected.some((item) => {
+        if (campSessionId && item.session && item.session.toString() === campSessionId.toString()) {
+          return true;
+        }
+        if (!campSessionId && item.sessionDate) {
+          try {
+            return dateOnly(item.sessionDate, "selectedSession.sessionDate") === dateKey;
+          } catch {
+            return false;
+          }
+        }
+        return false;
+      });
+
+    if (eligible && registration.user) {
+      eligiblePlayerIds.add(registration.user.toString());
+    }
+  });
+
+  return { session, registrations, eligiblePlayerIds };
+}
+
+function eventErrorStatus(error) {
+  return Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+}
+
+async function resolveEventTermId({ requestedTermId, startDate, endDate, eventType }) {
+  if (requestedTermId) {
+    if (!mongoose.Types.ObjectId.isValid(requestedTermId)) {
+      const error = new Error("termId must be a valid term id");
+      error.statusCode = 400;
+      throw error;
+    }
+    return requestedTermId;
+  }
+  if (!startDate || !endDate) return null;
+  const start = dateOnlyStartUtc(startDate, "startDate");
+  const end = dateOnlyEndUtc(endDate, "endDate");
+  const isCamp = ["CAMP", "HOLIDAY CAMP"].includes(String(eventType || "").toUpperCase());
+  const matchingTerm = await Term.findOne({
+    startDate: { $lte: start },
+    endDate: { $gte: end },
+    ...(isCamp ? { isEvent: true } : {}),
+  }).sort({ startDate: -1 }).select("_id").lean();
+  return matchingTerm?._id || null;
+}
 
 exports.createEvent = async (req, res) => {
   try {
@@ -26,6 +144,21 @@ exports.createEvent = async (req, res) => {
         bodyData.campConfig = JSON.parse(bodyData.campConfig);
       } catch (e) {}
     }
+
+    // Event ranges and camp sessions are calendar dates. Normalize them to a
+    // deterministic UTC value; responses expose YYYY-MM-DD via serializeEvent.
+    if (bodyData.startDate) bodyData.startDate = dateOnlyToUtc(bodyData.startDate, "startDate");
+    if (bodyData.endDate) bodyData.endDate = dateOnlyToUtc(bodyData.endDate, "endDate");
+    if (isDateOnly(bodyData.registrationDeadline)) {
+      bodyData.registrationDeadline = dateOnlyToUtc(bodyData.registrationDeadline, "registrationDeadline");
+    }
+    if (bodyData.termId === "") delete bodyData.termId;
+    bodyData.termId = await resolveEventTermId({
+      requestedTermId: bodyData.termId,
+      startDate: bodyData.startDate,
+      endDate: bodyData.endDate,
+      eventType: bodyData.eventType,
+    });
 
     let initialSessions = [];
     if (bodyData.sessions) {
@@ -48,9 +181,10 @@ exports.createEvent = async (req, res) => {
     if (Array.isArray(initialSessions) && initialSessions.length > 0) {
       const sessionDocs = initialSessions.map((s) => ({
         event: event._id,
-        sessionDate: new Date(s.sessionDate),
+        sessionDate: dateOnlyToUtc(s.sessionDate, "sessionDate"),
         sessionType: s.sessionType || "FULL_DAY",
         sessionLabel: s.sessionLabel || (s.sessionType === "HALF_DAY" ? "Half Day" : "Full Day"),
+        dayNote: s.dayNote !== undefined ? String(s.dayNote).trim() : "",
         startTime: s.startTime || (s.sessionType === "HALF_DAY" ? "08:00 AM" : "08:00 AM"),
         endTime: s.endTime || (s.sessionType === "HALF_DAY" ? "02:00 PM" : "04:00 PM"),
         fee: Number(s.fee !== undefined ? s.fee : (s.sessionType === "HALF_DAY" ? 70 : 90)),
@@ -63,7 +197,7 @@ exports.createEvent = async (req, res) => {
     res.status(201).json({
       success: true,
       message: "Event created successfully",
-      data: event,
+      data: serializeEvent(event),
     });
 
   } catch (error) {
@@ -76,9 +210,33 @@ exports.createEvent = async (req, res) => {
 
 exports.getAllEventsForAdmin = async (req, res) => {
   try {
-    const events = await Event.find()
+    const todayParts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: DEFAULT_TIMEZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date());
+    const today = `${todayParts.find((part) => part.type === "year")?.value}-${todayParts.find((part) => part.type === "month")?.value}-${todayParts.find((part) => part.type === "day")?.value}`;
+
+    // Keep persisted statuses aligned with the event's Australia calendar dates.
+    await Event.updateMany(
+      { isArchived: { $ne: true }, endDate: { $lt: dateOnlyStartUtc(today) }, status: { $ne: "COMPLETED" } },
+      { $set: { status: "COMPLETED", isRegistrationOpen: false } }
+    );
+    await Event.updateMany(
+      {
+        isArchived: { $ne: true },
+        status: "UPCOMING",
+        startDate: { $lte: dateOnlyEndUtc(today) },
+        endDate: { $gte: dateOnlyStartUtc(today) },
+      },
+      { $set: { status: "ONGOING" } }
+    );
+
+    const events = await Event.find({ isArchived: { $ne: true } })
       .sort({ createdAt: -1 })
-      .populate("createdBy", "name email");
+      .populate("createdBy", "name email")
+      .populate("termId", "name year startDate endDate status isEvent");
 
     const updatedEvents = events.map((event) => {
       const totalSlots = event.maxParticipants || 0;
@@ -86,7 +244,7 @@ exports.getAllEventsForAdmin = async (req, res) => {
       const availableSlots = totalSlots - registered;
 
       return {
-        ...event._doc,
+        ...serializeEvent(event),
         stats: {
           totalSlots,
           registered,
@@ -109,6 +267,101 @@ exports.getAllEventsForAdmin = async (req, res) => {
   }
 };
 
+/** Archive an event while preserving its registrations, attendance, invoices, and chat history. */
+exports.deleteEvent = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "A valid event ID is required" });
+    }
+
+    const event = await Event.findById(id);
+    if (!event) return res.status(404).json({ success: false, message: "Event not found" });
+    if (event.isArchived) return res.json({ success: true, message: "Event is already archived" });
+
+    await EventRegistration.updateMany(
+      { event: id, status: { $in: ["REGISTERED", "PENDING"] } },
+      { $set: { status: "CANCELLED" } }
+    );
+    await CampSession.updateMany(
+      { event: id },
+      { $set: { registeredCount: 0, isAvailable: false } }
+    );
+    // Keep paid transactions as historical records; cancel unpaid invoices so
+    // removing an event does not leave new payment obligations behind.
+    await Invoice.updateMany(
+      { event: id, paymentStatus: { $in: ["UNPAID", "PAYMENT_PENDING"] } },
+      { $set: { status: "CANCELLED", paymentStatus: "CANCELLED" } }
+    );
+
+    event.isArchived = true;
+    event.isRegistrationOpen = false;
+    event.status = "COMPLETED";
+    event.totalRegistered = 0;
+    await event.save();
+
+    return res.json({
+      success: true,
+      message: "Event archived. Active registrations were cancelled and payment, attendance, and chat history were preserved.",
+      data: serializeEvent(event),
+    });
+  } catch (error) {
+    console.error("deleteEvent error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/** Remove one active registration from an event without deleting its audit history. */
+exports.removeEventRegistration = async (req, res) => {
+  try {
+    const { registrationId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(registrationId)) {
+      return res.status(400).json({ success: false, message: "A valid registration ID is required" });
+    }
+
+    const registration = await EventRegistration.findById(registrationId).populate("invoice");
+    if (!registration) return res.status(404).json({ success: false, message: "Registration not found" });
+    if (registration.status !== "REGISTERED") {
+      return res.status(409).json({ success: false, message: "This player is no longer registered for the event" });
+    }
+
+    registration.status = "CANCELLED";
+    await registration.save();
+
+    const activeCount = await EventRegistration.countDocuments({ event: registration.event, status: "REGISTERED" });
+    await Event.updateOne({ _id: registration.event }, { $set: { totalRegistered: activeCount } });
+
+    const sessionIds = [...new Set((registration.selectedSessions || [])
+      .map((selected) => selected.session?.toString())
+      .filter(Boolean))];
+    for (const sessionId of sessionIds) {
+      const registeredCount = await EventRegistration.countDocuments({
+        event: registration.event,
+        status: "REGISTERED",
+        "selectedSessions.session": sessionId,
+      });
+      await CampSession.updateOne({ _id: sessionId }, { $set: { registeredCount } });
+    }
+
+    if (registration.invoice) {
+      const invoiceUpdate = { status: "CANCELLED" };
+      if (["UNPAID", "PAYMENT_PENDING"].includes(registration.invoice.paymentStatus)) {
+        invoiceUpdate.paymentStatus = "CANCELLED";
+      }
+      await Invoice.updateOne({ _id: registration.invoice._id }, { $set: invoiceUpdate });
+    }
+
+    return res.json({
+      success: true,
+      message: "Player removed from this event. Attendance and payment history are retained.",
+      data: { registrationId: registration._id, status: registration.status },
+    });
+  } catch (error) {
+    console.error("removeEventRegistration error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 exports.updateEventStatus = async (req, res) => {
   try {
     const { id } = req.params;
@@ -123,7 +376,7 @@ exports.updateEventStatus = async (req, res) => {
     }
 
     const event = await Event.findById(id);
-    if (!event) {
+    if (!event || event.isArchived) {
       return res.status(404).json({
         success: false,
         message: "Event not found",
@@ -142,7 +395,7 @@ exports.updateEventStatus = async (req, res) => {
     res.status(200).json({
       success: true,
       message: `Event status updated to ${status} and registration closed if applicable`,
-      data: event,
+      data: serializeEvent(event),
     });
 
   } catch (error) {
@@ -158,7 +411,7 @@ exports.updateEvent = async (req, res) => {
     const { id } = req.params;
 
     const event = await Event.findById(id);
-    if (!event) {
+    if (!event || event.isArchived) {
       return res.status(404).json({
         success: false,
         message: "Event not found",
@@ -170,6 +423,12 @@ exports.updateEvent = async (req, res) => {
       try {
         updates.campConfig = JSON.parse(updates.campConfig);
       } catch (e) {}
+    }
+
+    if (updates.startDate) updates.startDate = dateOnlyToUtc(updates.startDate, "startDate");
+    if (updates.endDate) updates.endDate = dateOnlyToUtc(updates.endDate, "endDate");
+    if (isDateOnly(updates.registrationDeadline)) {
+      updates.registrationDeadline = dateOnlyToUtc(updates.registrationDeadline, "registrationDeadline");
     }
 
     if (updates.title && updates.title.trim() === "") {
@@ -194,7 +453,7 @@ exports.updateEvent = async (req, res) => {
     }
 
     if (updates.startDate && updates.endDate) {
-      if (new Date(updates.startDate) > new Date(updates.endDate)) {
+      if (dateOnly(updates.startDate, "startDate") > dateOnly(updates.endDate, "endDate")) {
         return res.status(400).json({
           success: false,
           message: "Start date cannot be after end date",
@@ -203,12 +462,24 @@ exports.updateEvent = async (req, res) => {
     }
 
     if (updates.registrationDeadline && updates.startDate) {
-      if (new Date(updates.registrationDeadline) > new Date(updates.startDate)) {
+      const deadline = new Date(updates.registrationDeadline);
+      const startDate = dateOnlyStartUtc(updates.startDate, "startDate");
+      if (!Number.isNaN(deadline.getTime()) && deadline > startDate) {
         return res.status(400).json({
           success: false,
           message: "Registration deadline must be before event start date",
         });
       }
+    }
+
+    if (updates.termId === "") delete updates.termId;
+    if (updates.termId !== undefined || updates.startDate || updates.endDate || updates.eventType) {
+      updates.termId = await resolveEventTermId({
+        requestedTermId: updates.termId !== undefined ? updates.termId : event.termId,
+        startDate: updates.startDate || event.startDate,
+        endDate: updates.endDate || event.endDate,
+        eventType: updates.eventType || event.eventType,
+      });
     }
 
     if (updates.status) {
@@ -242,7 +513,7 @@ exports.updateEvent = async (req, res) => {
     res.status(200).json({
       success: true,
       message: "Event updated successfully",
-      data: updatedEvent,
+      data: serializeEvent(updatedEvent),
     });
 
   } catch (error) {
@@ -261,6 +532,7 @@ exports.getAllEventsForUser = async (req, res) => {
     const events = await Event.find({
       status: "UPCOMING",
       isRegistrationOpen: true,
+      isArchived: { $ne: true },
     }).sort({ startDate: 1 });
 
     const registrations = await EventRegistration.find({
@@ -273,7 +545,7 @@ exports.getAllEventsForUser = async (req, res) => {
     );
 
     const updatedEvents = events.map((event) => ({
-      ...event._doc,
+      ...serializeEvent(event),
       isRegistered: registeredEventIds.has(event._id.toString()),
     }));
 
@@ -295,7 +567,7 @@ exports.registerForEvent = async (req, res) => {
       return res.status(400).json({ success: false, message: "Target player ID is required" });
     }
 
-    const event = await Event.findById(eventId);
+    const event = await Event.findById(eventId).populate("termId", "name year startDate endDate status isEvent");
     if (!event) {
       return res.status(404).json({ success: false, message: "Event not found" });
     }
@@ -361,21 +633,18 @@ exports.registerForEvent = async (req, res) => {
 
       // Check dates within event range and conflicting sessions on the same date
       const dateMap = new Map();
-      const eventStart = new Date(event.startDate);
-      eventStart.setUTCHours(0, 0, 0, 0);
-      const eventEnd = new Date(event.endDate);
-      eventEnd.setUTCHours(23, 59, 59, 999);
+      const eventStart = dateOnly(event.startDate, "event.startDate");
+      const eventEnd = dateOnly(event.endDate, "event.endDate");
 
       for (const s of dbSessions) {
-        const sDate = new Date(s.sessionDate);
-        if (sDate < eventStart || sDate > eventEnd) {
+        const dateKey = dateOnly(s.sessionDate, "sessionDate");
+        if (dateKey < eventStart || dateKey > eventEnd) {
           return res.status(400).json({
             success: false,
-            message: `Session date ${sDate.toISOString().split("T")[0]} is outside the configured camp range`,
+            message: `Session date ${dateKey} is outside the configured camp range`,
           });
         }
 
-        const dateKey = sDate.toISOString().split("T")[0];
         if (dateMap.has(dateKey)) {
           return res.status(400).json({
             success: false,
@@ -398,18 +667,14 @@ exports.registerForEvent = async (req, res) => {
 
         validatedSessions.push({
           session: s._id,
-          sessionDate: s.sessionDate,
+          sessionDate: dateOnlyToUtc(dateKey, "sessionDate"),
           sessionType: s.sessionType,
           fee: Number(s.fee || 0),
           startTime: s.startTime,
           endTime: s.endTime,
         });
 
-        const formattedDateStr = new Date(s.sessionDate).toLocaleDateString("en-US", {
-          day: "numeric",
-          month: "short",
-          year: "numeric",
-        });
+        const formattedDateStr = formatDateOnly(dateKey);
 
         invoiceItems.push({
           title: `Holiday Camp: ${formattedDateStr} (${s.sessionLabel || s.sessionType})`,
@@ -571,10 +836,10 @@ exports.registerForEvent = async (req, res) => {
       success: true,
       message: "Registered successfully",
       data: {
-        registration,
+        registration: serializeRegistration(registration),
         invoice: invoiceDoc,
         totalAmount: calculatedTotal,
-        selectedSessions: validatedSessions,
+        selectedSessions: validatedSessions.map(serializeSelectedSession),
       },
     });
 
@@ -630,7 +895,7 @@ exports.getMyEvents = async (req, res) => {
 
     res.json({
       success: true,
-      data: events,
+      data: events.map(serializeRegistration),
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -642,9 +907,10 @@ exports.getEventDetails = async (req, res) => {
     const { eventId } = req.params;
     const userId = req.user?._id;
 
-    const event = await Event.findById(eventId);
+    const event = await Event.findById(eventId)
+      .populate("termId", "name year startDate endDate status isEvent");
 
-    if (!event) {
+    if (!event || event.isArchived) {
       return res.status(404).json({
         message: "Event not found",
       });
@@ -675,7 +941,7 @@ exports.getEventDetails = async (req, res) => {
     res.json({
       success: true,
       data: {
-        ...event._doc,
+        ...serializeEvent(event),
 
         stats: {
           totalSlots,
@@ -685,7 +951,7 @@ exports.getEventDetails = async (req, res) => {
 
         userRegistrationStatus,
         userRegistration,
-        campSessions,
+        campSessions: campSessions.map(serializeCampSession),
       },
     });
   } catch (error) {
@@ -697,12 +963,11 @@ exports.getEventDetailsAdmin = async (req, res) => {
   try {
     const { eventId } = req.params;
 
-    const event = await Event.findById(eventId).populate(
-      "createdBy",
-      "fullName email"
-    );
+    const event = await Event.findById(eventId)
+      .populate("createdBy", "fullName email")
+      .populate("termId", "name year startDate endDate status isEvent");
 
-    if (!event) {
+    if (!event || event.isArchived) {
       return res.status(404).json({
         message: "Event not found",
       });
@@ -730,7 +995,7 @@ exports.getEventDetailsAdmin = async (req, res) => {
     res.json({
       success: true,
       data: {
-        ...event._doc,
+        ...serializeEvent(event),
 
         stats: {
           totalSlots,
@@ -739,7 +1004,7 @@ exports.getEventDetailsAdmin = async (req, res) => {
           totalParticipants,
           availableSlots,
         },
-        campSessions,
+        campSessions: campSessions.map(serializeCampSession),
       },
     });
   } catch (error) {
@@ -758,7 +1023,7 @@ exports.getEventParticipants = async (req, res) => {
 
     const event = await Event.findById(eventId);
 
-    if (!event) {
+    if (!event || event.isArchived) {
       return res.status(404).json({ message: "Event not found" });
     }
 
@@ -820,11 +1085,38 @@ exports.getEventParticipants = async (req, res) => {
       return res.send(csv);
     }
 
-    pipeline.push({ $sort: { createdAt: -1 } });
+    pipeline.push({
+      $addFields: {
+        _paymentStatusNormalized: {
+          $toUpper: {
+            $trim: { input: { $ifNull: ["$paymentStatus", "UNPAID"] } },
+          },
+        },
+      },
+    });
+    pipeline.push({
+      $addFields: {
+        _paymentStatusRank: paymentStatusRankExpression("$_paymentStatusNormalized"),
+      },
+    });
+    pipeline.push({
+      $sort: {
+        _paymentStatusRank: 1,
+        "user.fullName": 1,
+        "user.firstName": 1,
+        createdAt: -1,
+        _id: 1,
+      },
+    });
     pipeline.push({ $skip: skip });
     pipeline.push({ $limit: limitNumber });
 
     const participants = await EventRegistration.aggregate(pipeline);
+    participants.forEach((participant) => {
+      participant.paymentStatus = normalizePaymentStatus(participant.paymentStatus);
+      delete participant._paymentStatusNormalized;
+      delete participant._paymentStatusRank;
+    });
 
     const stats = {
       totalSlots: event.maxParticipants,
@@ -884,7 +1176,7 @@ exports.exportEventParticipants = async (req, res) => {
       EventTitle: event.title,
       EventCategory: event.category,
       EventStartDate: event.startDate
-        ? new Date(event.startDate).toLocaleDateString()
+        ? dateOnly(event.startDate, "event.startDate")
         : "",
       EventVenue: event.venueName || "",
 
@@ -900,11 +1192,15 @@ exports.exportEventParticipants = async (req, res) => {
         ? new Date(d.user.dob).toLocaleDateString()
         : "",
       ContactName: d.user.contactName || "",
-      MedicalCondition: d.user.medicalCondition || "",
+      MedicalCondition: d.user.isMedicalCondition
+        ? (d.user.medicalConditionDetails || "Yes")
+        : "",
+      IsMedicalCondition: Boolean(d.user.isMedicalCondition),
+      MedicalConditionDetails: d.user.medicalConditionDetails || "",
       Comments: d.user.comments || "",
 
       RegistrationStatus: d.status,
-      RegisteredAt: new Date(d.createdAt).toLocaleString(),
+      RegisteredAt: formatTimestamp(d.createdAt),
     }));
 
     // ================= CSV =================
@@ -973,7 +1269,7 @@ exports.configureCampSessions = async (req, res) => {
     const { sessions = [], campConfig } = req.body;
 
     const event = await Event.findById(eventId);
-    if (!event) {
+    if (!event || event.isArchived) {
       return res.status(404).json({ success: false, message: "Event not found" });
     }
 
@@ -982,64 +1278,162 @@ exports.configureCampSessions = async (req, res) => {
       await event.save();
     }
 
-    if (Array.isArray(sessions)) {
-      // Find sessions with existing registrations to protect them
-      const existingSessionsWithRegistrations = await EventRegistration.find({
+    const hasSessionsPayload = Object.prototype.hasOwnProperty.call(req.body || {}, "sessions");
+    if (hasSessionsPayload && !Array.isArray(sessions)) {
+      return res.status(400).json({ success: false, message: "sessions must be an array" });
+    }
+
+    if (hasSessionsPayload) {
+      // Reconcile the complete submitted configuration. Registered sessions
+      // are never deleted or moved: a missing registered row is disabled so
+      // existing registrations and attendance remain addressable.
+      const registrations = await EventRegistration.find({
         event: eventId,
         status: "REGISTERED",
       }).select("selectedSessions.session");
-
       const registeredSessionIds = new Set();
-      existingSessionsWithRegistrations.forEach((reg) => {
-        (reg.selectedSessions || []).forEach((s) => {
-          if (s.session) registeredSessionIds.add(s.session.toString());
+      registrations.forEach((reg) => {
+        (reg.selectedSessions || []).forEach((selected) => {
+          if (selected.session) registeredSessionIds.add(selected.session.toString());
         });
       });
 
-      for (const s of sessions) {
-        if (s._id && mongoose.Types.ObjectId.isValid(s._id)) {
-          // Update existing session
-          await CampSession.findByIdAndUpdate(s._id, {
-            sessionType: s.sessionType,
-            sessionLabel: s.sessionLabel || (s.sessionType === "HALF_DAY" ? "Half Day" : "Full Day"),
-            startTime: s.startTime,
-            endTime: s.endTime,
-            fee: Number(s.fee !== undefined ? s.fee : (s.sessionType === "HALF_DAY" ? 70 : 90)),
-            capacity: s.capacity !== undefined && s.capacity !== null && s.capacity !== "" ? Number(s.capacity) : null,
-            isAvailable: s.isAvailable !== false,
-          });
-        } else if (s.sessionDate && s.sessionType) {
-          // Check if session exists for this date and type
-          const date = new Date(s.sessionDate);
-          date.setUTCHours(0, 0, 0, 0);
+      const existingSessions = await CampSession.find({ event: eventId });
+      const existingById = new Map(existingSessions.map((item) => [item._id.toString(), item]));
+      const existingByKey = new Map(
+        existingSessions.map((item) => [
+          `${dateOnly(item.sessionDate, "sessionDate")}:${item.sessionType}`,
+          item,
+        ])
+      );
+      const seenKeys = new Set();
+      const touchedIds = new Set();
+      const dayNotes = new Map();
+      const supportedTypes = new Set(["FULL_DAY", "HALF_DAY", "CUSTOM"]);
 
-          let existingSession = await CampSession.findOne({
-            event: eventId,
-            sessionDate: date,
-            sessionType: s.sessionType,
+      for (const input of sessions) {
+        if (!input || !input.sessionDate || !input.sessionType) {
+          return res.status(400).json({
+            success: false,
+            message: "Every camp session requires sessionDate and sessionType",
           });
+        }
 
-          if (existingSession) {
-            existingSession.sessionLabel = s.sessionLabel || (s.sessionType === "HALF_DAY" ? "Half Day" : "Full Day");
-            existingSession.startTime = s.startTime || existingSession.startTime;
-            existingSession.endTime = s.endTime || existingSession.endTime;
-            existingSession.fee = Number(s.fee !== undefined ? s.fee : existingSession.fee);
-            existingSession.capacity = s.capacity !== undefined && s.capacity !== null && s.capacity !== "" ? Number(s.capacity) : existingSession.capacity;
-            existingSession.isAvailable = s.isAvailable !== false;
-            await existingSession.save();
-          } else {
-            await CampSession.create({
-              event: eventId,
-              sessionDate: date,
-              sessionType: s.sessionType,
-              sessionLabel: s.sessionLabel || (s.sessionType === "HALF_DAY" ? "Half Day" : "Full Day"),
-              startTime: s.startTime || (s.sessionType === "HALF_DAY" ? "08:00 AM" : "08:00 AM"),
-              endTime: s.endTime || (s.sessionType === "HALF_DAY" ? "02:00 PM" : "04:00 PM"),
-              fee: Number(s.fee !== undefined ? s.fee : (s.sessionType === "HALF_DAY" ? 70 : 90)),
-              capacity: s.capacity !== undefined && s.capacity !== null && s.capacity !== "" ? Number(s.capacity) : null,
-              isAvailable: s.isAvailable !== false,
+        const sessionType = String(input.sessionType).toUpperCase();
+        if (!supportedTypes.has(sessionType)) {
+          return res.status(400).json({
+            success: false,
+            message: `Invalid camp session type: ${input.sessionType}`,
+          });
+        }
+
+        const dateKey = dateOnly(input.sessionDate, "sessionDate");
+        const key = `${dateKey}:${sessionType}`;
+        if (seenKeys.has(key)) {
+          return res.status(409).json({
+            success: false,
+            message: `Duplicate camp session submitted for ${dateKey} (${sessionType})`,
+          });
+        }
+        seenKeys.add(key);
+
+        let existingSession = null;
+        if (input._id !== undefined && input._id !== null && input._id !== "") {
+          if (!mongoose.Types.ObjectId.isValid(input._id)) {
+            return res.status(400).json({ success: false, message: "Invalid camp session ID" });
+          }
+          existingSession = existingById.get(input._id.toString());
+          if (!existingSession) {
+            return res.status(404).json({
+              success: false,
+              message: "Camp session does not belong to this event",
             });
           }
+        } else {
+          existingSession = existingByKey.get(key) || null;
+        }
+
+        const keyOwner = existingByKey.get(key);
+        if (existingSession && keyOwner && keyOwner._id.toString() !== existingSession._id.toString()) {
+          return res.status(409).json({
+            success: false,
+            message: `A ${sessionType} session already exists for ${dateKey}`,
+          });
+        }
+
+        const isRegistered = existingSession && registeredSessionIds.has(existingSession._id.toString());
+        if (existingSession && isRegistered) {
+          const originalDate = dateOnly(existingSession.sessionDate, "sessionDate");
+          if (originalDate !== dateKey || existingSession.sessionType !== sessionType) {
+            return res.status(409).json({
+              success: false,
+              message: `Registered session ${originalDate} (${existingSession.sessionType}) cannot be moved or changed`,
+            });
+          }
+        }
+
+        const defaultStart = sessionType === "HALF_DAY" ? "08:00 AM" : "08:00 AM";
+        const defaultEnd = sessionType === "HALF_DAY" ? "02:00 PM" : "04:00 PM";
+        const defaultFee = sessionType === "HALF_DAY" ? 70 : 90;
+        const parsedCapacity = input.capacity !== undefined && input.capacity !== null && input.capacity !== ""
+          ? Number(input.capacity)
+          : (existingSession ? existingSession.capacity : null);
+
+        if (parsedCapacity !== null && (!Number.isFinite(parsedCapacity) || parsedCapacity < 0)) {
+          return res.status(400).json({ success: false, message: `Invalid capacity for ${dateKey}` });
+        }
+
+        if (!existingSession) {
+          existingSession = new CampSession({
+            event: eventId,
+            sessionDate: dateOnlyToUtc(dateKey, "sessionDate"),
+            sessionType,
+            sessionLabel: input.sessionLabel || (sessionType === "HALF_DAY" ? "Half Day" : "Full Day"),
+            startTime: input.startTime || defaultStart,
+            endTime: input.endTime || defaultEnd,
+            fee: Number(input.fee !== undefined ? input.fee : defaultFee),
+            capacity: parsedCapacity,
+            isAvailable: input.isAvailable !== false,
+            dayNote: input.dayNote !== undefined ? String(input.dayNote).trim() : "",
+          });
+        } else {
+          if (!isRegistered) existingSession.sessionDate = dateOnlyToUtc(dateKey, "sessionDate");
+          existingSession.sessionType = isRegistered ? existingSession.sessionType : sessionType;
+          existingSession.sessionLabel = input.sessionLabel || existingSession.sessionLabel || (sessionType === "HALF_DAY" ? "Half Day" : "Full Day");
+          existingSession.startTime = input.startTime || existingSession.startTime || defaultStart;
+          existingSession.endTime = input.endTime || existingSession.endTime || defaultEnd;
+          existingSession.fee = Number(input.fee !== undefined ? input.fee : existingSession.fee ?? defaultFee);
+          existingSession.capacity = parsedCapacity;
+          existingSession.isAvailable = input.isAvailable !== false;
+          if (input.dayNote !== undefined) existingSession.dayNote = String(input.dayNote).trim();
+        }
+
+        await existingSession.save();
+        touchedIds.add(existingSession._id.toString());
+        if (input.dayNote !== undefined) dayNotes.set(dateKey, String(input.dayNote).trim());
+      }
+
+      // Keep a single note for a calendar date across FULL_DAY/HALF_DAY rows.
+      for (const [dateKey, note] of dayNotes.entries()) {
+        await CampSession.updateMany(
+          {
+            event: eventId,
+            sessionDate: { $gte: dateOnlyStartUtc(dateKey), $lte: dateOnlyEndUtc(dateKey) },
+          },
+          { $set: { dayNote: note } }
+        );
+      }
+
+      for (const existingSession of existingSessions) {
+        const id = existingSession._id.toString();
+        if (touchedIds.has(id)) continue;
+
+        if (registeredSessionIds.has(id)) {
+          // A registered date cannot disappear as a side effect of editing the
+          // form; make it unavailable for new bookings instead.
+          await CampSession.updateOne({ _id: existingSession._id }, { $set: { isAvailable: false } });
+        } else {
+          await CampSession.deleteOne({ _id: existingSession._id });
         }
       }
     }
@@ -1049,11 +1443,11 @@ exports.configureCampSessions = async (req, res) => {
     res.json({
       success: true,
       message: "Camp sessions updated successfully",
-      data: updatedSessions,
+      data: updatedSessions.map(serializeCampSession),
     });
   } catch (error) {
     console.error("configureCampSessions error:", error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(eventErrorStatus(error)).json({ success: false, message: error.message });
   }
 };
 
@@ -1069,11 +1463,9 @@ exports.toggleCampDateAvailability = async (req, res) => {
       return res.status(400).json({ success: false, message: "Date is required" });
     }
 
-    const targetDate = new Date(date);
-    targetDate.setUTCHours(0, 0, 0, 0);
-
-    const nextDate = new Date(targetDate);
-    nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+    const dateKey = dateOnly(date, "date");
+    const targetDate = dateOnlyStartUtc(dateKey, "date");
+    const nextDate = dateOnlyStartUtc(addDateOnlyDays(dateKey, 1, "date"), "date");
 
     await CampSession.updateMany(
       {
@@ -1087,11 +1479,57 @@ exports.toggleCampDateAvailability = async (req, res) => {
 
     res.json({
       success: true,
-      message: `Date ${targetDate.toISOString().split("T")[0]} set to ${isAvailable ? "available" : "unavailable"}`,
-      data: updatedSessions,
+      message: `Date ${dateKey} set to ${isAvailable ? "available" : "unavailable"}`,
+      data: updatedSessions.map(serializeCampSession),
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/** Update the shared note shown for every session on a camp calendar date. */
+exports.updateCampDayNote = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const { date, note = "" } = req.body || {};
+
+    if (!date) {
+      return res.status(400).json({ success: false, message: "Date is required" });
+    }
+    if (typeof note !== "string") {
+      return res.status(400).json({ success: false, message: "Note must be a string" });
+    }
+    if (note.length > 2000) {
+      return res.status(400).json({ success: false, message: "Note cannot exceed 2000 characters" });
+    }
+
+    const event = await Event.findById(eventId).select("_id");
+    if (!event) {
+      return res.status(404).json({ success: false, message: "Event not found" });
+    }
+
+    const dateKey = dateOnly(date, "date");
+    const result = await CampSession.updateMany(
+      {
+        event: eventId,
+        sessionDate: { $gte: dateOnlyStartUtc(dateKey), $lte: dateOnlyEndUtc(dateKey) },
+      },
+      { $set: { dayNote: note.trim() } }
+    );
+
+    if (!result.matchedCount) {
+      return res.status(404).json({ success: false, message: "No camp sessions found for this date" });
+    }
+
+    const sessions = await CampSession.find({ event: eventId }).sort({ sessionDate: 1, sessionType: 1 });
+    res.json({
+      success: true,
+      message: note.trim() ? `Note saved for ${dateKey}` : `Note cleared for ${dateKey}`,
+      data: sessions.map(serializeCampSession),
+    });
+  } catch (error) {
+    console.error("updateCampDayNote error:", error);
+    res.status(eventErrorStatus(error)).json({ success: false, message: error.message });
   }
 };
 
@@ -1106,7 +1544,7 @@ exports.getEventAttendanceGrid = async (req, res) => {
     const { eventId } = req.params;
 
     const event = await Event.findById(eventId);
-    if (!event) {
+    if (!event || event.isArchived) {
       return res.status(404).json({ success: false, message: "Event not found" });
     }
 
@@ -1120,7 +1558,7 @@ exports.getEventAttendanceGrid = async (req, res) => {
     })
       .populate({
         path: "user",
-        select: "fullName email phone dob profileImage category skillLevel prefferedFoot contactName",
+        select: "fullName email phone dob profileImage category skillLevel prefferedFoot contactName isMedicalCondition medicalConditionDetails",
       })
       .populate("invoice")
       .sort({ createdAt: 1 });
@@ -1133,7 +1571,7 @@ exports.getEventAttendanceGrid = async (req, res) => {
     // Build fast lookup for attendance: key = `${sessionDateISO}_${campSessionId || 'all'}_${playerId}`
     const attendanceMap = {};
     attendanceRecords.forEach((att) => {
-      const dateStr = new Date(att.sessionDate).toISOString().split("T")[0];
+      const dateStr = dateOnly(att.sessionDate, "attendance.sessionDate");
       const campSessId = att.campSession ? att.campSession.toString() : "all";
 
       att.records.forEach((rec) => {
@@ -1159,7 +1597,7 @@ exports.getEventAttendanceGrid = async (req, res) => {
 
       playerSelectedSessions.forEach((s) => {
         if (s.sessionDate) {
-          const dStr = new Date(s.sessionDate).toISOString().split("T")[0];
+          const dStr = dateOnly(s.sessionDate, "selectedSession.sessionDate");
           sessionSelectionMap[dStr] = {
             sessionId: s.session ? s.session.toString() : null,
             sessionType: s.sessionType,
@@ -1173,7 +1611,7 @@ exports.getEventAttendanceGrid = async (req, res) => {
       // Attendance map for this player across all sessions/dates
       const attendance = {};
       sessions.forEach((sess) => {
-        const dStr = new Date(sess.sessionDate).toISOString().split("T")[0];
+        const dStr = dateOnly(sess.sessionDate, "sessionDate");
         const isRegisteredForSession = playerSelectedSessions.some(
           (pss) => pss.session && pss.session.toString() === sess._id.toString()
         ) || (playerSelectedSessions.length === 0); // If no session array, registered for event
@@ -1206,10 +1644,14 @@ exports.getEventAttendanceGrid = async (req, res) => {
         dob: player.dob,
         profileImage: player.profileImage,
         contactName: player.contactName,
-        paymentStatus: reg.paymentStatus || (reg.invoice ? reg.invoice.paymentStatus : "UNPAID"),
+        isMedicalCondition: Boolean(player.isMedicalCondition),
+        medicalConditionDetails: player.medicalConditionDetails || "",
+        paymentStatus: normalizePaymentStatus(
+          reg.paymentStatus || (reg.invoice ? reg.invoice.paymentStatus : "UNPAID")
+        ),
         totalAmount: reg.totalAmount || 0,
         registeredSessionsCount: playerSelectedSessions.length,
-        selectedSessions: playerSelectedSessions,
+        selectedSessions: playerSelectedSessions.map(serializeSelectedSession),
         attendance,
       };
     }).filter(Boolean);
@@ -1217,7 +1659,7 @@ exports.getEventAttendanceGrid = async (req, res) => {
     // Summary counts per date/session
     const sessionSummaries = sessions.map((sess) => {
       const sessId = sess._id.toString();
-      const dStr = new Date(sess.sessionDate).toISOString().split("T")[0];
+      const dStr = dateOnly(sess.sessionDate, "sessionDate");
 
       let registeredCount = 0;
       let presentCount = 0;
@@ -1235,9 +1677,10 @@ exports.getEventAttendanceGrid = async (req, res) => {
       return {
         sessionId: sessId,
         date: dStr,
-        dayOfWeek: new Date(sess.sessionDate).toLocaleDateString("en-US", { weekday: "short" }),
+        dayOfWeek: weekdayShort(dStr),
         sessionType: sess.sessionType,
         sessionLabel: sess.sessionLabel || (sess.sessionType === "HALF_DAY" ? "Half Day" : "Full Day"),
+        dayNote: sess.dayNote || "",
         startTime: sess.startTime,
         endTime: sess.endTime,
         fee: sess.fee,
@@ -1256,14 +1699,14 @@ exports.getEventAttendanceGrid = async (req, res) => {
           title: event.title,
           category: event.category,
           eventType: event.eventType,
-          startDate: event.startDate,
-          endDate: event.endDate,
+          startDate: dateOnly(event.startDate, "event.startDate"),
+          endDate: dateOnly(event.endDate, "event.endDate"),
           venueName: event.venueName,
           address: event.address,
           status: event.status,
           totalRegistered: registrations.length,
         },
-        sessions,
+        sessions: sessions.map(serializeCampSession),
         sessionSummaries,
         players,
       },
@@ -1290,14 +1733,37 @@ exports.markEventSingleAttendance = async (req, res) => {
       });
     }
 
-    const date = new Date(sessionDate);
-    date.setUTCHours(0, 0, 0, 0);
+    const dateKey = dateOnly(sessionDate, "sessionDate");
+    const date = dateOnlyToUtc(dateKey, "sessionDate");
+
+    const allowedStatuses = new Set(["PRESENT", "ABSENT", "LATE", "NOT_MARKED"]);
+    if (!allowedStatuses.has(String(status).toUpperCase())) {
+      return res.status(400).json({ success: false, message: "Invalid attendance status" });
+    }
+    if (!mongoose.Types.ObjectId.isValid(playerId)) {
+      return res.status(400).json({ success: false, message: "Invalid player ID" });
+    }
+
+    const { eligiblePlayerIds } = await resolveEventAttendanceScope({
+      eventId,
+      dateKey,
+      campSessionId,
+    });
+    if (!eligiblePlayerIds.has(playerId.toString())) {
+      return res.status(400).json({
+        success: false,
+        message: "Player is not registered for this event day/session",
+      });
+    }
 
     const query = {
       event: eventId,
-      sessionDate: date,
+      sessionDate: {
+        $gte: dateOnlyStartUtc(dateKey, "sessionDate"),
+        $lte: dateOnlyEndUtc(dateKey, "sessionDate"),
+      },
     };
-    if (campSessionId && mongoose.Types.ObjectId.isValid(campSessionId)) {
+    if (campSessionId) {
       query.campSession = campSessionId;
     }
 
@@ -1356,7 +1822,7 @@ exports.markEventSingleAttendance = async (req, res) => {
     });
   } catch (error) {
     console.error("markEventSingleAttendance error:", error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(eventErrorStatus(error)).json({ success: false, message: error.message });
   }
 };
 
@@ -1375,36 +1841,95 @@ exports.markEventBulkAttendance = async (req, res) => {
       });
     }
 
-    const date = new Date(sessionDate);
-    date.setUTCHours(0, 0, 0, 0);
+    const dateKey = dateOnly(sessionDate, "sessionDate");
+    const date = dateOnlyToUtc(dateKey, "sessionDate");
+
+    const { eligiblePlayerIds } = await resolveEventAttendanceScope({
+      eventId,
+      dateKey,
+      campSessionId,
+    });
+    const allowedStatuses = new Set(["PRESENT", "ABSENT", "LATE", "NOT_MARKED"]);
+    const normalizedRecords = [];
+    const submittedPlayerIds = new Set();
+
+    for (const rawRecord of records) {
+      const player = rawRecord?.player || rawRecord?.playerId;
+      const normalizedStatus = String(rawRecord?.status || "").toUpperCase();
+
+      if (!player || !mongoose.Types.ObjectId.isValid(player)) {
+        return res.status(400).json({ success: false, message: "Each attendance record requires a valid player ID" });
+      }
+      if (!allowedStatuses.has(normalizedStatus)) {
+        return res.status(400).json({ success: false, message: `Invalid attendance status for player ${player}` });
+      }
+      if (!eligiblePlayerIds.has(player.toString())) {
+        return res.status(400).json({
+          success: false,
+          message: `Player ${player} is not registered for this event day/session`,
+        });
+      }
+      if (submittedPlayerIds.has(player.toString())) {
+        return res.status(400).json({ success: false, message: `Duplicate attendance record for player ${player}` });
+      }
+
+      submittedPlayerIds.add(player.toString());
+      normalizedRecords.push({
+        player,
+        status: normalizedStatus,
+        attendanceType: rawRecord.attendanceType || "REGULAR",
+        ...(rawRecord.reason !== undefined ? { reason: String(rawRecord.reason).trim() } : {}),
+        ...(rawRecord.remarks !== undefined ? { remarks: String(rawRecord.remarks).trim() } : {}),
+        ...(rawRecord.comment !== undefined ? { comment: String(rawRecord.comment) } : {}),
+      });
+    }
 
     const query = {
       event: eventId,
-      sessionDate: date,
+      sessionDate: {
+        $gte: dateOnlyStartUtc(dateKey, "sessionDate"),
+        $lte: dateOnlyEndUtc(dateKey, "sessionDate"),
+      },
     };
-    if (campSessionId && mongoose.Types.ObjectId.isValid(campSessionId)) {
+    if (campSessionId) {
       query.campSession = campSessionId;
     }
 
     let attendance = await Attendance.findOne(query);
 
     if (attendance) {
-      attendance.records = records.map((r) => ({
-        player: r.player || r.playerId,
-        status: r.status,
-        attendanceType: r.attendanceType || "REGULAR",
-      }));
+      // Merge the supplied players into this date/session document. Replacing
+      // the whole array used to erase existing records when a caller sent a
+      // partial list; records for other sessions remain separate documents.
+      const existingByPlayer = new Map(
+        attendance.records.map((record) => [record.player.toString(), record])
+      );
+      normalizedRecords.forEach((record) => {
+        const existingRecord = existingByPlayer.get(record.player.toString());
+        if (existingRecord) {
+          existingRecord.status = record.status;
+          existingRecord.attendanceType = record.attendanceType;
+          if (record.reason !== undefined) existingRecord.reason = record.reason;
+          if (record.remarks !== undefined) existingRecord.remarks = record.remarks;
+          if (record.comment !== undefined) existingRecord.comment = record.comment;
+          existingRecord.lateArrival = record.status === "LATE";
+        } else {
+          attendance.records.push({
+            ...record,
+            lateArrival: record.status === "LATE",
+          });
+        }
+      });
       attendance.markedBy = req.user?._id || req.admin?._id;
       await attendance.save();
     } else {
       attendance = await Attendance.create({
         event: eventId,
-        campSession: campSessionId && mongoose.Types.ObjectId.isValid(campSessionId) ? campSessionId : undefined,
+        campSession: campSessionId || undefined,
         sessionDate: date,
-        records: records.map((r) => ({
-          player: r.player || r.playerId,
-          status: r.status,
-          attendanceType: r.attendanceType || "REGULAR",
+        records: normalizedRecords.map((record) => ({
+          ...record,
+          lateArrival: record.status === "LATE",
         })),
         markedBy: req.user?._id || req.admin?._id,
       });
@@ -1417,7 +1942,7 @@ exports.markEventBulkAttendance = async (req, res) => {
     });
   } catch (error) {
     console.error("markEventBulkAttendance error:", error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(eventErrorStatus(error)).json({ success: false, message: error.message });
   }
 };
 
@@ -1447,7 +1972,7 @@ exports.getEventRegistrationDetails = async (req, res) => {
     const attendanceHistory = attendanceRecords.map((att) => {
       const rec = att.records.find((r) => r.player.toString() === registration.user?._id.toString());
       return {
-        sessionDate: att.sessionDate,
+        sessionDate: dateOnly(att.sessionDate, "attendance.sessionDate"),
         campSession: att.campSession,
         status: rec ? rec.status : "NOT_MARKED",
       };
@@ -1456,7 +1981,7 @@ exports.getEventRegistrationDetails = async (req, res) => {
     res.json({
       success: true,
       data: {
-        registration,
+        registration: serializeRegistration(registration),
         attendanceHistory,
       },
     });
@@ -1468,11 +1993,13 @@ exports.getEventRegistrationDetails = async (req, res) => {
 exports.updateEventRegistrationPaymentStatus = async (req, res) => {
   try {
     const { registrationId } = req.params;
-    const { paymentStatus, eventId, playerId } = req.body;
+    let { paymentStatus, eventId, playerId } = req.body;
 
     if (!paymentStatus) {
       return res.status(400).json({ success: false, message: "paymentStatus is required" });
     }
+
+    paymentStatus = normalizePaymentStatus(paymentStatus, String(paymentStatus).toUpperCase());
 
     let registration;
     if (registrationId && registrationId !== "undefined" && mongoose.Types.ObjectId.isValid(registrationId)) {

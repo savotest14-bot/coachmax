@@ -28,6 +28,12 @@ const eventSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    // Soft deletion keeps attendance, invoice, and chat history available for auditing.
+    isArchived: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
     bannerImage: String,
     totalRegistered: {
       type: Number,
@@ -47,6 +53,15 @@ const eventSchema = new mongoose.Schema(
     eventType: {
       type: String,
       default: "TOURNAMENT",
+    },
+    // Events and holiday camps belong to the term in which they run. This is
+    // used to keep user chat visibility term-scoped while retaining history
+    // for administrators.
+    termId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Term",
+      default: null,
+      index: true,
     },
     // Holiday Camp specific settings
     campConfig: {

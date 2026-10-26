@@ -5,6 +5,11 @@ const Class = require("../models/Class");
 const Term = require("../models/Term");
 const Category = require("../models/Category");
 const Program = require("../models/Program");
+const Team = require("../models/Team");
+const {
+  normalizePaymentStatus,
+  paymentStatusRankExpression,
+} = require("../utils/paymentStatus");
 const Notification = require("../models/Notification");
 const { sendNotification } = require("../services/notificationService");
 const { generateClassInvoice } = require("../services/invoiceService");
@@ -287,23 +292,87 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
 
     const [total, players] = await Promise.all([
       User.countDocuments(query),
-      User.find(query)
-        .populate(
-          "parentId",
-          "fullName email phone emergencyContact relationship"
-        )
-        .populate("category", "name")
-        .populate("categories", "name")
-        .populate("programs", "name")
-        .populate("term", "name")
-        .populate(
-          "assignedClasses",
-          "name dayOfWeek startTime endTime venue location"
-        )
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limitNum),
+      User.aggregate([
+        { $match: query },
+        {
+          $addFields: {
+            _paymentSortStatus: {
+              $ifNull: [
+                "$paymentStatus",
+                { $arrayElemAt: ["$classPaymentStatuses.paymentStatus", 0] },
+              ],
+            },
+          },
+        },
+        {
+          $addFields: {
+            _paymentStatusRank: paymentStatusRankExpression({
+              $toUpper: {
+                $trim: { input: { $ifNull: ["$_paymentSortStatus", ""] } },
+              },
+            }),
+          },
+        },
+        { $sort: { _paymentStatusRank: 1, fullName: 1, firstName: 1, createdAt: -1, _id: 1 } },
+        { $skip: skip },
+        { $limit: limitNum },
+        { $project: { password: 0, tokens: 0, _paymentSortStatus: 0, _paymentStatusRank: 0 } },
+      ]),
     ]);
+
+    await User.populate(players, [
+      { path: "parentId", select: "fullName email phone emergencyContact relationship" },
+      { path: "category", select: "name" },
+      { path: "categories", select: "name" },
+      { path: "programs", select: "name" },
+      { path: "term", select: "name" },
+      { path: "assignedClasses", select: "name dayOfWeek startTime endTime venue location" },
+    ]);
+    players.forEach((player) => {
+      if (player.paymentStatus) player.paymentStatus = normalizePaymentStatus(player.paymentStatus);
+      if (Array.isArray(player.classPaymentStatuses)) {
+        player.classPaymentStatuses.forEach((entry) => {
+          entry.paymentStatus = normalizePaymentStatus(entry.paymentStatus, "TRIAL");
+        });
+      }
+    });
+
+    // Team membership is stored on Team documents rather than on User. Build a
+    // compact lookup so allocated-player cards can show the current teams too.
+    const playerIds = players.map((player) => player._id);
+    const teamDocs = allocationStatus === "ALLOCATED" && playerIds.length
+      ? await Team.find({
+          $or: [
+            { "players.player": { $in: playerIds } },
+            { "leagues.players.player": { $in: playerIds } },
+          ],
+        })
+          .select("teamName ageGroup players leagues")
+          .lean()
+      : [];
+    const teamsByPlayer = new Map();
+    const addTeamAssignment = (playerId, team) => {
+      const key = String(playerId);
+      const current = teamsByPlayer.get(key) || [];
+      if (!current.some((item) => String(item.id) === String(team._id))) {
+        current.push({
+          id: team._id,
+          name: team.teamName || "Team",
+          ageGroup: team.ageGroup || "",
+        });
+        teamsByPlayer.set(key, current);
+      }
+    };
+    teamDocs.forEach((team) => {
+      (team.players || []).forEach((entry) => {
+        if (entry.player) addTeamAssignment(entry.player, team);
+      });
+      (team.leagues || []).forEach((league) => {
+        (league.players || []).forEach((entry) => {
+          if (entry.player) addTeamAssignment(entry.player, team);
+        });
+      });
+    });
 
     let registrationRequestsMap = {};
 
@@ -324,9 +393,10 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
     }
 
     const data = players.map((player) => {
-      const obj = player.toObject();
+      const obj = { ...player };
       obj.registrationRequest =
         registrationRequestsMap[player._id.toString()] || null;
+      obj.assignedTeams = teamsByPlayer.get(player._id.toString()) || [];
       return obj;
     });
 

@@ -23,6 +23,11 @@ const {
 const mongoose = require("mongoose");
 const fs = require("fs");
 const path = require("path");
+const { dateOnly, dateOnlyStartUtc } = require("../utils/dateTime");
+const {
+  normalizePaymentStatus,
+  comparePlayersByPaymentStatus,
+} = require("../utils/paymentStatus");
 
 const activeLeagueGenerationLocks = new Set();
 
@@ -1102,6 +1107,19 @@ exports.getAllLeagues = async (req, res) => {
     leagues.forEach((l) => {
       if (Array.isArray(l.teams)) {
         l.teams = l.teams.filter(Boolean);
+        l.teams.forEach((team) => {
+          if (Array.isArray(team.players)) {
+            team.players = team.players
+              .map((entry) => {
+                const rawEntry = typeof entry.toObject === "function" ? entry.toObject() : entry;
+                return {
+                  ...rawEntry,
+                  paymentStatus: normalizePaymentStatus(entry.paymentStatus, "UNPAID"),
+                };
+              })
+              .sort(comparePlayersByPaymentStatus);
+          }
+        });
       }
     });
 
@@ -1128,11 +1146,6 @@ exports.getAllLeagues = async (req, res) => {
 
 const parseDateString = (input) => {
   if (!input) return null;
-  if (input instanceof Date && !isNaN(input.getTime())) {
-    const d = new Date(input);
-    d.setUTCHours(0, 0, 0, 0);
-    return d;
-  }
   const str = String(input).trim();
   // Check DD-MM-YYYY or DD/MM/YYYY
   const dmyMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
@@ -1140,7 +1153,7 @@ const parseDateString = (input) => {
     const day = parseInt(dmyMatch[1], 10);
     const month = parseInt(dmyMatch[2], 10);
     const year = parseInt(dmyMatch[3], 10);
-    return new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+    return dateOnlyStartUtc(`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
   }
   // Check YYYY-MM-DD
   const ymdMatch = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
@@ -1148,14 +1161,14 @@ const parseDateString = (input) => {
     const year = parseInt(ymdMatch[1], 10);
     const month = parseInt(ymdMatch[2], 10);
     const day = parseInt(ymdMatch[3], 10);
-    return new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+    return dateOnlyStartUtc(`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
   }
-  const parsed = new Date(str);
-  if (!isNaN(parsed.getTime())) {
-    parsed.setUTCHours(0, 0, 0, 0);
-    return parsed;
+  try {
+    const normalized = dateOnly(str, "date");
+    return normalized ? dateOnlyStartUtc(normalized, "date") : null;
+  } catch (error) {
+    return null;
   }
-  return null;
 };
 
 const extractRawDates = (body) => {

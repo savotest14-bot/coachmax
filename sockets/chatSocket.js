@@ -269,6 +269,14 @@ const initSocket = (server) => {
           return;
         }
 
+        const isMember = room.members.some(
+          (member) => member.refModel === socket.refModel && member.user.toString() === userIdStr
+        );
+        if (!isMember && socket.role !== "SUPER_ADMIN") {
+          if (callback) callback({ success: false, message: "Access denied. You are not a member of this chat room." });
+          return;
+        }
+
         socket.join(`room_${roomId}`);
         console.log(`👥 Socket ${userIdStr} joined room_${roomId}`);
 
@@ -303,6 +311,14 @@ const initSocket = (server) => {
         const room = await ChatRoom.findById(roomId);
         if (!room) {
           if (callback) callback({ success: false, message: "Room not found" });
+          return;
+        }
+
+        const isMember = room.members.some(
+          (member) => member.refModel === socket.refModel && member.user.toString() === userIdStr
+        );
+        if (!isMember && socket.role !== "SUPER_ADMIN") {
+          if (callback) callback({ success: false, message: "Access denied. You are not a member of this chat room." });
           return;
         }
 
@@ -419,6 +435,15 @@ const initSocket = (server) => {
     socket.on("typing", async (data) => {
       const { roomId, isTyping } = data || {};
       if (roomId) {
+        try {
+          const room = await ChatRoom.findById(roomId).select("members");
+          const isMember = room?.members?.some(
+            (member) => member.refModel === socket.refModel && member.user.toString() === userIdStr
+          );
+          if (!room || (!isMember && socket.role !== "SUPER_ADMIN")) return;
+        } catch (e) {
+          return;
+        }
         const senderName = socket.user?.fullName || socket.user?.name || "User";
         socket.to(`room_${roomId}`).emit("user_typing", {
           roomId,
@@ -452,6 +477,19 @@ const initSocket = (server) => {
       try {
         const { roomId } = data || {};
         if (!roomId) return;
+
+        const room = await ChatRoom.findById(roomId).select("members");
+        if (!room) {
+          if (callback) callback({ success: false, message: "Room not found" });
+          return;
+        }
+        const isMember = room.members.some(
+          (member) => member.refModel === socket.refModel && member.user.toString() === userIdStr
+        );
+        if (!isMember && socket.role !== "SUPER_ADMIN") {
+          if (callback) callback({ success: false, message: "Access denied. You are not a member of this chat room." });
+          return;
+        }
 
         // Find unread messages in room
         const unreadMsgs = await Message.find({
@@ -528,6 +566,14 @@ const initSocket = (server) => {
           return;
         }
 
+        if (socket.role === "COACH") {
+          const assigned = classData.coach?.toString() === userIdStr || classData.assistantCoach?.toString() === userIdStr;
+          if (!assigned) {
+            if (callback) callback({ success: false, message: "Access denied. You are not assigned to this class." });
+            return;
+          }
+        }
+
         const parentIds = [...new Set(
           classData.players
             .filter((p) => p.parentId)
@@ -543,13 +589,41 @@ const initSocket = (server) => {
         if (!broadcastRoom) {
           broadcastRoom = await ChatRoom.create({
             type: "BROADCAST",
+            scope: "CLASS",
+            audience: "CLASS_PARENTS",
+            scopeType: "CLASS",
+            scopeLabel: `${classData.name} · Class chat`,
+            audienceType: "PARENTS",
+            recipientCount: parentIds.length,
+            entityStatus: classData.status || "ACTIVE",
             classId,
+            termId: classData.term || null,
+            programId: classData.program || null,
+            createdBy: userIdStr,
+            participantPlayerIds: classData.players.map((player) => player._id),
             name: `${classData.name} - Class Broadcast`,
             members: [
               { refModel: "Admin", user: userIdStr },
               ...parentIds.map((pid) => ({ refModel: "Parent", user: pid })),
             ],
           });
+        } else {
+          const existing = broadcastRoom.members.map((member) => `${member.refModel}:${member.user.toString()}`);
+          if (!existing.includes(`Admin:${userIdStr}`)) broadcastRoom.members.push({ refModel: "Admin", user: userIdStr });
+          for (const parentId of parentIds) {
+            if (!existing.includes(`Parent:${parentId}`)) broadcastRoom.members.push({ refModel: "Parent", user: parentId });
+          }
+          broadcastRoom.scope = broadcastRoom.scope || "CLASS";
+          broadcastRoom.audience = broadcastRoom.audience || "CLASS_PARENTS";
+          broadcastRoom.scopeType = "CLASS";
+          broadcastRoom.scopeLabel = `${classData.name} · Class chat`;
+          broadcastRoom.audienceType = "PARENTS";
+          broadcastRoom.recipientCount = parentIds.length;
+          broadcastRoom.entityStatus = classData.status || "ACTIVE";
+          broadcastRoom.termId = broadcastRoom.termId || classData.term || null;
+          broadcastRoom.programId = broadcastRoom.programId || classData.program || null;
+          broadcastRoom.participantPlayerIds = classData.players.map((player) => player._id);
+          await broadcastRoom.save();
         }
 
         const messageDoc = await Message.create({
@@ -593,6 +667,7 @@ const initSocket = (server) => {
           type: "TEXT",
         };
         broadcastRoom.updatedAt = new Date();
+        broadcastRoom.lastActivityAt = broadcastRoom.updatedAt;
         await broadcastRoom.save();
 
         if (callback) callback({ success: true, data: populatedMsg });

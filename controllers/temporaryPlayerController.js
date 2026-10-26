@@ -17,6 +17,7 @@ const { generateClassInvoice } = require("../services/invoiceService");
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
+const { dateOnlyToUtc, dateOnly } = require("../utils/dateTime");
 let broadcastSidebarBadges = null;
 try {
   ({ broadcastSidebarBadges } = require("../sockets/chatSocket"));
@@ -111,9 +112,8 @@ exports.createTemporaryPlayer = async (req, res) => {
     const firstName = nameParts[0];
     const lastName = nameParts.slice(1).join(" ") || "";
 
-    const parsedDob = new Date(dob);
-    const parsedSessionDate = new Date(sessionDate);
-    parsedSessionDate.setUTCHours(0, 0, 0, 0);
+    const parsedDob = dateOnlyToUtc(dob, "dob");
+    const parsedSessionDate = dateOnlyToUtc(sessionDate, "sessionDate");
 
     const catList = Array.isArray(categories)
       ? categories
@@ -211,7 +211,7 @@ exports.createTemporaryPlayer = async (req, res) => {
             sessionDate: parsedSessionDate,
             playerStatus: player.playerStatus,
           },
-          description: `Temporary player "${player.fullName}" added to session on ${parsedSessionDate.toISOString().split("T")[0]}`,
+          description: `Temporary player "${player.fullName}" added to session on ${dateOnly(parsedSessionDate, "sessionDate")}`,
         },
       ],
       { session }

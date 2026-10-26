@@ -80,7 +80,10 @@ const uploads = multer({
   storage,
   fileFilter,
   limits: {
-    fileSize: 25 * 1024 * 1024,
+    // Match the largest supported frontend upload (chat video). Per-feature
+    // limits are validated before upload in the UI; Multer enforces this
+    // shared hard ceiling for every route.
+    fileSize: 50 * 1024 * 1024,
   },
 });
 

@@ -20,6 +20,7 @@ const bcrypt = require("bcryptjs");
 const generateToken = require("../utils/generateToken");
 const mongoose = require("mongoose");
 const { sendNotification } = require("../services/notificationService");
+const { dateOnly, dateOnlyStartUtc, dateOnlyEndUtc } = require("../utils/dateTime");
 
 const createAdminNotificationForRequest = async ({
   parent,
@@ -906,7 +907,7 @@ const getSessionTimesForDateUser = (classObj, sessionDate) => {
   const schedule = classObj.schedule || [];
 
   if ((scheduleType === "WEEKDAYS" || scheduleType === "CUSTOM") && schedule.length > 0) {
-    const dayName = dayNames[new Date(sessionDate).getUTCDay()];
+    const dayName = dayNames[dateOnlyStartUtc(sessionDate, "sessionDate").getUTCDay()];
     const entry = schedule.find((e) => (e.dayOfWeek || "").toUpperCase() === dayName);
     if (entry) return { startTime: entry.startTime, endTime: entry.endTime };
   }
@@ -979,12 +980,10 @@ exports.getMyClasses = async (req, res) => {
       let missedSessions = 0;
 
       allSessions.forEach((sessionDate) => {
-        const normalizedDate = new Date(sessionDate);
-        normalizedDate.setUTCHours(0, 0, 0, 0);
+        const normalizedDate = dateOnlyStartUtc(sessionDate, "sessionDate");
 
         const attendanceRecord = classAttendance.find((att) => {
-          const dbDate = new Date(att.sessionDate);
-          dbDate.setUTCHours(0, 0, 0, 0);
+          const dbDate = dateOnlyStartUtc(att.sessionDate, "attendance.sessionDate");
           return dbDate.getTime() === normalizedDate.getTime();
         });
 
@@ -1013,7 +1012,7 @@ exports.getMyClasses = async (req, res) => {
         const sessionTimes = getSessionTimesForDateUser(cls, normalizedDate);
 
         sessions.push({
-          date: normalizedDate.toISOString().split("T")[0],
+          date: dateOnly(normalizedDate, "sessionDate"),
           day: dayNames[normalizedDate.getUTCDay()],
           startTime: sessionTimes.startTime,
           endTime: sessionTimes.endTime,
@@ -2229,18 +2228,17 @@ exports.markPlayerAbsent = async (req, res) => {
       });
     }
 
-    const targetDate = new Date(sessionDate);
-    if (isNaN(targetDate.getTime())) {
+    let targetDate;
+    try {
+      targetDate = dateOnlyStartUtc(sessionDate, "sessionDate");
+    } catch (error) {
       return res.status(400).json({
         success: false,
         message: "Invalid sessionDate format",
       });
     }
 
-    targetDate.setUTCHours(0, 0, 0, 0);
-
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
+    const today = dateOnlyStartUtc(dateOnly(new Date(), "today"), "today");
 
     if (targetDate.getTime() < today.getTime()) {
       return res.status(400).json({
@@ -2281,10 +2279,8 @@ exports.markPlayerAbsent = async (req, res) => {
       }
 
       if (classDoc.term) {
-        const termStart = new Date(classDoc.term.startDate);
-        termStart.setUTCHours(0, 0, 0, 0);
-        const termEnd = new Date(classDoc.term.endDate);
-        termEnd.setUTCHours(23, 59, 59, 999);
+        const termStart = dateOnlyStartUtc(classDoc.term.startDate, "term.startDate");
+        const termEnd = dateOnlyEndUtc(classDoc.term.endDate, "term.endDate");
 
         if (targetDate < termStart || targetDate > termEnd) {
           return res.status(400).json({
@@ -2338,7 +2334,7 @@ exports.markPlayerAbsent = async (req, res) => {
       await attendanceDoc.save();
 
       try {
-        const formattedDateStr = targetDate.toISOString().split("T")[0];
+        const formattedDateStr = dateOnly(targetDate, "sessionDate");
         const notifData = {
           parentId: String(req.parent._id),
           playerId: String(playerId),
@@ -2376,7 +2372,7 @@ exports.markPlayerAbsent = async (req, res) => {
         data: {
           playerId,
           classId,
-          sessionDate: targetDate.toISOString().split("T")[0],
+          sessionDate: dateOnly(targetDate, "sessionDate"),
           status: "ABSENT",
           reason: reason.trim(),
         },
@@ -2401,10 +2397,8 @@ exports.markPlayerAbsent = async (req, res) => {
       }
 
       if (teamDoc.term) {
-        const termStart = new Date(teamDoc.term.startDate);
-        termStart.setUTCHours(0, 0, 0, 0);
-        const termEnd = new Date(teamDoc.term.endDate);
-        termEnd.setUTCHours(23, 59, 59, 999);
+        const termStart = dateOnlyStartUtc(teamDoc.term.startDate, "term.startDate");
+        const termEnd = dateOnlyEndUtc(teamDoc.term.endDate, "term.endDate");
 
         if (targetDate < termStart || targetDate > termEnd) {
           return res.status(400).json({
@@ -2458,7 +2452,7 @@ exports.markPlayerAbsent = async (req, res) => {
       await attendanceDoc.save();
 
       try {
-        const formattedDateStr = targetDate.toISOString().split("T")[0];
+        const formattedDateStr = dateOnly(targetDate, "sessionDate");
         const notifData = {
           parentId: String(req.parent._id),
           playerId: String(playerId),
@@ -2496,7 +2490,7 @@ exports.markPlayerAbsent = async (req, res) => {
         data: {
           playerId,
           teamId,
-          sessionDate: targetDate.toISOString().split("T")[0],
+          sessionDate: dateOnly(targetDate, "sessionDate"),
           status: "ABSENT",
           reason: reason.trim(),
         },

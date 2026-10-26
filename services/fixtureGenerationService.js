@@ -3,17 +3,13 @@ const Fixture = require("../models/Fixture");
 const Standing = require("../models/Standing");
 const League = require("../models/League");
 const Team = require("../models/Team");
+const { dateOnly, dateOnlyStartUtc, zonedDateTimeToUtc } = require("../utils/dateTime");
 
 /**
  * Parses any date format (YYYY-MM-DD, DD-MM-YYYY, ISO) to a Date at UTC midnight.
  */
 function parseDateToMidnight(input) {
   if (!input) return null;
-  if (input instanceof Date && !isNaN(input.getTime())) {
-    const d = new Date(input);
-    d.setUTCHours(0, 0, 0, 0);
-    return d;
-  }
   const str = String(input).trim();
   // Check DD-MM-YYYY or DD/MM/YYYY
   const dmyMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
@@ -21,7 +17,7 @@ function parseDateToMidnight(input) {
     const day = parseInt(dmyMatch[1], 10);
     const month = parseInt(dmyMatch[2], 10);
     const year = parseInt(dmyMatch[3], 10);
-    return new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+    return dateOnlyStartUtc(`${year.toString().padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
   }
   // Check YYYY-MM-DD
   const ymdMatch = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
@@ -29,14 +25,14 @@ function parseDateToMidnight(input) {
     const year = parseInt(ymdMatch[1], 10);
     const month = parseInt(ymdMatch[2], 10);
     const day = parseInt(ymdMatch[3], 10);
-    return new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+    return dateOnlyStartUtc(`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
   }
-  const parsed = new Date(str);
-  if (!isNaN(parsed.getTime())) {
-    parsed.setUTCHours(0, 0, 0, 0);
-    return parsed;
+  try {
+    const normalized = dateOnly(str, "date");
+    return normalized ? dateOnlyStartUtc(normalized, "date") : null;
+  } catch (error) {
+    return null;
   }
-  return null;
 }
 
 /**
@@ -486,17 +482,7 @@ function scheduleFixturesAcrossSlotsAndFields(params) {
       const slotHour = Math.floor(slotStartMinutes / 60);
       const slotMin = slotStartMinutes % 60;
 
-      const kickoffTime = new Date(
-        Date.UTC(
-          matchDate.getUTCFullYear(),
-          matchDate.getUTCMonth(),
-          matchDate.getUTCDate(),
-          slotHour,
-          slotMin,
-          0,
-          0
-        )
-      );
+      const kickoffTime = zonedDateTimeToUtc(dateOnly(matchDate, "matchDate"), slotHour, slotMin);
 
       const endTime = new Date(kickoffTime.getTime() + matchDuration * 60 * 1000);
 

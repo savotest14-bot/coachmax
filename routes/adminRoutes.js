@@ -31,6 +31,7 @@ const {
   getAllClasses,
   getClassById,
   updateClass,
+  duplicateClass,
   getCurrentYearTerms,
   getClassesByTerm,
   markAttendance,
@@ -42,6 +43,7 @@ const {
   createCoach,
   getAllCoaches,
   getCoachById,
+  getCoachDetail,
   updateCoach,
   getClassPlayers,
   markSingleAttendance,
@@ -154,6 +156,9 @@ const {
 } = require("../controllers/newsController");
 
 const {
+  sendEventDayBroadcast,
+  previewEventDayBroadcast,
+  sendTeamBroadcast,
   deleteSingleMessage,
   deleteFullChatRoom,
 } = require("../controllers/parentChatController");
@@ -191,11 +196,14 @@ const {
   getAllEventsForAdmin,
   updateEventStatus,
   updateEvent,
+  deleteEvent,
+  removeEventRegistration,
   getEventParticipants,
   getEventDetailsAdmin,
   exportEventParticipants,
   configureCampSessions,
   toggleCampDateAvailability,
+  updateCampDayNote,
   getEventAttendanceGrid,
   markEventSingleAttendance,
   markEventBulkAttendance,
@@ -246,18 +254,23 @@ router.post("/createEvent", auth, isAdmin, uploads.single("eventImg"), createEve
 router.get("/getAllEvents", auth, isAdmin, getAllEventsForAdmin);
 router.put("/updateEventStatus/:id", auth, isAdmin, updateEventStatus);
 router.put("/updateEvent/:id", auth, isAdmin, uploads.single("eventImg"), updateEvent);
+router.delete("/deleteEvent/:id", auth, isAdmin, deleteEvent);
 router.get("/getEventParticipants/:eventId", auth, isAdmin, getEventParticipants);
 router.get("/getEventDetails/:eventId", auth, getEventDetailsAdmin);
 
 // Holiday Camp Dates & Sessions Configuration
 router.post("/events/:eventId/sessions", auth, isAdmin, configureCampSessions);
 router.patch("/events/:eventId/toggle-date", auth, isAdmin, toggleCampDateAvailability);
+router.patch("/events/:eventId/day-note", auth, isAdmin, updateCampDayNote);
+router.post("/events/:eventId/chat/day", auth, isAdmin, sendEventDayBroadcast);
+router.get("/events/:eventId/chat/day/preview", auth, isAdmin, previewEventDayBroadcast);
 
 // Holiday Camp & Event Attendance
 router.get("/events/:eventId/attendance-grid", auth, getEventAttendanceGrid);
 router.post("/events/:eventId/attendance/single", auth, markEventSingleAttendance);
 router.post("/events/:eventId/attendance/bulk", auth, markEventBulkAttendance);
 router.get("/events/registrations/:registrationId", auth, getEventRegistrationDetails);
+router.delete("/events/registrations/:registrationId", auth, isAdmin, removeEventRegistration);
 router.patch("/events/registrations/:registrationId/payment-status", auth, updateEventRegistrationPaymentStatus);
 router.put("/events/registrations/:registrationId/payment-status", auth, updateEventRegistrationPaymentStatus);
 
@@ -292,6 +305,7 @@ router.get("/getAllClasses", auth, isAdmin, getAllClasses);
 router.get("/getAllClassesForAssign", getAllClassesForAssign);
 router.get("/getClassById/:id", auth, isAdmin, getClassById);
 router.put("/updateClass/:id", auth, isAdmin, updateClass);
+router.post("/duplicateClass/:id", auth, isAdmin, duplicateClass);
 
 router.get("/getCurrentYearTerms", auth, isAdmin, getCurrentYearTerms);
 router.get("/getClassesByTerm/:termId", auth, isAdmin, getClassesByTerm);
@@ -316,10 +330,11 @@ router.get("/getTeamFullTable", auth, getTeamFullTable);
 router.get("/exportTeamCSV", exportTeamCSV);
 
 // Coaches CRUD
-router.post("/createCoach", auth, isAdmin, createCoach);
+router.post("/createCoach", auth, isAdmin, uploads.single("profileImage"), createCoach);
 router.get("/getAllCoaches", auth, isAdmin, getAllCoaches);
 router.get("/getCoachById/:id", auth, isAdmin, getCoachById);
-router.put("/updateCoach/:id", auth, isAdmin, updateCoach);
+router.get("/coaches/:coachId/detail", auth, isAdmin, getCoachDetail);
+router.put("/updateCoach/:id", auth, isAdmin, uploads.single("profileImage"), updateCoach);
 router.put("/toggleCoachActive/:id", auth, isAdmin, toggleCoachActiveStatus);
 router.put("/changeCoachPassword/:id", auth, isAdmin, changeCoachPassword);
 router.get("/getCoachClassesWithSessions/:coachId", auth, getCoachClassesWithSessions);
@@ -365,6 +380,7 @@ router.put("/teams/:teamId/players/:playerId/statistics", auth, isAdmin, updateT
 router.delete("/teams/:teamId", auth, isAdmin, deleteTeam);
 router.post("/teams/:teamId/assign", auth, isAdmin, assignPlayerToTeam);
 router.post("/teams/:teamId/unassign", auth, isAdmin, unassignPlayerFromTeam);
+router.post("/teams/:teamId/chat/broadcast", auth, isAdmin, sendTeamBroadcast);
 router.post("/teams/:teamId/temporary-players", auth, isAdmin, uploads.array("profileImages", 20), createTeamTemporaryPlayers);
 router.get("/teams/:teamId/temporary-players", auth, isAdmin, getTeamTemporaryPlayers);
 router.put("/teams/:teamId/temporary-players/:tempPlayerId", auth, isAdmin, uploads.single("profileImage"), updateTeamTemporaryPlayer);

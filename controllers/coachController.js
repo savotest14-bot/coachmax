@@ -9,10 +9,11 @@ const mongoose = require("mongoose");
 const Admin = require("../models/Admin");
 const Notification = require("../models/Notification");
 const ChatRoom = require("../models/ChatRoom");
+const { dateOnly, dateOnlyStartUtc, dateOnlyEndUtc } = require("../utils/dateTime");
 
 const _generateDatesForDayCoach = (start, end, targetDay) => {
   const dates = [];
-  let current = new Date(start);
+  let current = dateOnlyStartUtc(start, "term.startDate");
   while (current.getUTCDay() !== targetDay) {
     current.setUTCDate(current.getUTCDate() + 1);
   }
@@ -33,9 +34,7 @@ const generateClassSessions = (term, classObj) => {
   if (classObj && classObj.sessionDates && Array.isArray(classObj.sessionDates) && classObj.sessionDates.length > 0) {
     return [...classObj.sessionDates]
       .map((d) => {
-        const date = new Date(d);
-        date.setUTCHours(0, 0, 0, 0);
-        return date;
+        return dateOnlyStartUtc(d, "sessionDate");
       })
       .sort((a, b) => a.getTime() - b.getTime());
   }
@@ -43,10 +42,8 @@ const generateClassSessions = (term, classObj) => {
     return sessions;
   }
 
-  const start = new Date(term.startDate);
-  start.setUTCHours(0, 0, 0, 0);
-  const end = new Date(term.endDate);
-  end.setUTCHours(0, 0, 0, 0);
+  const start = dateOnlyStartUtc(term.startDate, "term.startDate");
+  const end = dateOnlyEndUtc(term.endDate, "term.endDate");
 
   const scheduleType = classObj.scheduleType || "SINGLE_DAY";
   const schedule = classObj.schedule || [];
@@ -74,7 +71,7 @@ const getSessionTimesForDateCoach = (classObj, sessionDate) => {
   const schedule = classObj.schedule || [];
 
   if ((scheduleType === "WEEKDAYS" || scheduleType === "CUSTOM") && schedule.length > 0) {
-    const dayName = dayNames[new Date(sessionDate).getUTCDay()];
+    const dayName = dayNames[dateOnlyStartUtc(sessionDate, "sessionDate").getUTCDay()];
     const entry = schedule.find((e) => (e.dayOfWeek || "").toUpperCase() === dayName);
     if (entry) return { startTime: entry.startTime, endTime: entry.endTime };
   }
@@ -150,11 +147,8 @@ exports.getMyAssignedClasses = async (req, res) => {
 
     if (isWeekFilter) {
       if (startDate && endDate) {
-        sessionStartRange = new Date(startDate);
-        sessionStartRange.setUTCHours(0, 0, 0, 0);
-
-        sessionEndRange = new Date(endDate);
-        sessionEndRange.setUTCHours(23, 59, 59, 999);
+        sessionStartRange = dateOnlyStartUtc(startDate, "startDate");
+        sessionEndRange = dateOnlyEndUtc(endDate, "endDate");
       } else {
         const refDateStr =
           weekDate ||
@@ -162,7 +156,7 @@ exports.getMyAssignedClasses = async (req, res) => {
           (selectedDayParam && !isNaN(Date.parse(selectedDayParam))
             ? selectedDayParam
             : null);
-        const refDate = refDateStr ? new Date(refDateStr) : new Date();
+        const refDate = refDateStr ? dateOnlyStartUtc(refDateStr, "date") : dateOnlyStartUtc(dateOnly(new Date(), "today"), "today");
 
         if (!isNaN(refDate.getTime())) {
           const dayIdx = refDate.getUTCDay();
@@ -200,7 +194,9 @@ exports.getMyAssignedClasses = async (req, res) => {
         ] });
       } else {
         const targetDateStr = date || dayDate || selectedDayParam;
-        const targetDate = targetDateStr ? new Date(targetDateStr) : new Date();
+        const targetDate = targetDateStr
+          ? dateOnlyStartUtc(targetDateStr, "date")
+          : dateOnlyStartUtc(dateOnly(new Date(), "today"), "today");
 
         if (!isNaN(targetDate.getTime())) {
           const dayName = weekdays[targetDate.getUTCDay()];
@@ -312,7 +308,7 @@ exports.getMyAssignedClasses = async (req, res) => {
       }
 
       const formattedSessions = sessions.map((dateObj) => ({
-        date: dateObj.toISOString().split("T")[0],
+        date: dateOnly(dateObj, "sessionDate"),
         day: dateObj.getUTCDate(),
         month: dateObj.getUTCMonth() + 1,
         year: dateObj.getUTCFullYear(),
@@ -455,7 +451,7 @@ exports.getAssignedClassById = async (req, res) => {
 
     attendanceRecords.forEach((attDoc) => {
       const dateStr = attDoc.sessionDate
-        ? new Date(attDoc.sessionDate).toISOString().split("T")[0]
+        ? dateOnly(attDoc.sessionDate, "attendance.sessionDate")
         : "";
 
       (attDoc.records || []).forEach((rec) => {
@@ -529,11 +525,11 @@ exports.getAssignedClassById = async (req, res) => {
     }
 
     const formattedSessions = sessions.map((date) => {
-      const dateStr = date.toISOString().split("T")[0];
+      const dateStr = dateOnly(date, "sessionDate");
       const attDoc = attendanceRecords.find(
         (att) =>
           att.sessionDate &&
-          new Date(att.sessionDate).toISOString().split("T")[0] === dateStr
+          dateOnly(att.sessionDate, "attendance.sessionDate") === dateStr
       );
 
       return {
@@ -1274,8 +1270,7 @@ exports.getCoachDashboard = async (req, res) => {
       thisWeekSessionsCount += weekSessions.length;
 
       const isTodaySession = sessions.some((s) => {
-        const d = new Date(s);
-        d.setUTCHours(0, 0, 0, 0);
+        const d = dateOnlyStartUtc(s, "sessionDate");
         return d.getTime() === today.getTime();
       });
 
@@ -1302,7 +1297,7 @@ exports.getCoachDashboard = async (req, res) => {
           program: cls.program,
           category: cls.category,
           totalPlayers: cls.players ? cls.players.length : 0,
-          sessionDate: today.toISOString().split("T")[0],
+          sessionDate: dateOnly(today, "sessionDate"),
           isAttendanceMarked: Boolean(attDoc),
           attendanceId: attDoc ? attDoc._id : null,
           scheduleType: cls.scheduleType || "SINGLE_DAY",
@@ -1311,14 +1306,13 @@ exports.getCoachDashboard = async (req, res) => {
       }
 
       sessions.forEach((sDate) => {
-        const sTime = new Date(sDate);
-        sTime.setUTCHours(0, 0, 0, 0);
+        const sTime = dateOnlyStartUtc(sDate, "sessionDate");
         if (sTime >= today) {
           const attDoc = todayAttendanceDocs.find(
             (att) =>
               att.class.toString() === cls._id.toString() &&
-              new Date(att.sessionDate).toISOString().split("T")[0] ===
-              sDate.toISOString().split("T")[0]
+              dateOnly(att.sessionDate, "attendance.sessionDate") ===
+              dateOnly(sDate, "sessionDate")
           );
 
           const sessionTimes = getSessionTimesForDateCoach(cls, sDate);
@@ -1329,7 +1323,7 @@ exports.getCoachDashboard = async (req, res) => {
             chatRoomId: roomId,
             broadcastChatRoomId: roomId,
             broadcastRoomId: roomId,
-            sessionDate: sDate.toISOString().split("T")[0],
+            sessionDate: dateOnly(sDate, "sessionDate"),
             dayOfWeek: cls.dayOfWeek,
             startTime: sessionTimes.startTime,
             endTime: sessionTimes.endTime,

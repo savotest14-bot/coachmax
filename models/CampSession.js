@@ -24,6 +24,14 @@ const campSessionSchema = new mongoose.Schema(
       type: String,
       default: "Full Day",
     },
+    // Optional note shared by all session types on this calendar date.
+    // The admin day-note endpoint updates this value across the date's
+    // FULL_DAY/HALF_DAY rows so the UI can render one note per day.
+    dayNote: {
+      type: String,
+      default: "",
+      maxlength: 2000,
+    },
     startTime: {
       type: String,
       required: true,

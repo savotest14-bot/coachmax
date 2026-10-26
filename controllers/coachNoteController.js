@@ -1,6 +1,7 @@
 const CoachNote = require("../models/CoachNote");
 const AuditLog = require("../models/AuditLog");
 const Class = require("../models/Class");
+const Term = require("../models/Term");
 const mongoose = require("mongoose");
 
 exports.createNote = async (req, res) => {
@@ -153,7 +154,7 @@ exports.getNotesByPlayer = async (req, res) => {
   try {
     const coachId = req.admin._id;
     const { playerId } = req.params;
-    let { page = 1, limit = 20, noteType, isPersonal } = req.query;
+    let { page = 1, limit = 20, noteType, isPersonal, termId, year, noTerm } = req.query;
 
     page = Number(page);
     limit = Number(limit);
@@ -188,11 +189,31 @@ exports.getNotesByPlayer = async (req, res) => {
       query.isPersonal = isPersonal === "true";
     }
 
+    const classScopeConditions = [];
+    if (termId) {
+      const classIds = mongoose.Types.ObjectId.isValid(termId)
+        ? await Class.find({ term: termId }).distinct("_id")
+        : [];
+      classScopeConditions.push({ classId: { $in: classIds } });
+    } else if (year) {
+      const termIds = await Term.find({ year: Number(year) }).distinct("_id");
+      const classIds = termIds.length ? await Class.find({ term: { $in: termIds } }).distinct("_id") : [];
+      classScopeConditions.push({ classId: { $in: classIds } });
+    } else if (noTerm === "true") {
+      const classIds = await Class.find({ $or: [{ term: null }, { term: { $exists: false } }] }).distinct("_id");
+      classScopeConditions.push({ $or: [{ classId: null }, { classId: { $in: classIds } }] });
+    }
+    if (classScopeConditions.length) {
+      classScopeConditions.unshift({ $or: query.$or });
+      delete query.$or;
+      query.$and = classScopeConditions;
+    }
+
     const total = await CoachNote.countDocuments(query);
 
     const notes = await CoachNote.find(query)
       .populate("coach", "name")
-      .populate("classId", "name")
+      .populate({ path: "classId", select: "name term", populate: { path: "term", select: "name year startDate endDate isEvent" } })
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit);

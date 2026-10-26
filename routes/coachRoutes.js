@@ -40,7 +40,14 @@ const {
 } = require("../controllers/coachNoteController");
 const {
   startDirectChat,
+  openClassChat,
+  openTeamChat,
+  openEventDayChat,
   sendClassBroadcast,
+  sendEventDayBroadcast,
+  previewEventDayBroadcast,
+  sendTeamBroadcast,
+  openLeagueChat,
   sendMessage,
   getRoomMessages,
   getClassParents,
@@ -98,7 +105,14 @@ router.get("/notes/:noteId/audit", auth, isCoach, getNoteAuditHistory);
 
 //  Parent Communication ────────
 router.post("/chat/direct", auth, startDirectChat);
+router.post("/chat/class/:classId/open", auth, openClassChat);
+router.post("/chat/team/:teamId/open", auth, openTeamChat);
+router.post("/chat/event-day/:eventId/open", auth, openEventDayChat);
 router.post("/chat/broadcast/:classId", auth, sendClassBroadcast);
+router.post("/chat/event-day/:eventId", auth, sendEventDayBroadcast);
+router.get("/chat/event-day/:eventId/preview", auth, previewEventDayBroadcast);
+router.post("/chat/team/:teamId", auth, sendTeamBroadcast);
+router.post("/chat/league/:leagueId/open", auth, openLeagueChat);
 router.post("/chat/message", auth, uploads.single("file"), sendMessage);
 router.get("/chat/rooms", auth, getMyRooms);
 router.get("/chat/room/:roomId/messages", auth, getRoomMessages);

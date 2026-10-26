@@ -4,6 +4,7 @@ const AuditLog = require("../models/AuditLog");
 const Class = require("../models/Class");
 const { sendNotification } = require("../services/notificationService");
 const Admin = require("../models/Admin");
+const { dateOnlyStartUtc } = require("../utils/dateTime");
 
 exports.markAttendance = async (req, res) => {
   try {
@@ -18,8 +19,7 @@ exports.markAttendance = async (req, res) => {
       });
     }
 
-    const date = new Date(sessionDate);
-    date.setUTCHours(0, 0, 0, 0);
+    const date = dateOnlyStartUtc(sessionDate, "sessionDate");
 
     let attendance = await Attendance.findOne({
       class: classId,
@@ -178,8 +178,7 @@ exports.markSingleAttendance = async (req, res) => {
       });
     }
 
-    const date = new Date(sessionDate);
-    date.setUTCHours(0, 0, 0, 0);
+    const date = dateOnlyStartUtc(sessionDate, "sessionDate");
 
     let attendance = await Attendance.findOne({
       class: classId,
@@ -303,8 +302,7 @@ exports.getAttendanceByDate = async (req, res) => {
       return res.status(400).json({ success: false, message: "date query parameter is required" });
     }
 
-    const sessionDate = new Date(date);
-    sessionDate.setUTCHours(0, 0, 0, 0);
+    const sessionDate = dateOnlyStartUtc(date, "date");
 
     const attendance = await Attendance.findOne({
       class: classId,
@@ -343,8 +341,7 @@ exports.getAttendanceHistory = async (req, res) => {
 
     if (playerId) query.playerId = playerId;
     if (sessionDate) {
-      const date = new Date(sessionDate);
-      date.setUTCHours(0, 0, 0, 0);
+      const date = dateOnlyStartUtc(sessionDate, "sessionDate");
       query.sessionDate = date;
     }
 
@@ -383,8 +380,7 @@ exports.markTeamAttendance = async (req, res) => {
       });
     }
 
-    const date = new Date(sessionDate);
-    date.setUTCHours(0, 0, 0, 0);
+    const date = dateOnlyStartUtc(sessionDate, "sessionDate");
 
     const filter = { team: teamId, sessionDate: date };
     if (leagueId) filter.league = leagueId;
@@ -577,8 +573,7 @@ exports.markTeamAttendance = async (req, res) => {
   } catch (err) {
     if (err.code === 11000) {
       try {
-        const date = new Date(req.body.sessionDate);
-        date.setUTCHours(0, 0, 0, 0);
+        const date = dateOnlyStartUtc(req.body.sessionDate, "sessionDate");
         const { leagueId, records = [] } = req.body;
         const filter = { team: req.params.teamId, sessionDate: date };
         if (leagueId) filter.league = leagueId;
@@ -636,8 +631,7 @@ exports.markSingleTeamAttendance = async (req, res) => {
       });
     }
 
-    const date = new Date(sessionDate);
-    date.setUTCHours(0, 0, 0, 0);
+    const date = dateOnlyStartUtc(sessionDate, "sessionDate");
 
     const filter = { team: teamId, sessionDate: date };
     if (leagueId) filter.league = leagueId;
@@ -771,8 +765,7 @@ exports.markSingleTeamAttendance = async (req, res) => {
   } catch (err) {
     if (err.code === 11000) {
       try {
-        const date = new Date(req.body.sessionDate);
-        date.setUTCHours(0, 0, 0, 0);
+        const date = dateOnlyStartUtc(req.body.sessionDate, "sessionDate");
         const { leagueId, playerId, status, comment } = req.body;
         const filter = { team: req.params.teamId, sessionDate: date };
         if (leagueId) filter.league = leagueId;
@@ -862,8 +855,7 @@ exports.getAttendanceByTeamDate = async (req, res) => {
       return res.status(400).json({ success: false, message: "date query parameter is required" });
     }
 
-    const sessionDate = new Date(date);
-    sessionDate.setUTCHours(0, 0, 0, 0);
+    const sessionDate = dateOnlyStartUtc(date, "date");
 
     const query = {
       team: teamId,
@@ -907,8 +899,7 @@ exports.getTeamAttendanceHistory = async (req, res) => {
     if (playerId) query.playerId = playerId;
     if (leagueId) query.leagueId = leagueId;
     if (sessionDate) {
-      const date = new Date(sessionDate);
-      date.setUTCHours(0, 0, 0, 0);
+      const date = dateOnlyStartUtc(sessionDate, "sessionDate");
       query.sessionDate = date;
     }
 
