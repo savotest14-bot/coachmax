@@ -1,524 +1,105 @@
+const mongoose = require("mongoose");
 const Invoice = require("../models/Invoice");
+const Counter = require("../models/Counter");
 const Class = require("../models/Class");
 const User = require("../models/User");
-const { sendNotification } = require("./notificationService");
+const Parent = require("../models/Parent");
+const { queueNotification } = require("./deliveryService");
+const { currencyAmount } = require("../utils/money");
+const { todayDateOnly } = require("../utils/dateTime");
+const withSession = (query, session) => session ? query.session(session) : query;
 
-// Helper to generate sequential invoice number e.g. INV-2026-000001
-const generateInvoiceNumber = async () => {
-  const year = new Date().getFullYear();
-  const prefix = `INV-${year}-`;
+async function generateInvoiceNumber({ session } = {}) {
+  const year = Number(todayDateOnly().slice(0, 4));
+  const key = `invoice:${year}`;
+  if (!await withSession(Counter.findById(key), session)) {
+    // Numeric ordering matters when an old sequence grows beyond six digits.
+    const last = await withSession(Invoice.aggregate([
+      { $match: { invoiceNumber: new RegExp(`^INV-${year}-[0-9]+$`) } },
+      { $project: { sequence: { $convert: { input: { $arrayElemAt: [{ $split: ["$invoiceNumber", "-"] }, 2] }, to: "long", onError: 0, onNull: 0 } } } },
+      { $group: { _id: null, sequence: { $max: "$sequence" } } },
+    ]), session);
+    const initial = Number(last[0]?.sequence || 0);
+    if (!Number.isSafeInteger(initial) || initial < 0) throw Object.assign(new Error("Invoice sequence requires administrator reconciliation"), { status: 422 });
+    try { await Counter.updateOne({ _id: key }, { $max: { sequence: initial } }, { upsert: true, session }); }
+    catch (error) { if (session || error.code !== 11000) throw error; /* Another standalone allocator initialized this counter. */ }
+  }
+  const counter = await Counter.findOneAndUpdate({ _id: key }, { $inc: { sequence: 1 } }, { upsert: true, returnDocument: "after", session });
+  return `INV-${year}-${String(counter.sequence).padStart(6, "0")}`;
+}
 
-  const lastInvoice = await Invoice.findOne({
-    invoiceNumber: new RegExp(`^${prefix}`),
-  })
-    .sort({ createdAt: -1 })
-    .select("invoiceNumber");
-
-  let sequence = 1;
-  if (lastInvoice && lastInvoice.invoiceNumber) {
-    const parts = lastInvoice.invoiceNumber.split("-");
-    const lastNum = parseInt(parts[parts.length - 1], 10);
-    if (!isNaN(lastNum)) {
-      sequence = lastNum + 1;
+async function issueCharge({ userId, contextId, contextField, title, description, type, amount, session, idempotencyKey, extra = {} }) {
+  const work = async (tx) => {
+    const player = await withSession(User.findById(userId), tx);
+    if (!player?.parentId || !await withSession(Parent.exists({ _id: player.parentId }), tx)) {
+      throw Object.assign(new Error("Player must be linked to a valid parent before billing"), { status: 422 });
     }
-  }
-
-  const paddedSequence = String(sequence).padStart(6, "0");
-  return `${prefix}${paddedSequence}`;
-};
-
-
-const generateClassInvoice = async ({ userId, classId }) => {
-  if (!userId || !classId) {
-    return { invoice: null, isDuplicate: false, error: "userId and classId are required" };
-  }
-
-  //  Fetch Player
-  const player = await User.findById(userId);
-  if (!player) {
-    return { invoice: null, isDuplicate: false, error: "Player not found" };
-  }
-
-  if (!player.parentId) {
-    return { invoice: null, isDuplicate: false, error: "Player has no parent associated" };
-  }
-
-  //  Fetch Class
-  const classDoc = await Class.findById(classId);
-  if (!classDoc) {
-    return { invoice: null, isDuplicate: false, error: "Class not found" };
-  }
-
-  //  Duplicate Invoice Check
-  // Check if an active / non-cancelled invoice already exists for this player & class assignment
-  const existingInvoice = await Invoice.findOne({
-    parent: player.parentId,
-    players: userId,
-    class: classId,
-    status: { $ne: "CANCELLED" },
-  });
-
-  if (existingInvoice) {
-    console.log(`[InvoiceService] Duplicate invoice prevented for player ${userId} and class ${classId}. Existing invoice: ${existingInvoice.invoiceNumber}`);
-    return { invoice: existingInvoice, isDuplicate: true };
-  }
-
-  //  Generate New Invoice
-  const price = Number(classDoc.price || 0);
-  const invoiceNumber = await generateInvoiceNumber();
-
-  // Due date: 30 days from invoice generation
-  const dueDate = new Date();
-  dueDate.setDate(dueDate.getDate() + 30);
-
-  const invoice = await Invoice.create({
-    invoiceNumber,
-    parent: player.parentId,
-    players: [userId],
-    class: classId,
-    items: [
-      {
-        title: classDoc.name,
-        description: `Class fee for ${classDoc.name}`,
-        amount: price,
-      },
-    ],
-    subtotal: price,
-    discount: 0,
-    totalAmount: price,
-    amount: price,
-    dueDate,
-    type: "CLASS_FEE",
-    description: `Invoice for class enrollment: ${classDoc.name}`,
-    notes: "",
-    paymentStatus: "UNPAID",
-    status: "ACTIVE",
-  });
-
-  // Update player classPaymentStatuses for this class to UNPAID
-  player.classPaymentStatuses = player.classPaymentStatuses || [];
-  const existingCPS = player.classPaymentStatuses.find(
-    (cps) => cps.class && cps.class.toString() === classId.toString()
-  );
-  if (existingCPS) {
-    existingCPS.paymentStatus = "UNPAID";
-  } else {
-    player.classPaymentStatuses.push({
-      class: classId,
-      paymentStatus: "UNPAID",
-    });
-  }
-  await player.save();
-
-  //  Send Notification to Parent
-  try {
-    await sendNotification({
-      recipientType: "PARENT",
-      parentId: player.parentId,
-      title: "New Class Invoice Issued 📄",
-      message: `An invoice #${invoiceNumber} for class "${classDoc.name}" ($${price}) has been generated.`,
-      type: "INVOICE_CREATED",
-      data: {
-        parentId: String(player.parentId),
-        invoiceId: String(invoice._id),
-        invoiceNumber: String(invoiceNumber),
-        classId: String(classId),
-        totalAmount: String(price),
-        dueDate: dueDate.toISOString(),
-      },
-    });
-  } catch (notifErr) {
-    console.error("[InvoiceService] Failed to send invoice notification:", notifErr.message);
-  }
-
-  return { invoice, isDuplicate: false };
-};
-
-const generateTransferInvoice = async ({ userId, fromClass, toClass }) => {
-  if (!userId || !fromClass || !toClass) {
-    return { invoice: null, priceDiff: 0, invoiceGenerated: false, error: "userId, fromClass, and toClass are required" };
-  }
-
-  const fromPrice = Number(fromClass.price || 0);
-  const toPrice = Number(toClass.price || 0);
-  const priceDiff = toPrice - fromPrice;
-
-  if (priceDiff <= 0) {
-    console.log(`[InvoiceService] No invoice needed for class transfer (from ${fromPrice} to ${toPrice}, diff: ${priceDiff})`);
-    return { invoice: null, priceDiff, invoiceGenerated: false };
-  }
-
-  const player = await User.findById(userId);
-  if (!player || !player.parentId) {
-    return { invoice: null, priceDiff, invoiceGenerated: false, error: "Player or parent not found" };
-  }
-
-  const invoiceNumber = await generateInvoiceNumber();
-
-  // Due date: 30 days from transfer
-  const dueDate = new Date();
-  dueDate.setDate(dueDate.getDate() + 30);
-
-  const invoice = await Invoice.create({
-    invoiceNumber,
-    parent: player.parentId,
-    players: [userId],
-    class: toClass._id,
-    items: [
-      {
-        title: `Class Transfer: ${toClass.name}`,
-        description: `Price difference for transfer from ${fromClass.name} ($${fromPrice}) to ${toClass.name} ($${toPrice})`,
-        amount: priceDiff,
-      },
-    ],
-    subtotal: priceDiff,
-    discount: 0,
-    totalAmount: priceDiff,
-    amount: priceDiff,
-    dueDate,
-    type: "CLASS_FEE",
-    description: `Invoice for class transfer price difference`,
-    notes: `Transferred from ${fromClass.name} to ${toClass.name}`,
-    paymentStatus: "UNPAID",
-    status: "ACTIVE",
-  });
-
-  try {
-    await sendNotification({
-      recipientType: "PARENT",
-      parentId: player.parentId,
-      title: "Class Transfer Invoice Issued 📄",
-      message: `Your player ${player.fullName || player.firstName} was transferred from "${fromClass.name}" to "${toClass.name}". An invoice #${invoiceNumber} for the remaining price difference ($${priceDiff}) has been generated.`,
-      type: "INVOICE_CREATED",
-      data: {
-        parentId: String(player.parentId),
-        invoiceId: String(invoice._id),
-        invoiceNumber: String(invoiceNumber),
-        fromClassId: String(fromClass._id),
-        toClassId: String(toClass._id),
-        totalAmount: String(priceDiff),
-        dueDate: dueDate.toISOString(),
-      },
-    });
-  } catch (notifErr) {
-    console.error("[InvoiceService] Failed to send transfer invoice notification:", notifErr.message);
-  }
-
-  return { invoice, priceDiff, invoiceGenerated: true };
-};
-
-const generateTeamInvoice = async ({ userId, teamId }) => {
-  if (!userId || !teamId) {
-    return { invoice: null, isDuplicate: false, error: "userId and teamId are required" };
-  }
-
-  //  Fetch Player
-  const player = await User.findById(userId);
-  if (!player) {
-    return { invoice: null, isDuplicate: false, error: "Player not found" };
-  }
-
-  if (!player.parentId) {
-    return { invoice: null, isDuplicate: false, error: "Player has no parent associated" };
-  }
-
-  // Fetch Team
-  const Team = require("../models/Team");
-  const teamDoc = await Team.findById(teamId);
-  if (!teamDoc) {
-    return { invoice: null, isDuplicate: false, error: "Team not found" };
-  }
-
-  const teamFee = Number(teamDoc.teamFee || 0);
-  if (teamFee <= 0) {
-    // No fee configured for this team
-    return { invoice: null, isDuplicate: false };
-  }
-
-  //  Duplicate Invoice Check
-  const existingInvoice = await Invoice.findOne({
-    parent: player.parentId,
-    players: userId,
-    team: teamId,
-    type: "TEAM_FEE",
-    status: { $ne: "CANCELLED" },
-  });
-
-  if (existingInvoice) {
-    console.log(`[InvoiceService] Duplicate team invoice prevented for player ${userId} and team ${teamId}. Existing invoice: ${existingInvoice.invoiceNumber}`);
-    return { invoice: existingInvoice, isDuplicate: true };
-  }
-
-  // Generate New Invoice
-  const invoiceNumber = await generateInvoiceNumber();
-
-  // Due date: 30 days from invoice generation
-  const dueDate = new Date();
-  dueDate.setDate(dueDate.getDate() + 30);
-
-  const invoice = await Invoice.create({
-    invoiceNumber,
-    parent: player.parentId,
-    players: [userId],
-    team: teamId,
-    items: [
-      {
-        title: teamDoc.teamName,
-        description: `Team fee for ${teamDoc.teamName} (${teamDoc.teamType || "INTERNAL"})`,
-        amount: teamFee,
-      },
-    ],
-    subtotal: teamFee,
-    discount: 0,
-    totalAmount: teamFee,
-    amount: teamFee,
-    dueDate,
-    type: "TEAM_FEE",
-    description: `Invoice for team assignment: ${teamDoc.teamName}`,
-    notes: "",
-    paymentStatus: "UNPAID",
-    status: "ACTIVE",
-  });
-
-  // Update player paymentStatus on Team schema as well
-  if (teamDoc.players && Array.isArray(teamDoc.players)) {
-    const pEntry = teamDoc.players.find((item) => {
-      const pid = item.player ? item.player.toString() : item.toString();
-      return pid === userId.toString();
-    });
-    if (pEntry) {
-      pEntry.paymentStatus = "UNPAID";
-      await teamDoc.save();
+    const key = idempotencyKey || `${contextField}:${userId}:${contextId}`;
+    const keyedInvoice = await withSession(Invoice.findOne({ status: "ACTIVE", chargeKey: key }), tx);
+    if (keyedInvoice && (String(keyedInvoice.parent) !== String(player.parentId) || !keyedInvoice.players.some((value) => String(value) === String(userId)) || String(keyedInvoice[contextField]) !== String(contextId) || keyedInvoice.type !== type)) {
+      throw Object.assign(new Error("This charge key was already used for a different enrollment"), { status: 409 });
     }
+    const legacyInvoice = !key.startsWith("transfer:") && !keyedInvoice
+      ? await withSession(Invoice.findOne({ status: "ACTIVE", chargeKey: { $exists: false }, parent: player.parentId, players: userId, [contextField]: contextId, type }), tx)
+      : null;
+    const existing = keyedInvoice || legacyInvoice;
+    if (existing) return { invoice: existing, isDuplicate: true };
+    const price = currencyAmount(amount);
+    const invoiceNumber = await generateInvoiceNumber({ session: tx });
+    const dueDate = new Date(); dueDate.setUTCDate(dueDate.getUTCDate() + 30);
+    const [invoice] = await Invoice.create([{ chargeKey: key, invoiceNumber, parent: player.parentId, players: [userId], [contextField]: contextId, ...extra,
+      items: [{ title, description, amount: price }], subtotal: price, discount: 0, totalAmount: price, amount: price,
+      dueDate, type, description, notes: "", paymentStatus: "UNPAID", status: "ACTIVE" }], { session: tx });
+    await queueNotification(`invoice:${invoice._id}`, { recipientType: "PARENT", parentId: String(player.parentId), title: "New invoice issued", message: `Invoice ${invoiceNumber} for ${title} ($${price.toFixed(2)}) is ready.`, type: "INVOICE_CREATED", data: { invoiceId: String(invoice._id), parentId: String(player.parentId), invoiceNumber, totalAmount: String(price), dueDate: dueDate.toISOString() } }, tx);
+    return { invoice, isDuplicate: false };
+  };
+  if (session) return work(session);
+  const tx = await mongoose.startSession();
+  try { let result; await tx.withTransaction(async () => { result = await work(tx); }); return result; }
+  finally { await tx.endSession(); }
+}
+
+async function generateClassInvoice({ userId, classId, session, idempotencyKey }) {
+  const cls = await withSession(Class.findById(classId), session);
+  if (!cls) throw Object.assign(new Error("Class not found"), { status: 404 });
+  return issueCharge({ userId, contextId: classId, contextField: "class", title: cls.name, description: `Class fee for ${cls.name}`, type: "CLASS_FEE", amount: cls.price || 0, session, idempotencyKey });
+}
+async function generateTransferInvoice({ userId, fromClass, toClass, session, idempotencyKey }) {
+  if (!fromClass || !toClass) throw Object.assign(new Error("Both transfer classes are required"), { status: 400 });
+  const priceDiff = currencyAmount(Math.max(0, Number(toClass.price || 0) - Number(fromClass.price || 0)));
+  if (!priceDiff) return { invoice: null, priceDiff, invoiceGenerated: false };
+  const result = await issueCharge({ userId, contextId: toClass._id, contextField: "class", title: `Transfer to ${toClass.name}`, description: `Price difference from ${fromClass.name} to ${toClass.name}`, type: "CLASS_FEE", amount: priceDiff, session, idempotencyKey: idempotencyKey || `transfer:${userId}:${fromClass._id}:${toClass._id}` });
+  return { ...result, priceDiff, invoiceGenerated: !result.isDuplicate };
+}
+async function generateTeamInvoice({ userId, teamId, session, idempotencyKey }) {
+  const team = await withSession(require("../models/Team").findById(teamId), session);
+  if (!team) throw Object.assign(new Error("Team not found"), { status: 404 });
+  if (!Number(team.teamFee)) return { invoice: null, isDuplicate: false };
+  return issueCharge({ userId, contextId: teamId, contextField: "team", title: team.teamName, description: `Team fee for ${team.teamName}`, type: "TEAM_FEE", amount: team.teamFee, session, idempotencyKey });
+}
+async function generateLeagueInvoice({ userId, leagueId, teamId, amount, session, idempotencyKey }) {
+  const league = await withSession(require("../models/League").findById(leagueId), session);
+  if (!league) throw Object.assign(new Error("League not found"), { status: 404 });
+  let fee = amount ?? league.fee ?? 0;
+  if (teamId && amount == null) {
+    const team = await withSession(require("../models/Team").findById(teamId), session);
+    const entry = team?.leagues?.find((item) => String(item.league?._id || item.league) === String(leagueId));
+    fee = entry?.teamFee ?? fee;
   }
-
-  //  Send Notification to Parent
-  try {
-    await sendNotification({
-      recipientType: "PARENT",
-      parentId: player.parentId,
-      title: "New Team Fee Invoice Issued 📄",
-      message: `An invoice #${invoiceNumber} for team "${teamDoc.teamName}" ($${teamFee}) has been generated.`,
-      type: "INVOICE_CREATED",
-      data: {
-        parentId: String(player.parentId),
-        invoiceId: String(invoice._id),
-        invoiceNumber: String(invoiceNumber),
-        teamId: String(teamId),
-        totalAmount: String(teamFee),
-        dueDate: dueDate.toISOString(),
-      },
-    });
-  } catch (notifErr) {
-    console.error("[InvoiceService] Failed to send team invoice notification:", notifErr.message);
+  if (!Number(fee)) return { invoice: null, isDuplicate: false };
+  return issueCharge({ userId, contextId: leagueId, contextField: "league", title: league.name, description: `League fee for ${league.name}`, type: "TOURNAMENT_FEE", amount: fee, extra: teamId ? { team: teamId } : {}, session, idempotencyKey });
+}
+async function processLeagueInvoicesForTeam({ leagueId, teamId, amount, session }) {
+  const team = await withSession(require("../models/Team").findById(teamId), session);
+  if (!team) throw Object.assign(new Error("Team not found"), { status: 404 });
+  const entry = team.leagues?.find((item) => String(item.league?._id || item.league) === String(leagueId));
+  const statuses = new Map();
+  for (const item of [...(team.players || []), ...(entry?.players || [])]) {
+    const pid = String(item.player?._id || item.player || "");
+    if (pid) statuses.set(pid, String(item.paymentStatus || "UNPAID").toUpperCase());
   }
-
-  return { invoice, isDuplicate: false };
-};
-
-const generateLeagueInvoice = async ({ userId, leagueId, teamId, amount }) => {
-  if (!userId || !leagueId) {
-    return { invoice: null, isDuplicate: false, error: "userId and leagueId are required" };
-  }
-
-  const player = await User.findById(userId);
-  if (!player) {
-    return { invoice: null, isDuplicate: false, error: "Player not found" };
-  }
-
-  let parentId = player.parentId;
-  if (!parentId) {
-    const Parent = require("../models/Parent");
-    const orConditions = [];
-    if (player.email) orConditions.push({ email: player.email });
-    if (player.phone) orConditions.push({ phone: player.phone });
-    if (orConditions.length > 0) {
-      const foundParent = await Parent.findOne({ $or: orConditions });
-      if (foundParent) {
-        parentId = foundParent._id;
-        player.parentId = parentId;
-        await player.save();
-      }
-    }
-  }
-
-  if (!parentId) {
-    const Parent = require("../models/Parent");
-    let foundParent = await Parent.findOne();
-    if (!foundParent) {
-      foundParent = await Parent.create({
-        fullName: player.contactName || `${player.firstName || ""} Parent`.trim() || "Parent",
-        email: player.email || `parent-${player._id}@coachmax.com`,
-        phone: player.phone || "0000000000",
-        password: "TempPassword123!",
-        emergencyContact: player.contactName || "Emergency",
-        relationship: "Guardian",
-      });
-    }
-    parentId = foundParent._id;
-    player.parentId = parentId;
-    await player.save();
-  }
-
-  const League = require("../models/League");
-  const leagueDoc = await League.findById(leagueId);
-  if (!leagueDoc) {
-    return { invoice: null, isDuplicate: false, error: "League not found" };
-  }
-
-  let fee =
-    amount !== undefined && amount !== null && !isNaN(Number(amount))
-      ? Math.max(0, Number(amount))
-      : Number(leagueDoc.fee || 0);
-
-  if (fee <= 0 && teamId) {
-    const TeamModel = require("../models/Team");
-    const teamDoc = await TeamModel.findById(teamId);
-    if (teamDoc) {
-      const lEntry = (teamDoc.leagues || []).find(
-        (l) => (l.league?._id || l.league)?.toString() === leagueId.toString()
-      );
-      fee = Number(lEntry?.teamFee || teamDoc.teamFee || 0);
-    }
-  }
-
-  fee = Math.max(0, Number(fee || 0));
-
-  // Duplicate Invoice Check
-  const existingInvoice = await Invoice.findOne({
-    parent: parentId,
-    players: userId,
-    league: leagueId,
-    status: { $ne: "CANCELLED" },
-  });
-
-  if (existingInvoice) {
-    return { invoice: existingInvoice, isDuplicate: true };
-  }
-
-  const invoiceNumber = await generateInvoiceNumber();
-
-  const dueDate = new Date();
-  dueDate.setDate(dueDate.getDate() + 30);
-
-  const invoice = await Invoice.create({
-    invoiceNumber,
-    parent: parentId,
-    players: [userId],
-    team: teamId || undefined,
-    league: leagueId,
-    items: [
-      {
-        title: leagueDoc.name,
-        description: `League fee for ${leagueDoc.name}`,
-        amount: fee,
-      },
-    ],
-    subtotal: fee,
-    discount: 0,
-    totalAmount: fee,
-    amount: fee,
-    dueDate,
-    type: "TOURNAMENT_FEE",
-    description: `Invoice for league participation: ${leagueDoc.name}`,
-    notes: "",
-    paymentStatus: "UNPAID",
-    status: "ACTIVE",
-  });
-
-  try {
-    await sendNotification({
-      recipientType: "PARENT",
-      parentId: parentId,
-      title: "New League Fee Invoice Issued 📄",
-      message: `An invoice #${invoiceNumber} for league "${leagueDoc.name}" ($${fee}) has been generated.`,
-      type: "INVOICE_CREATED",
-      data: {
-        parentId: String(parentId),
-        invoiceId: String(invoice._id),
-        invoiceNumber: String(invoiceNumber),
-        leagueId: String(leagueId),
-        teamId: String(teamId || ""),
-        totalAmount: String(fee),
-        dueDate: dueDate.toISOString(),
-      },
-    });
-  } catch (notifErr) {
-    console.error("[InvoiceService] Failed to send league invoice notification:", notifErr.message);
-  }
-
-  return { invoice, isDuplicate: false };
-};
-
-const processLeagueInvoicesForTeam = async ({ leagueId, teamId, amount }) => {
-  const Team = require("../models/Team");
-  const team = await Team.findById(teamId);
-  if (!team) return;
-
-  const League = require("../models/League");
-  const leagueDoc = await League.findById(leagueId);
-
-  const leagueEntry = (team.leagues || []).find(
-    (l) => (l.league?._id || l.league)?.toString() === leagueId.toString()
-  );
-
-  const effectiveFee =
-    amount !== undefined && amount !== null && !isNaN(Number(amount)) && Number(amount) > 0
-      ? Number(amount)
-      : Number(leagueEntry?.teamFee || leagueDoc?.fee || team.teamFee || 0);
-
-  if (effectiveFee <= 0) return;
-
-  const playerStatusMap = new Map();
-
-  // 1. From team.players
-  if (Array.isArray(team.players)) {
-    for (const pItem of team.players) {
-      const pid = (pItem.player?._id || pItem.player || pItem)?.toString().trim();
-      const rawStatus = (pItem.paymentStatus || pItem.status || "UNPAID").toString().toUpperCase().trim();
-      if (pid) {
-        playerStatusMap.set(pid, rawStatus);
-      }
-    }
-  }
-
-  // 2. From leagueEntry.players (takes precedence for this league)
-  if (leagueEntry && Array.isArray(leagueEntry.players)) {
-    for (const pItem of leagueEntry.players) {
-      const pid = (pItem.player?._id || pItem.player || pItem)?.toString().trim();
-      const rawStatus = (pItem.paymentStatus || pItem.status || "UNPAID").toString().toUpperCase().trim();
-      if (pid) {
-        playerStatusMap.set(pid, rawStatus);
-      }
-    }
-  }
-
-  const processed = new Set();
-  for (const [pId, rawStatus] of playerStatusMap.entries()) {
-    if (rawStatus === "UNPAID" && !processed.has(pId)) {
-      processed.add(pId);
-      try {
-        const invRes = await generateLeagueInvoice({
-          userId: pId,
-          leagueId,
-          teamId,
-          amount: effectiveFee,
-        });
-        if (invRes?.error) {
-          console.warn(`[League] Invoice creation notice for player ${pId}:`, invRes.error);
-        }
-      } catch (invErr) {
-        console.error(`[League] Failed to generate invoice for player ${pId}:`, invErr.message);
-      }
-    }
-  }
-};
-
-module.exports = {
-  generateInvoiceNumber,
-  generateClassInvoice,
-  generateTransferInvoice,
-  generateTeamInvoice,
-  generateLeagueInvoice,
-  processLeagueInvoicesForTeam,
-};
+  const results = [];
+  for (const [userId, status] of statuses) if (status === "UNPAID") results.push(await generateLeagueInvoice({ userId, leagueId, teamId, amount, session }));
+  return results;
+}
+module.exports = { generateInvoiceNumber, generateClassInvoice, generateTransferInvoice, generateTeamInvoice, generateLeagueInvoice, processLeagueInvoicesForTeam };

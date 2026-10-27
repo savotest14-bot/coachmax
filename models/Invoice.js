@@ -18,6 +18,7 @@ const invoiceItemSchema = new mongoose.Schema({
 
 const invoiceSchema = new mongoose.Schema(
   {
+    chargeKey: { type: String },
     invoiceNumber: {
       type: String,
       unique: true,
@@ -115,4 +116,5 @@ const invoiceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+invoiceSchema.index({ chargeKey: 1 }, { unique: true, partialFilterExpression: { chargeKey: { $type: "string" }, status: "ACTIVE" } });
 module.exports = mongoose.model("Invoice", invoiceSchema);

@@ -3,130 +3,88 @@ const User = require("../models/User");
 const Parent = require("../models/Parent");
 const Class = require("../models/Class");
 const Term = require("../models/Term");
-const Category = require("../models/Category");
-const Program = require("../models/Program");
 const Team = require("../models/Team");
 const {
   normalizePaymentStatus,
   paymentStatusRankExpression,
 } = require("../utils/paymentStatus");
-const Notification = require("../models/Notification");
-const { sendNotification } = require("../services/notificationService");
-const { generateClassInvoice } = require("../services/invoiceService");
 let broadcastSidebarBadges = null;
 try {
   ({ broadcastSidebarBadges } = require("../sockets/chatSocket"));
 } catch (e) {}
 
+const mongoose = require("mongoose");
+const AuditLog = require("../models/AuditLog");
+const { enrollPlayer } = require("../services/enrollmentService");
+const { serializeDateOnly, serializeTerm } = require("../utils/dateTime");
+const escapeSearch = (value) => String(value || "").slice(0, 150).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const serializeRequest = (request) => {
+  const raw = request.toObject ? request.toObject() : { ...request };
+  if (raw.player && typeof raw.player === "object") {
+    raw.player.dob = serializeDateOnly(raw.player.dob);
+    raw.player.temporarySessionDate = serializeDateOnly(raw.player.temporarySessionDate);
+  }
+  if (raw.preferredTerm?.name) raw.preferredTerm = serializeTerm(raw.preferredTerm);
+  return raw;
+};
+
 exports.getRegistrationRequests = async (req, res) => {
   try {
-    let {
-      status,
-      requestType,
-      category,
-      program,
-      searchParent,
-      searchPlayer,
-      isMedicalCondition,
-      search,
-      page = 1,
-      limit = 10,
-    } = req.query;
-
-    page = Number(page);
-    limit = Number(limit);
-
-    const query = {
-      status: status ? status.toUpperCase() : "PENDING",
-    };
-
-    if (requestType) {
-      query.requestType = requestType;
-    } else {
-      // Exclude temporary players from registration requests
-      query.requestType = { $nin: ["TEMPORARY_PLAYER", "TEMPORARY"] };
+    const { status = "PENDING", requestType, category, program, searchParent, searchPlayer, isMedicalCondition, search, ageGroup, term } = req.query;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    if (!["PENDING", "APPROVED", "REJECTED", "CANCELLED", "COMPLETED", "ALL"].includes(String(status).toUpperCase())) return res.status(400).json({ success: false, message: "Invalid request status" });
+    const query = status.toUpperCase() === "ALL" ? {} : { status: status.toUpperCase() };
+    if (requestType && requestType !== "ALL") query.requestType = ["TEMPORARY_PLAYER", "TEMPORARY"].includes(requestType) ? { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] } : requestType;
+    if (category) query.category = category;
+    if (program) query.programs = program;
+    let termDoc = null;
+    if (term) {
+      if (!mongoose.isValidObjectId(term)) return res.status(400).json({ success: false, message: "Invalid term ID" });
+      termDoc = await Term.findById(term).select("year");
+      if (!termDoc) return res.status(404).json({ success: false, message: "Selected term was not found" });
+      query.preferredTerm = term;
     }
-
-    if (category) {
-      query.category = category;
+    // A request remains visible even if the player is already active in a
+    // different class. Queue identity is the request, not the player.
+    const playerFilter = {};
+    if (searchPlayer) {
+      const regex = new RegExp(escapeSearch(searchPlayer), "i");
+      playerFilter.$or = [{ fullName: regex }, { firstName: regex }, { lastName: regex }];
     }
-
-    if (program) {
-      query.programs = program;
+    if (["true", "false", "YES", "NO"].includes(String(isMedicalCondition))) playerFilter.isMedicalCondition = ["true", "YES"].includes(String(isMedicalCondition));
+    if (ageGroup) {
+      const { ageGroupDobRange, ageGroupContextYear, parseAgeGroupRange } = require("../utils/dateTime");
+      const ageRange = parseAgeGroupRange(ageGroup);
+      if (!ageRange) return res.status(400).json({ success: false, message: "Invalid U group filter" });
+      const range = ageGroupDobRange(ageRange.minAge, ageRange.maxAge, ageGroupContextYear(termDoc?.year));
+      playerFilter.dob = range;
     }
-
-    const parentSearchTerm = searchParent || search;
-    if (parentSearchTerm) {
-      const parents = await Parent.find({
-        fullName: { $regex: parentSearchTerm, $options: "i" },
-      }).select("_id");
-      const parentIds = parents.map((p) => p._id);
-      query.parent = { $in: parentIds };
+    if (Object.keys(playerFilter).length) query.player = { $in: (await User.find(playerFilter).select("_id")).map((player) => player._id) };
+    if (searchParent) query.parent = { $in: (await Parent.find({ fullName: new RegExp(escapeSearch(searchParent), "i") }).select("_id")).map((parent) => parent._id) };
+    if (search) {
+      const regex = new RegExp(escapeSearch(search), "i");
+      const [players, parents] = await Promise.all([
+        User.find({ $or: [{ fullName: regex }, { firstName: regex }, { lastName: regex }] }).select("_id"),
+        Parent.find({ $or: [{ fullName: regex }, { email: regex }, { phone: regex }] }).select("_id"),
+      ]);
+      query.$and = [{ $or: [{ player: { $in: players.map((player) => player._id) } }, { parent: { $in: parents.map((parent) => parent._id) } }] }];
     }
-
-    // Only include players who are NOT yet included in the user model (not already active/enrolled users)
-    const enrolledUsers = await User.find({
-      playerStatus: "ACTIVE",
-      "assignedClasses.0": { $exists: true },
-      hasPendingRequest: false,
-    }).select("_id");
-    const enrolledUserIds = enrolledUsers.map((u) => u._id.toString());
-
-    if (searchPlayer || (isMedicalCondition !== undefined && isMedicalCondition !== "")) {
-      const playerFilter = {};
-
-      if (searchPlayer) {
-        playerFilter.$or = [
-          { fullName: { $regex: searchPlayer, $options: "i" } },
-          { firstName: { $regex: searchPlayer, $options: "i" } },
-          { lastName: { $regex: searchPlayer, $options: "i" } },
-        ];
-      }
-
-      if (isMedicalCondition !== undefined && isMedicalCondition !== "") {
-        playerFilter.isMedicalCondition =
-          isMedicalCondition === "true" || isMedicalCondition === true;
-      }
-
-      const players = await User.find(playerFilter).select("_id");
-      const playerIds = players
-        .map((p) => p._id.toString())
-        .filter((id) => !enrolledUserIds.includes(id));
-      query.player = { $in: playerIds };
-    } else if (enrolledUserIds.length > 0) {
-      query.player = { $nin: enrolledUserIds };
-    }
-
-    const total = await RegistrationRequest.countDocuments(query);
-
-    const requests = await RegistrationRequest.find(query)
-      .populate("parent", "fullName email phone address city")
-      .populate(
-        "player",
-        "firstName lastName fullName email phone dob gender profileImage rating classPaymentStatuses term assignedClasses prefferedFoot isMedicalCondition medicalConditionDetails hasPendingRequest"
-      )
-      .populate("category", "name")
-      .populate("programs", "name")
-      .populate("preferredTerm", "name startDate endDate")
-      .populate("preferredClasses", "name dayOfWeek startTime endTime venue location")
-      .populate("assignedBy", "name email")
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit);
-
-    return res.status(200).json({
-      success: true,
-      page,
-      limit,
-      total,
-      totalPages: Math.ceil(total / limit),
-      data: requests,
-    });
+    const [total, requests] = await Promise.all([
+      RegistrationRequest.countDocuments(query),
+      RegistrationRequest.find(query)
+        .populate("parent", "fullName email phone address city")
+        .populate("player", "firstName lastName fullName email phone dob gender profileImage rating classPaymentStatuses term assignedClasses prefferedFoot isMedicalCondition medicalConditionDetails hasPendingRequest playerStatus temporaryClass temporarySessionDate")
+        .populate("category", "name")
+        .populate("programs", "name")
+        .populate("preferredTerm", "name year startDate endDate status")
+        .populate("preferredClasses", "name dayOfWeek startTime endTime venue location term capacity status")
+        .populate("assignedBy", "name email")
+        .sort({ createdAt: -1, _id: -1 }).skip((page - 1) * limit).limit(limit),
+    ]);
+    return res.json({ success: true, page, limit, total, totalPages: Math.ceil(total / limit), data: requests.map(serializeRequest) });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
+    return res.status(error.name === "CastError" || error instanceof TypeError ? 400 : 500).json({ success: false, message: error.message });
   }
 };
 
@@ -432,215 +390,42 @@ exports.getPlayersByCategoryAndProgram = async (req, res) => {
 
 exports.assignClassesToPlayer = async (req, res) => {
   try {
-    const playerId = req.params?.playerId || req.body?.playerId;
-    const { registrationRequestId, classIds, paymentStatus } = req.body;
-
-    if (!playerId) {
-      return res.status(400).json({
-        success: false,
-        message: "playerId is required",
-      });
-    }
-
-    if (!classIds || !Array.isArray(classIds) || classIds.length === 0 || !paymentStatus) {
-      return res.status(400).json({
-        success: false,
-        message: "classIds (array) and paymentStatus are required",
-      });
-    }
-
-    const validPaymentStatuses = ["TRIAL", "UNPAID", "PAID", "EXTRA", "SUBSTITUTE", "TBC", "HANDSHAKE"];
-    if (!validPaymentStatuses.includes(paymentStatus)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid paymentStatus value",
-      });
-    }
-    const playerDoc = await User.findById(playerId);
-    if (!playerDoc) {
-      return res.status(404).json({
-        success: false,
-        message: "Player not found",
-      });
-    }
-    let requestDoc = null;
-    if (registrationRequestId) {
-      requestDoc = await RegistrationRequest.findById(registrationRequestId);
-      if (!requestDoc) {
-        return res.status(404).json({
-          success: false,
-          message: "Registration request not found",
-        });
-      }
-
-      if (requestDoc.player.toString() !== playerId.toString()) {
-        return res.status(400).json({
-          success: false,
-          message: "Registration request does not match specified player",
-        });
-      }
-
-      if (requestDoc.status === "COMPLETED") {
-        return res.status(400).json({
-          success: false,
-          message: "This registration request has already been completed",
-        });
-      }
-    } else {
-      requestDoc = await RegistrationRequest.findOne({
-        player: playerId,
-        status: "PENDING",
-      }).sort({ createdAt: -1 });
-    }
-    const selectedClasses = await Class.find({ _id: { $in: classIds } });
-    if (selectedClasses.length !== classIds.length) {
-      return res.status(404).json({
-        success: false,
-        message: "One or more selected classes were not found",
-      });
-    }
-
-    const firstClassTermStr = selectedClasses[0].term.toString();
-
-    for (const cls of selectedClasses) {
-      if (cls.term.toString() !== firstClassTermStr) {
-        return res.status(400).json({
-          success: false,
-          message: "All selected classes must belong to the same Term",
-        });
-      }
-    }
-    const derivedTermId = selectedClasses[0].term;
-
-    const assignedCategory = selectedClasses[0].category || (requestDoc ? requestDoc.category : playerDoc.category);
-    const newProgramIds = selectedClasses.map((c) => c.program.toString());
-    if (requestDoc && requestDoc.programs) {
-      newProgramIds.push(...requestDoc.programs.map((p) => p.toString()));
-    }
-    if (playerDoc.programs) {
-      newProgramIds.push(...playerDoc.programs.map((p) => p.toString()));
-    }
-
-    const updatedProgramIds = [...new Set(newProgramIds.filter(Boolean))];
-
-    await Class.updateMany(
-      { _id: { $in: classIds } },
-      { $addToSet: { players: playerId } }
-    );
-
-    if (requestDoc) {
-      requestDoc.status = "COMPLETED";
-      requestDoc.assignedBy = req.admin ? req.admin._id : null;
-      requestDoc.assignedAt = new Date();
-      await requestDoc.save();
-    }
-
-    const remainingPendingRequests = await RegistrationRequest.countDocuments({
-      player: playerId,
-      status: "PENDING",
-    });
-
-    if (remainingPendingRequests === 0) {
-      playerDoc.hasPendingRequest = false;
-    }
-
-    const existingAssignedClassIds = (playerDoc.assignedClasses || []).map((id) =>
-      id.toString()
-    );
-    const updatedAssignedClassIds = [
-      ...new Set([
-        ...existingAssignedClassIds,
-        ...classIds.map((id) => id.toString()),
-      ]),
-    ];
-
-    playerDoc.assignedClasses = updatedAssignedClassIds;
-    if (playerDoc.removedClasses) {
-      playerDoc.removedClasses = playerDoc.removedClasses.filter(
-        (c) => !classIds.map((id) => id.toString()).includes(c.toString())
-      );
-    }
-    playerDoc.term = derivedTermId;
-    playerDoc.classPaymentStatuses = playerDoc.classPaymentStatuses || [];
-    for (const cid of classIds) {
-      const cidStr = cid.toString();
-      const existingEntry = playerDoc.classPaymentStatuses.find(
-        (cps) => cps.class && cps.class.toString() === cidStr
-      );
-      if (existingEntry) {
-        existingEntry.paymentStatus = paymentStatus;
-      } else {
-        playerDoc.classPaymentStatuses.push({
-          class: cid,
-          paymentStatus: paymentStatus,
-        });
-      }
-    }
-    playerDoc.category = assignedCategory || playerDoc.category;
-    playerDoc.categories = playerDoc.categories || [];
-    if (assignedCategory) {
-      const catStr = assignedCategory.toString();
-      if (!playerDoc.categories.some((c) => c.toString() === catStr)) {
-        playerDoc.categories.push(assignedCategory);
-      }
-    }
-    playerDoc.programs = updatedProgramIds;
-    playerDoc.playerStatus = "ACTIVE";
-    await playerDoc.save();
-
-    if (paymentStatus == "UNPAID") {
-      try {
-        for (const clsId of classIds) {
-          await generateClassInvoice({ userId: playerId, classId: clsId });
-        }
-      } catch (invErr) {
-        console.error("Auto invoice generation error in assignClassesToPlayer:", invErr.message);
-      }
-    }
-
-    try {
-      const termObj = await Term.findById(derivedTermId).select("name");
-      const classNames = selectedClasses.map((c) => c.name).join(", ");
-      const notificationMsg = `Your player ${playerDoc.fullName} has been allocated and enrolled.
-Assigned Classes: ${classNames}
-Term: ${termObj ? termObj.name : "N/A"}
-Payment Status: ${paymentStatus}`;
-
-      await sendNotification({
-        recipientType: "PARENT",
-        parentId: playerDoc.parentId,
-        title: "Player Enrollment Completed 🎉",
-        message: notificationMsg,
-        type: "PLAYER_ALLOCATED",
-        data: {
-          parentId: playerDoc.parentId ? String(playerDoc.parentId) : "",
-          playerId: playerDoc._id ? String(playerDoc._id) : "",
-          requestId: requestDoc._id ? String(requestDoc._id) : "",
-          classIds: classIds.map(String),
-          termId: derivedTermId ? String(derivedTermId) : "",
-          paymentStatus,
-        },
-      });
-    } catch (notifErr) {
-      console.error("Failed to create parent allocation notification:", notifErr.message);
-    }
-
-    if (broadcastSidebarBadges) {
-      broadcastSidebarBadges().catch(() => {});
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Player allocated to classes and enrolled successfully",
-      data: {
-        player: playerDoc,
-        registrationRequest: requestDoc,
-      },
-    });
+    const result = await enrollPlayer({ ...req.body, playerId: req.params?.playerId || req.body?.playerId }, req.admin);
+    if (broadcastSidebarBadges) broadcastSidebarBadges().catch(() => {});
+    return res.json({ success: true, message: result.repeated ? "This allocation was already completed" : "Player approved and allocated successfully", data: { player: result.player, registrationRequest: result.registrationRequest }, repeated: result.repeated });
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
+    return res.status(error.statusCode || error.status || (error.name === "CastError" || error instanceof TypeError ? 400 : error.code === 11000 ? 409 : 500)).json({ success: false, message: error.message });
   }
+};
+
+exports.rejectRegistrationRequest = async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    if (!["SUPER_ADMIN", "ADMIN"].includes(req.admin?.role)) return res.status(403).json({ success: false, message: "Administrator access required" });
+    const reason = String(req.body.reason || "").trim();
+    if (!reason || reason.length > 2000) return res.status(400).json({ success: false, message: "Provide a rejection reason of 1 to 2000 characters" });
+    let request;
+    await session.withTransaction(async () => {
+      request = await RegistrationRequest.findById(req.params.id).session(session);
+      if (!request) throw Object.assign(new Error("Registration request not found"), { statusCode: 404 });
+      if (request.status === "REJECTED" && request.rejectionReason === reason) return;
+      if (request.status !== "PENDING") throw Object.assign(new Error("This request was already resolved"), { statusCode: 409 });
+      request.status = "REJECTED";
+      request.rejectionReason = reason;
+      request.assignedBy = req.admin._id;
+      request.assignedAt = new Date();
+      await request.save({ session });
+      const remaining = await RegistrationRequest.countDocuments({ player: request.player, status: "PENDING" }).session(session);
+      const player = await User.findById(request.player).session(session);
+      if (player) {
+        player.hasPendingRequest = remaining > 0;
+        if (!remaining && !player.assignedClasses?.length && player.playerStatus === "PENDING_APPROVAL") player.playerStatus = "REJECTED";
+        await player.save({ session });
+      }
+      await AuditLog.create([{ user: req.admin._id, userRole: req.admin.role, action: "REGISTRATION_REJECTED", entityType: "RegistrationRequest", entityId: request._id, newValue: { reason }, description: "Registration request rejected; player and historical records retained" }], { session });
+    });
+    if (broadcastSidebarBadges) broadcastSidebarBadges().catch(() => {});
+    return res.json({ success: true, message: "Request rejected; player history retained", data: request });
+  } catch (error) { return res.status(error.statusCode || (error.name === "CastError" ? 400 : 500)).json({ success: false, message: error.message }); }
+  finally { await session.endSession(); }
 };

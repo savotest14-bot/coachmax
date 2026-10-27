@@ -127,6 +127,7 @@ const {
   updateTeamPlayerStatistics,
   getTeamPlayerStatistics,
   updateLeagueTeamStatistics,
+  updateLeagueTeamStatus,
   recalculateLadder,
   generateRandomFixtures,
 } = require("../controllers/leagueController");
@@ -190,6 +191,7 @@ const {
 
 const auth = require("../middleware/authMiddleware");
 const isAdmin = require("../middleware/isAdmin");
+const { requireStaff, requireClassAccess, requireTeamAccess, requireEventAccess, requirePlayerAccess, requireTrainingAccess } = require("../middleware/staffAccess");
 const { uploads } = require("../utils/upload");
 const {
   createEvent,
@@ -216,23 +218,26 @@ const {
   getUnallocatedPlayers,
   assignClassesToPlayer,
   getPlayersByCategoryAndProgram,
+  rejectRegistrationRequest,
 } = require("../controllers/registrationRequestController");
 
 const router = express.Router();
+router.post("/login", require("../middleware/authRateLimit"), adminLogin);
+router.use(auth, requireStaff);
 
 // Registration Requests & Enrollment Workflow (Admin)
 router.get("/registration-requests", auth, isAdmin, getRegistrationRequests);
 router.get("/unallocated-players", auth, isAdmin, getUnallocatedPlayers);
 router.get("/players/search", auth, isAdmin, getPlayersByCategoryAndProgram);
 router.patch("/player/:playerId/assign-classes", auth, isAdmin, assignClassesToPlayer);
+router.patch("/registration-requests/:id/reject", auth, isAdmin, rejectRegistrationRequest);
 router.get("/sidebar-badges", auth, isAdmin, getSidebarBadges);
 
 
 // Administrative Auth & Players Mod
-router.post("/login", adminLogin);
 router.post("/logout", auth, logout);
-router.get("/getUsers", auth, getUsers);
-router.get("/playerStats", auth, getPlayerStats);
+router.get("/getUsers", auth, isAdmin, getUsers);
+router.get("/playerStats", auth, isAdmin, getPlayerStats);
 router.put("/updatePaymentStatus/:userId", auth, isAdmin, updatePaymentStatus);
 router.put("/updateRating/:userId", auth, isAdmin, updatePlayerRating);
 router.post("/assignClass/:userId", auth, isAdmin, assignClassToUser);
@@ -256,7 +261,7 @@ router.put("/updateEventStatus/:id", auth, isAdmin, updateEventStatus);
 router.put("/updateEvent/:id", auth, isAdmin, uploads.single("eventImg"), updateEvent);
 router.delete("/deleteEvent/:id", auth, isAdmin, deleteEvent);
 router.get("/getEventParticipants/:eventId", auth, isAdmin, getEventParticipants);
-router.get("/getEventDetails/:eventId", auth, getEventDetailsAdmin);
+router.get("/getEventDetails/:eventId", auth, requireEventAccess, getEventDetailsAdmin);
 
 // Holiday Camp Dates & Sessions Configuration
 router.post("/events/:eventId/sessions", auth, isAdmin, configureCampSessions);
@@ -266,18 +271,18 @@ router.post("/events/:eventId/chat/day", auth, isAdmin, sendEventDayBroadcast);
 router.get("/events/:eventId/chat/day/preview", auth, isAdmin, previewEventDayBroadcast);
 
 // Holiday Camp & Event Attendance
-router.get("/events/:eventId/attendance-grid", auth, getEventAttendanceGrid);
-router.post("/events/:eventId/attendance/single", auth, markEventSingleAttendance);
-router.post("/events/:eventId/attendance/bulk", auth, markEventBulkAttendance);
-router.get("/events/registrations/:registrationId", auth, getEventRegistrationDetails);
+router.get("/events/:eventId/attendance-grid", auth, requireEventAccess, getEventAttendanceGrid);
+router.post("/events/:eventId/attendance/single", auth, requireEventAccess, markEventSingleAttendance);
+router.post("/events/:eventId/attendance/bulk", auth, requireEventAccess, markEventBulkAttendance);
+router.get("/events/registrations/:registrationId", auth, isAdmin, getEventRegistrationDetails);
 router.delete("/events/registrations/:registrationId", auth, isAdmin, removeEventRegistration);
-router.patch("/events/registrations/:registrationId/payment-status", auth, updateEventRegistrationPaymentStatus);
-router.put("/events/registrations/:registrationId/payment-status", auth, updateEventRegistrationPaymentStatus);
+router.patch("/events/registrations/:registrationId/payment-status", auth, isAdmin, updateEventRegistrationPaymentStatus);
+router.put("/events/registrations/:registrationId/payment-status", auth, isAdmin, updateEventRegistrationPaymentStatus);
 
 // Data Exports
 router.post("/exportUsers", auth, isAdmin, exportUsers);
 router.post("/exportEventParticipants/:eventId", auth, isAdmin, exportEventParticipants);
-router.get("/exportClassCSV", auth, exportClassCSV);
+router.get("/exportClassCSV", auth, requireClassAccess, exportClassCSV);
 
 // Taxonomies creation & deletion
 router.post("/createCategory", auth, isAdmin, createCategory);
@@ -302,7 +307,7 @@ router.get("/term/:termId/earnings", auth, isAdmin, getTermEarningsReport);
 router.post("/createClass", auth, isAdmin, createClass);
 router.delete("/deleteClass/:id", auth, isAdmin, deleteClassPermanently);
 router.get("/getAllClasses", auth, isAdmin, getAllClasses);
-router.get("/getAllClassesForAssign", getAllClassesForAssign);
+router.get("/getAllClassesForAssign", isAdmin, getAllClassesForAssign);
 router.get("/getClassById/:id", auth, isAdmin, getClassById);
 router.put("/updateClass/:id", auth, isAdmin, updateClass);
 router.post("/duplicateClass/:id", auth, isAdmin, duplicateClass);
@@ -311,23 +316,23 @@ router.get("/getCurrentYearTerms", auth, isAdmin, getCurrentYearTerms);
 router.get("/getClassesByTerm/:termId", auth, isAdmin, getClassesByTerm);
 
 // Class roster and attendance rolls
-router.post("/markAttendance/:classId", auth, markAttendance);
-router.post("/markSingleAttendance/:classId", auth, markSingleAttendance);
-router.get("/getAttendanceByClass/:classId", auth, getAttendanceByClass);
-router.get("/getAttendanceByDate/:classId", auth, getAttendanceByDate);
-router.get("/getClassSessions/:classId", auth, getClassSessions);
+router.post("/markAttendance/:classId", auth, requireClassAccess, markAttendance);
+router.post("/markSingleAttendance/:classId", auth, requireClassAccess, markSingleAttendance);
+router.get("/getAttendanceByClass/:classId", auth, requireClassAccess, getAttendanceByClass);
+router.get("/getAttendanceByDate/:classId", auth, requireClassAccess, getAttendanceByDate);
+router.get("/getClassSessions/:classId", auth, requireClassAccess, getClassSessions);
 router.get("/getClassPlayers/:classId", auth, isAdmin, getClassPlayers);
-router.get("/getClassFullTable", auth, getClassFullTable);
-router.get("/getClassFiltersWithTimeSlots", getClassFiltersWithTimeSlots);
+router.get("/getClassFullTable", auth, requireClassAccess, getClassFullTable);
+router.get("/getClassFiltersWithTimeSlots", isAdmin, getClassFiltersWithTimeSlots);
 
 // Team roster and attendance rolls
-router.post("/markTeamAttendance/:teamId", auth, markTeamAttendance);
-router.post("/markSingleTeamAttendance/:teamId", auth, markSingleTeamAttendance);
-router.get("/getAttendanceByTeam/:teamId", auth, getAttendanceByTeam);
-router.get("/getAttendanceByTeamDate/:teamId", auth, getAttendanceByTeamDate);
-router.get("/getTeamSessions/:teamId", auth, getTeamSessions);
-router.get("/getTeamFullTable", auth, getTeamFullTable);
-router.get("/exportTeamCSV", exportTeamCSV);
+router.post("/markTeamAttendance/:teamId", auth, requireTeamAccess, markTeamAttendance);
+router.post("/markSingleTeamAttendance/:teamId", auth, requireTeamAccess, markSingleTeamAttendance);
+router.get("/getAttendanceByTeam/:teamId", auth, requireTeamAccess, getAttendanceByTeam);
+router.get("/getAttendanceByTeamDate/:teamId", auth, requireTeamAccess, getAttendanceByTeamDate);
+router.get("/getTeamSessions/:teamId", auth, requireTeamAccess, getTeamSessions);
+router.get("/getTeamFullTable", auth, requireTeamAccess, getTeamFullTable);
+router.get("/exportTeamCSV", requireTeamAccess, exportTeamCSV);
 
 // Coaches CRUD
 router.post("/createCoach", auth, isAdmin, uploads.single("profileImage"), createCoach);
@@ -337,14 +342,14 @@ router.get("/coaches/:coachId/detail", auth, isAdmin, getCoachDetail);
 router.put("/updateCoach/:id", auth, isAdmin, uploads.single("profileImage"), updateCoach);
 router.put("/toggleCoachActive/:id", auth, isAdmin, toggleCoachActiveStatus);
 router.put("/changeCoachPassword/:id", auth, isAdmin, changeCoachPassword);
-router.get("/getCoachClassesWithSessions/:coachId", auth, getCoachClassesWithSessions);
+router.get("/getCoachClassesWithSessions/:coachId", auth, isAdmin, getCoachClassesWithSessions);
 
 // Assessments (Admin/Coach)
-router.post("/assessments", auth, createAssessment);
+router.post("/assessments", auth, requirePlayerAccess, createAssessment);
 
 // Training Session publishing (Admin/Coach)
-router.post("/training", auth, uploads.array("attachments", 5), createTrainingSession);
-router.put("/training/:sessionId", auth, uploads.array("attachments", 5), updateTrainingSession);
+router.post("/training", auth, uploads.array("attachments", 5), requireClassAccess, createTrainingSession);
+router.put("/training/:sessionId", auth, requireTrainingAccess, uploads.array("attachments", 5), updateTrainingSession);
 
 // League Tournament configurations (Admin only)
 router.post("/leagues", auth, isAdmin, uploads.single("leagueLogo"), createLeague);
@@ -362,6 +367,7 @@ router.post("/leagues/:leagueId/teams", auth, isAdmin, addTeamToLeague);
 router.delete("/leagues/:leagueId/teams/:teamId", auth, isAdmin, removeTeamFromLeague);
 router.post("/leagues/:leagueId/recalculate-ladder", auth, isAdmin, recalculateLadder);
 router.put("/leagues/:leagueId/teams/:teamId/statistics", auth, isAdmin, updateLeagueTeamStatistics);
+router.patch("/leagues/:leagueId/teams/:teamId/status", auth, isAdmin, updateLeagueTeamStatus);
 router.post("/leagues/:leagueId/generate-random-fixtures", auth, isAdmin, generateRandomFixtures);
 router.post("/leagues/:leagueId/fixtures", auth, isAdmin, createFixture);
 router.put("/leagues/:leagueId/fixtures/:fixtureId", auth, isAdmin, updateFixture);
@@ -389,8 +395,8 @@ router.get("/available-players", auth, isAdmin, getAvailablePlayers);
 router.post("/fixtures", auth, isAdmin, createFixture);
 router.put("/fixtures/:matchId", auth, isAdmin, updateFixture);
 router.delete("/fixtures/:matchId", auth, isAdmin, deleteFixture);
-router.post("/fixtures/:matchId/events", auth, recordMatchEvent);
-router.post("/fixtures/:matchId/complete", auth, completeMatch);
+router.post("/fixtures/:matchId/events", auth, isAdmin, recordMatchEvent);
+router.post("/fixtures/:matchId/complete", auth, isAdmin, completeMatch);
 router.put(
   "/player-statistics/:playerId",
   auth,

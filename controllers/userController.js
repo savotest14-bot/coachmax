@@ -20,7 +20,7 @@ const bcrypt = require("bcryptjs");
 const generateToken = require("../utils/generateToken");
 const mongoose = require("mongoose");
 const { sendNotification } = require("../services/notificationService");
-const { dateOnly, dateOnlyStartUtc, dateOnlyEndUtc } = require("../utils/dateTime");
+const { dateOnly, dateOnlyToUtc, dateOnlyStartUtc, dateOnlyEndUtc, serializeTerm, ageGroupForYear, ageGroupContextYear, formatDateOnly } = require("../utils/dateTime");
 
 const createAdminNotificationForRequest = async ({
   parent,
@@ -228,19 +228,7 @@ exports.register = async (req, res) => {
         }
       }
 
-      let parsedDob = null;
-
-      if (dob) {
-        const parts = dob.split("/");
-
-        if (parts.length === 3) {
-          parsedDob = new Date(
-            `${parts[2]}-${parts[1]}-${parts[0]}`
-          );
-        } else {
-          parsedDob = new Date(dob);
-        }
-      }
+      const parsedDob = dob ? dateOnlyToUtc(dob, "Date of birth") : null;
 
       let profileImage = null;
 
@@ -362,7 +350,7 @@ exports.register = async (req, res) => {
     await session.abortTransaction();
     session.endSession();
 
-    return res.status(500).json({
+    return res.status(error instanceof TypeError ? 400 : 500).json({
       success: false,
       message: error.message,
     });
@@ -602,19 +590,7 @@ exports.addChild = async (req, res) => {
       }
     }
 
-    let parsedDob = null;
-
-    if (dob) {
-      const parts = dob.split("/");
-
-      if (parts.length === 3) {
-        parsedDob = new Date(
-          `${parts[2]}-${parts[1]}-${parts[0]}`
-        );
-      } else {
-        parsedDob = new Date(dob);
-      }
-    }
+    const parsedDob = dob ? dateOnlyToUtc(dob, "Date of birth") : null;
 
     let profileImage = null;
 
@@ -702,7 +678,7 @@ exports.addChild = async (req, res) => {
       },
     });
   } catch (error) {
-    return res.status(500).json({
+    return res.status(error instanceof TypeError ? 400 : 500).json({
       success: false,
       message: error.message,
     });
@@ -998,8 +974,8 @@ exports.getMyClasses = async (req, res) => {
           );
           if (record) {
             status = record.status;
-            reason = record.reason || record.remarks || "";
-            remarks = record.remarks || "";
+            reason = record.parentAbsenceReason || (record.markedByParent && !record.noteAuthor ? record.reason || record.remarks || "" : "");
+            remarks = reason;
             markedByParent = record.markedByParent || false;
           } else {
             status = "ABSENT";
@@ -1185,6 +1161,8 @@ exports.getMyAttendanceByClass = async (req, res) => {
     if (!cls) {
       return res.status(404).json({ success: false, message: "Class not found" });
     }
+
+    if (!(cls.players || []).some((id) => String(id) === String(playerId))) return res.status(403).json({ success: false, message: "Player is not enrolled in this class" });
 
     const allSessions = generateClassSessions(cls.term, cls);
     const sessionDates = allSessions.map((d) => new Date(d).toISOString().split("T")[0]);
@@ -1444,8 +1422,8 @@ exports.getMyTeams = async (req, res) => {
           );
           if (record) {
             status = record.status;
-            reason = record.reason || record.remarks || "";
-            remarks = record.remarks || "";
+            reason = record.parentAbsenceReason || (record.markedByParent && !record.noteAuthor ? record.reason || record.remarks || "" : "");
+            remarks = reason;
             markedByParent = record.markedByParent || false;
           } else {
             status = "ABSENT";
@@ -1637,6 +1615,7 @@ exports.getMyTeams = async (req, res) => {
 
 exports.getMyAttendanceByTeam = async (req, res) => {
   try {
+    const { teamId } = req.params;
     let playerId = req.query.playerId;
     if (!playerId) {
       const firstChild = await User.findOne({ parentId: req.parent._id });
@@ -1669,6 +1648,9 @@ exports.getMyAttendanceByTeam = async (req, res) => {
     if (!team) {
       return res.status(404).json({ success: false, message: "Team not found" });
     }
+
+    const isMember = [...(team.players || []), ...(team.leagues || []).flatMap((league) => league.players || [])].some((entry) => String(entry.player?._id || entry.player || "") === String(playerId));
+    if (!isMember) return res.status(403).json({ success: false, message: "Player is not enrolled in this team" });
 
     const teamMembers = (team.players || []).map((item) => {
       const p = item.player && typeof item.player === "object" ? item.player : null;
@@ -1927,7 +1909,8 @@ exports.getAllTerms = async (req, res) => {
       filter.isEvent = false;
     }
     if (year) {
-      filter.year = Number(year);
+      try { filter.year = ageGroupContextYear(year); }
+      catch (error) { return res.status(400).json({ message: error.message }); }
     }
 
     const terms = await Term.find(filter).sort({
@@ -1936,7 +1919,7 @@ exports.getAllTerms = async (req, res) => {
     });
 
     res.json({
-      data: terms,
+      data: terms.map(serializeTerm),
     });
   } catch (err) {
     res.status(500).json({
@@ -1970,21 +1953,7 @@ exports.getPlayerProfile = async (req, res) => {
       player: player._id,
     });
 
-    let age = null;
-
-    if (player.dob) {
-      const today = new Date();
-      age = today.getFullYear() - player.dob.getFullYear();
-
-      const month = today.getMonth() - player.dob.getMonth();
-
-      if (
-        month < 0 ||
-        (month === 0 && today.getDate() < player.dob.getDate())
-      ) {
-        age--;
-      }
-    }
+    const age = ageGroupForYear(player.dob);
 
     const rawAssignedTeams = await Team.find({ "players.player": playerId })
       .populate("term", "name startDate endDate")
@@ -2122,6 +2091,8 @@ exports.getPlayerProfile = async (req, res) => {
         profileImage: player.profileImage,
 
         age,
+        ageGroup: age === null ? null : `U${age}`,
+        ageGroupYear: ageGroupContextYear(),
         dob: player.dob,
         joinedDate: player.joinedDate,
 
@@ -2213,7 +2184,7 @@ exports.markPlayerAbsent = async (req, res) => {
       });
     }
 
-    if (!reason || !reason.trim()) {
+    if (typeof reason !== "string" || !reason.trim() || reason.length > 2000) {
       return res.status(400).json({
         success: false,
         message: "Reason for absence is required",
@@ -2238,7 +2209,7 @@ exports.markPlayerAbsent = async (req, res) => {
       });
     }
 
-    const today = dateOnlyStartUtc(dateOnly(new Date(), "today"), "today");
+    const today = dateOnlyStartUtc(todayDateOnly(), "today");
 
     if (targetDate.getTime() < today.getTime()) {
       return res.status(400).json({
@@ -2321,6 +2292,9 @@ exports.markPlayerAbsent = async (req, res) => {
         attendanceDoc.records[recordIndex].remarks = reason.trim();
         attendanceDoc.records[recordIndex].reason = reason.trim();
         attendanceDoc.records[recordIndex].markedByParent = true;
+        attendanceDoc.records[recordIndex].parentAbsenceReason = reason.trim();
+        attendanceDoc.records[recordIndex].parentReporter = parentId;
+        attendanceDoc.records[recordIndex].parentReportedAt = new Date();
       } else {
         attendanceDoc.records.push({
           player: playerId,
@@ -2328,6 +2302,9 @@ exports.markPlayerAbsent = async (req, res) => {
           remarks: reason.trim(),
           reason: reason.trim(),
           markedByParent: true,
+          parentAbsenceReason: reason.trim(),
+          parentReporter: parentId,
+          parentReportedAt: new Date(),
         });
       }
 
@@ -2347,7 +2324,7 @@ exports.markPlayerAbsent = async (req, res) => {
           recipientType: "ADMIN",
           adminId: null,
           title: "Player Absence Notice",
-          message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for class "${classDoc.name}" on ${formattedDateStr}. Reason: ${reason.trim()}`,
+          message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for class "${classDoc.name}" on ${formatDateOnly(targetDate)}. Reason: ${reason.trim()}`,
           type: "ATTENDANCE_ALERT",
           data: notifData,
         });
@@ -2357,7 +2334,7 @@ exports.markPlayerAbsent = async (req, res) => {
             recipientType: "COACH",
             coachId: classDoc.coach,
             title: "Player Absence Notice",
-            message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for class "${classDoc.name}" on ${formattedDateStr}. Reason: ${reason.trim()}`,
+            message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for class "${classDoc.name}" on ${formatDateOnly(targetDate)}. Reason: ${reason.trim()}`,
             type: "ATTENDANCE_ALERT",
             data: notifData,
           });
@@ -2439,6 +2416,9 @@ exports.markPlayerAbsent = async (req, res) => {
         attendanceDoc.records[recordIndex].remarks = reason.trim();
         attendanceDoc.records[recordIndex].reason = reason.trim();
         attendanceDoc.records[recordIndex].markedByParent = true;
+        attendanceDoc.records[recordIndex].parentAbsenceReason = reason.trim();
+        attendanceDoc.records[recordIndex].parentReporter = parentId;
+        attendanceDoc.records[recordIndex].parentReportedAt = new Date();
       } else {
         attendanceDoc.records.push({
           player: playerId,
@@ -2446,6 +2426,9 @@ exports.markPlayerAbsent = async (req, res) => {
           remarks: reason.trim(),
           reason: reason.trim(),
           markedByParent: true,
+          parentAbsenceReason: reason.trim(),
+          parentReporter: parentId,
+          parentReportedAt: new Date(),
         });
       }
 
@@ -2465,7 +2448,7 @@ exports.markPlayerAbsent = async (req, res) => {
           recipientType: "ADMIN",
           adminId: null,
           title: "Player Absence Notice",
-          message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for team "${teamDoc.teamName}" on ${formattedDateStr}. Reason: ${reason.trim()}`,
+          message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for team "${teamDoc.teamName}" on ${formatDateOnly(targetDate)}. Reason: ${reason.trim()}`,
           type: "ATTENDANCE_ALERT",
           data: notifData,
         });
@@ -2475,7 +2458,7 @@ exports.markPlayerAbsent = async (req, res) => {
             recipientType: "COACH",
             coachId: teamDoc.coach,
             title: "Player Absence Notice",
-            message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for team "${teamDoc.teamName}" on ${formattedDateStr}. Reason: ${reason.trim()}`,
+            message: `${req.parent.fullName} marked ${childDoc.fullName} ABSENT for team "${teamDoc.teamName}" on ${formatDateOnly(targetDate)}. Reason: ${reason.trim()}`,
             type: "ATTENDANCE_ALERT",
             data: notifData,
           });

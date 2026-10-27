@@ -39,6 +39,8 @@ const {
   comparePlayersByPaymentStatus,
   paymentStatusRankExpression,
 } = require("../utils/paymentStatus");
+const { dateOnly, dateOnlyToUtc, serializeTerm, ageGroupContextYear, ageGroupDobRange, parseAgeGroupRange, formatDateOnly, formatTimestamp, dateOnlyStartUtc, dateOnlyEndUtc, todayDateOnly, calendarTimestampRange } = require("../utils/dateTime");
+const { validatedTermData } = require("../utils/termDates");
 
 exports.adminLogin = async (req, res) => {
   try {
@@ -316,36 +318,28 @@ exports.getUsers = async (req, res) => {
 
     // Age Group filter
     if (ageGroup && ageGroup !== "All") {
-      const ageMatches = ageGroup.match(/\d+/g);
+      let ageRange;
+      try { ageRange = parseAgeGroupRange(ageGroup); }
+      catch (error) { return res.status(400).json({ message: error.message }); }
       const orAgeList = [];
 
-      const matchingAgePrograms = await Program.find({
-        $or: [
-          { ageGroup: { $regex: ageGroup, $options: "i" } },
-          { name: { $regex: ageGroup, $options: "i" } },
-        ],
-      }).distinct("_id");
-
-      // Keep support for named/range age groups, while single values such as
-      // U6 and U7 are resolved from the player's actual date of birth below.
-      if (matchingAgePrograms.length > 0 && (!ageMatches || ageMatches.length === 0 || ageGroup.includes("-"))) {
+      // Named groups may match a program; numeric U groups always use birth year.
+      if (!ageRange) {
+        const escaped = String(ageGroup).slice(0, 100).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const matchingAgePrograms = await Program.find({ $or: [{ ageGroup: { $regex: escaped, $options: "i" } }, { name: { $regex: escaped, $options: "i" } }] }).distinct("_id");
         orAgeList.push({ programs: { $in: matchingAgePrograms } });
       }
 
-      if (ageMatches && ageMatches.length > 0) {
-        const today = new Date();
-        if (ageMatches.length >= 2) {
-          const minAge = parseInt(ageMatches[0], 10);
-          const maxAge = parseInt(ageMatches[1], 10);
-          const minDob = new Date(today.getFullYear() - maxAge - 1, today.getMonth(), today.getDate() + 1);
-          const maxDob = new Date(today.getFullYear() - minAge, today.getMonth(), today.getDate());
-          orAgeList.push({ dob: { $gte: minDob, $lte: maxDob } });
-        } else {
-          const targetAge = parseInt(ageMatches[0], 10);
-          const minDob = new Date(today.getFullYear() - targetAge - 1, today.getMonth(), today.getDate() + 1);
-          const maxDob = new Date(today.getFullYear() - targetAge, today.getMonth(), today.getDate());
-          orAgeList.push({ dob: { $gte: minDob, $lte: maxDob } });
+      if (ageRange) {
+        let contextYear = ageGroupContextYear();
+        if (term && term !== "All") {
+          if (!mongoose.Types.ObjectId.isValid(term)) return res.status(400).json({ message: "Invalid term ID" });
+          const ageTerm = await Term.findById(term).select("year").lean();
+          if (!ageTerm) return res.status(404).json({ message: "Term not found" });
+          contextYear = ageGroupContextYear(ageTerm.year);
         }
+        try { orAgeList.push({ dob: ageGroupDobRange(ageRange.minAge, ageRange.maxAge, contextYear) }); }
+        catch (error) { return res.status(400).json({ message: error.message }); }
       }
 
       if (orAgeList.length > 0) {
@@ -1128,85 +1122,11 @@ exports.updatePlayerRating = async (req, res) => {
   }
 };
 
-exports.assignClassToUser = async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
-  try {
-    const { userId } = req.params;
-    const { classId } = req.body;
-    console.log("Assigning class to user:", userId);
-    console.log("Class ID:", classId);
-    const user = await User.findById(userId).session(session);
-    const classData = await Class.findById(classId).session(session);
-
-    if (!user) throw new Error("User not found");
-    if (!classData) throw new Error("Class not found");
-
-    const userProgramIds = (user.programs || []).map(p => p.toString());
-    if (
-      !userProgramIds.includes(classData.program.toString()) ||
-      user.category.toString() !== classData.category.toString()
-    ) {
-      throw new Error("User not eligible for this class");
-    }
-
-    const alreadyAssigned = classData.players.some(
-      (id) => id.toString() === userId
-    );
-    console.log("Already assigned:", alreadyAssigned);
-    if (alreadyAssigned) {
-      throw new Error("User already assigned");
-    }
-
-    const updatedClass = await Class.findOneAndUpdate(
-      {
-        _id: classId,
-        $expr: {
-          $lt: [{ $size: "$players" }, "$capacity"],
-        },
-      },
-      {
-        $addToSet: { players: userId },
-      },
-      { new: true, session }
-    );
-
-    if (!updatedClass) {
-      throw new Error("Class is full");
-    }
-
-    if (!user.assignedClasses.some(id => id.toString() === classId)) {
-      user.assignedClasses.push(classId);
-    }
-
-    if (user.removedClasses) {
-      user.removedClasses = user.removedClasses.filter(id => id.toString() !== classId.toString());
-    }
-
-    if (!user.term) {
-      user.term = classData.term;
-    }
-
-    await user.save({ session });
-
-    await session.commitTransaction();
-    session.endSession();
-
-    try {
-      await generateClassInvoice({ userId, classId });
-    } catch (invErr) {
-      console.error("Auto invoice generation error in assignClassToUser:", invErr.message);
-    }
-
-    res.json({ message: "Class assigned successfully" });
-
-  } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-
-    res.status(400).json({ message: err.message });
-  }
+exports.assignClassToUser = async (req, res, next) => {
+  const { classId, paymentStatus = 'TRIAL', registrationRequestId } = req.body;
+  req.params.playerId = req.params.userId;
+  req.body = { classIds: [classId], paymentStatus, registrationRequestId };
+  return require('./registrationRequestController').assignClassesToPlayer(req, res, next);
 };
 
 exports.removeClassFromUser = async (req, res) => {
@@ -1269,124 +1189,39 @@ exports.removeClassFromUser = async (req, res) => {
 
 exports.transferPlayerClass = async (req, res) => {
   const session = await mongoose.startSession();
-  session.startTransaction();
-
   try {
     const userId = req.params?.userId || req.params?.playerId || req.body?.userId || req.body?.playerId;
     const { fromClassId, toClassId } = req.body;
-
-    if (!userId || !fromClassId || !toClassId) {
-      return res.status(400).json({
-        success: false,
-        message: "userId/playerId, fromClassId, and toClassId are required",
-      });
-    }
-
-    if (fromClassId.toString() === toClassId.toString()) {
-      return res.status(400).json({
-        success: false,
-        message: "fromClassId and toClassId cannot be the same class",
-      });
-    }
-
-    const user = await User.findById(userId).session(session);
-    const fromClass = await Class.findById(fromClassId).session(session);
-    const toClass = await Class.findById(toClassId).session(session);
-
-    if (!user) {
-      return res.status(404).json({ success: false, message: "Player not found" });
-    }
-    if (!fromClass) {
-      return res.status(404).json({ success: false, message: "Previous class (fromClass) not found" });
-    }
-    if (!toClass) {
-      return res.status(404).json({ success: false, message: "Target class (toClass) not found" });
-    }
-
-    const isAssigned = (user.assignedClasses || []).some(
-      (c) => c.toString() === fromClassId.toString()
-    );
-
-    if (!isAssigned) {
-      return res.status(400).json({
-        success: false,
-        message: "Player is not currently assigned to the specified fromClass",
-      });
-    }
-
-    if (toClass.capacity && toClass.players.length >= toClass.capacity) {
-      return res.status(400).json({
-        success: false,
-        message: "Target class is at maximum capacity",
-      });
-    }
-
-    user.assignedClasses = (user.assignedClasses || []).filter(
-      (c) => c.toString() !== fromClassId.toString()
-    );
-
-    user.removedClasses = user.removedClasses || [];
-    if (!user.removedClasses.some((c) => c.toString() === fromClassId.toString())) {
-      user.removedClasses.push(fromClassId);
-    }
-
-    if (!user.assignedClasses.some((c) => c.toString() === toClassId.toString())) {
+    const reject = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
+    if (![userId, fromClassId, toClassId].every((id) => mongoose.isValidObjectId(id))) reject("Valid player, source class and target class IDs are required");
+    if (String(fromClassId) === String(toClassId)) reject("Choose a different target class");
+    let result;
+    await session.withTransaction(async () => {
+      const user = await User.findById(userId).session(session);
+      const fromClass = await Class.findById(fromClassId).session(session);
+      const toClass = await Class.findById(toClassId).session(session);
+      if (!user || !fromClass || !toClass) reject("Player or class not found", 404);
+      if (toClass.status !== "ACTIVE" || toClass.isArchived) reject("Target class is not active", 409);
+      if (String(fromClass.term) !== String(toClass.term)) reject("Transfer must stay within the same term; use a new enrollment for another term", 409);
+      if (!(user.assignedClasses || []).some((id) => String(id) === String(fromClassId))) reject("Player is not assigned to the source class", 409);
+      if ((user.assignedClasses || []).some((id) => String(id) === String(toClassId))) reject("Player is already assigned to the target class", 409);
+      if (toClass.capacity && toClass.players.length >= toClass.capacity) reject("Target class is at maximum capacity", 409);
+      user.assignedClasses = user.assignedClasses.filter((id) => String(id) !== String(fromClassId));
       user.assignedClasses.push(toClassId);
-    }
-
-    user.removedClasses = user.removedClasses.filter(
-      (c) => c.toString() !== toClassId.toString()
-    );
-
-    fromClass.players = (fromClass.players || []).filter(
-      (p) => p.toString() !== userId.toString()
-    );
-
-    if (!toClass.players.some((p) => p.toString() === userId.toString())) {
-      toClass.players.push(userId);
-    }
-
-    await user.save({ session });
-    await fromClass.save({ session });
-    await toClass.save({ session });
-
-    await session.commitTransaction();
-    session.endSession();
-
-    let transferInvoiceResult = { invoice: null, priceDiff: 0, invoiceGenerated: false };
-    try {
-      transferInvoiceResult = await generateTransferInvoice({
-        userId,
-        fromClass,
-        toClass,
-      });
-    } catch (invErr) {
-      console.error("Auto transfer invoice error:", invErr.message);
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: transferInvoiceResult.invoiceGenerated
-        ? `Player transferred successfully. Invoice #${transferInvoiceResult.invoice.invoiceNumber} generated for price difference ($${transferInvoiceResult.priceDiff}).`
-        : "Player transferred to new class successfully. No invoice required.",
-      data: {
-        player: user,
-        fromClass: { _id: fromClass._id, name: fromClass.name, price: fromClass.price },
-        toClass: { _id: toClass._id, name: toClass.name, price: toClass.price },
-        priceDifference: transferInvoiceResult.priceDiff,
-        invoiceGenerated: transferInvoiceResult.invoiceGenerated,
-        invoice: transferInvoiceResult.invoice,
-      },
+      user.removedClasses = (user.removedClasses || []).filter((id) => String(id) !== String(toClassId));
+      if (!user.removedClasses.some((id) => String(id) === String(fromClassId))) user.removedClasses.push(fromClassId);
+      fromClass.players = fromClass.players.filter((id) => String(id) !== String(userId));
+      if (!toClass.players.some((id) => String(id) === String(userId))) toClass.players.push(userId);
+      await user.save({ session });
+      await fromClass.save({ session });
+      await toClass.save({ session });
+      const billing = await generateTransferInvoice({ userId, fromClass, toClass, session });
+      result = { player: user, fromClass: { _id: fromClass._id, name: fromClass.name, price: fromClass.price }, toClass: { _id: toClass._id, name: toClass.name, price: toClass.price }, priceDifference: billing.priceDiff, invoiceGenerated: billing.invoiceGenerated, invoice: billing.invoice };
     });
-
-  } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-    return res.status(500).json({
-      success: false,
-      message: err.message,
-    });
-  }
+    return res.json({ success: true, message: result.invoice ? "Player transferred and transfer charge saved" : "Player transferred successfully; no additional charge", data: result });
+  } catch (error) {
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Transfer could not be completed. No changes were saved." });
+  } finally { await session.endSession(); }
 };
 
 exports.assignCoachToClass = async (req, res) => {
@@ -1639,10 +1474,10 @@ exports.exportUsers = async (req, res) => {
       SkillLevel: u.skillLevel || "",
       Rating: u.rating || 1,
       Club: u.club || "",
-      DOB: u.dob ? new Date(u.dob).toLocaleDateString() : "",
+      DOB: u.dob ? formatDateOnly(u.dob) : "",
       ContactName: u.contactName || "",
       Comments: u.comments || "",
-      CreatedAt: new Date(u.createdAt).toLocaleString(),
+      CreatedAt: formatTimestamp(u.createdAt),
     }));
 
     if (format === "csv") {
@@ -2030,32 +1865,15 @@ exports.deleteProgram = async (req, res) => {
 
 exports.createTerm = async (req, res) => {
   try {
-    const { name, year, startDate, endDate, isEvent } = req.body;
-
-    const parseDate = (dateStr) => {
-      const [day, month, year] = dateStr.split("/").map(Number);
-      return new Date(year, month - 1, day);
-    };
-
-    const termData = {
-      name,
-      year,
-      startDate: parseDate(startDate),
-      endDate: parseDate(endDate),
-    };
-
-    if (isEvent === true) {
-      termData.isEvent = true;
-    }
-
+    const termData = validatedTermData(req.body || {});
     const term = await Term.create(termData);
 
     res.json({
       message: "Term created successfully",
-      data: term,
+      data: serializeTerm(term),
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err instanceof TypeError || err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
   }
 };
 
@@ -2082,13 +1900,19 @@ exports.deleteTerm = async (req, res) => {
       classCount,
       userCount,
       registrationRequestCount,
+      teamCount,
+      leagueCount,
+      eventCount,
     ] = await Promise.all([
       Class.countDocuments({ term: id }),
       User.countDocuments({ term: id }),
       RegistrationRequest.countDocuments({ preferredTerm: id }),
+      Team.countDocuments({ term: id }),
+      League.countDocuments({ term: id }),
+      Event.countDocuments({ termId: id }),
     ]);
 
-    const totalUsage = classCount + userCount + registrationRequestCount;
+    const totalUsage = classCount + userCount + registrationRequestCount + teamCount + leagueCount + eventCount;
 
     if (totalUsage > 0) {
       const connections = [];
@@ -2096,6 +1920,9 @@ exports.deleteTerm = async (req, res) => {
       if (userCount > 0) connections.push(`${userCount} player(s)`);
       if (registrationRequestCount > 0)
         connections.push(`${registrationRequestCount} registration request(s)`);
+      if (teamCount > 0) connections.push(`${teamCount} team(s)`);
+      if (leagueCount > 0) connections.push(`${leagueCount} league(s)`);
+      if (eventCount > 0) connections.push(`${eventCount} event(s)`);
 
       return res.status(400).json({
         success: false,
@@ -2104,6 +1931,9 @@ exports.deleteTerm = async (req, res) => {
           classCount,
           userCount,
           registrationRequestCount,
+          teamCount,
+          leagueCount,
+          eventCount,
         },
       });
     }
@@ -2135,7 +1965,8 @@ exports.getAllTerms = async (req, res) => {
     }
 
     if (year) {
-      filter.year = Number(year);
+      try { filter.year = ageGroupContextYear(year); }
+      catch (error) { return res.status(400).json({ message: error.message }); }
     }
 
     const terms = await Term.find(filter).sort({
@@ -2144,7 +1975,7 @@ exports.getAllTerms = async (req, res) => {
     });
 
     res.json({
-      data: terms,
+      data: terms.map(serializeTerm),
     });
   } catch (err) {
     res.status(500).json({
@@ -2155,13 +1986,14 @@ exports.getAllTerms = async (req, res) => {
 
 exports.getTermById = async (req, res) => {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(400).json({ message: "Invalid term ID" });
     const term = await Term.findById(req.params.id);
 
     if (!term) {
       return res.status(404).json({ message: "Term not found" });
     }
 
-    res.json({ data: term });
+    res.json({ data: serializeTerm(term) });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -2169,37 +2001,11 @@ exports.getTermById = async (req, res) => {
 
 exports.updateTerm = async (req, res) => {
   try {
-    const { name, year, startDate, endDate } = req.body;
-
-    const parseDate = (dateStr) => {
-      if (!dateStr) return undefined;
-
-      if (dateStr.includes("/")) {
-        const [day, month, year] = dateStr.split("/").map(Number);
-        return new Date(year, month - 1, day);
-      }
-
-      return new Date(dateStr);
-    };
-
-    const updatedData = {
-      name,
-      year,
-    };
-
-    if (startDate) updatedData.startDate = parseDate(startDate);
-    if (endDate) updatedData.endDate = parseDate(endDate);
-
-    if (
-      updatedData.startDate &&
-      updatedData.endDate &&
-      updatedData.startDate > updatedData.endDate
-    ) {
-      return res.status(400).json({
-        message: "Start date cannot be after end date",
-      });
-    }
-
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(400).json({ message: "Invalid term ID" });
+    const existing = await Term.findById(req.params.id);
+    if (!existing) return res.status(404).json({ message: "Term not found" });
+    const updatedData = validatedTermData(req.body || {}, existing.toObject());
+    await require("../services/termProtection").assertTermHistoryFits(req.params.id, existing, updatedData);
     const term = await Term.findByIdAndUpdate(
       req.params.id,
       updatedData,
@@ -2212,10 +2018,10 @@ exports.updateTerm = async (req, res) => {
 
     res.json({
       message: "Term updated successfully",
-      data: term,
+      data: serializeTerm(term),
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(err.status || (err instanceof TypeError || err.name === "ValidationError" ? 400 : 500)).json({ message: err.message });
   }
 };
 
@@ -2665,30 +2471,15 @@ exports.getAllClasses = async (req, res) => {
   }
 };
 
-exports.getAllClassesForAssign = async (req, res) => {
+exports.getAllClassesForAssign = async (req, res, next) => {
   try {
-    const { term, dayOfWeek, program, category } = req.query;
-
-    let filter = {};
-
-    if (term) filter.term = term;
-    if (dayOfWeek) {
-      filter.$or = [
-        { dayOfWeek: { $regex: new RegExp(`^${dayOfWeek}$`, "i") } },
-        { "schedule.dayOfWeek": { $regex: new RegExp(`^${dayOfWeek}$`, "i") } },
-      ];
-    }
-    if (program) filter.program = program;
-    if (category) filter.category = category;
-
-    const classes = await Class.find(filter)
-      .select("-players")
-      .sort({ dayOfWeek: 1, startTime: 1 });
-
-    res.json({ data: classes });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
+    const { categoryId, programId, termId, term, status = 'ACTIVE' } = req.query;
+    const filter = {};
+    for (const [key,value] of [['category',categoryId],['program',programId],['term',termId || term]]) if(value){if(!mongoose.isValidObjectId(value))return res.status(400).json({success:false,message:'Invalid '+key});filter[key]=value;}
+    if(status && status !== 'ALL') {if(!['ACTIVE','INACTIVE'].includes(status))return res.status(400).json({message:'Invalid class status'});filter.status=status;}
+    const classes=await Class.find(filter).populate('term','name year startDate endDate status').populate('program','name ageGroup status').populate('category','name').sort({dayOfWeek:1,startTime:1,name:1}).lean();
+    return res.json({success:true,data:classes.map(({players,...cls})=>({...cls,playerCount:players?.length||0,term:require('../utils/dateTime').serializeTerm(cls.term)}))});
+  } catch(error){return next(error);}
 };
 
 exports.getClassById = async (req, res) => {
@@ -3352,131 +3143,9 @@ exports.getClassSessions = async (req, res) => {
 };
 
 
-exports.markAttendance = async (req, res) => {
-  try {
-    const { classId } = req.params;
-    const { sessionDate, records } = req.body;
+exports.markAttendance = require('../services/attendanceService').markAttendance;
 
-    if (!sessionDate || !records?.length) {
-      return res.status(400).json({
-        message: "sessionDate and records are required",
-      });
-    }
-
-    const date = new Date(sessionDate);
-    date.setUTCHours(0, 0, 0, 0);
-
-    let attendance = await Attendance.findOne({
-      class: classId,
-      sessionDate: date,
-    });
-
-    if (attendance) {
-      attendance.records = records;
-      attendance.markedBy = req.user?.id;
-
-      await attendance.save();
-
-      return res.json({
-        message: "Attendance updated",
-        data: attendance,
-      });
-    }
-
-    attendance = await Attendance.create({
-      class: classId,
-      sessionDate: date,
-      records,
-      markedBy: req.user?.id,
-    });
-
-    res.json({
-      message: "Attendance marked",
-      data: attendance,
-    });
-
-  } catch (err) {
-    if (err.code === 11000) {
-      return res.status(400).json({
-        message: "Attendance already exists",
-      });
-    }
-
-    res.status(500).json({ message: err.message });
-  }
-};
-
-exports.markSingleAttendance = async (req, res) => {
-  try {
-    const { classId } = req.params;
-    const { sessionDate, playerId, status, reason, remarks, comment } = req.body;
-
-    if (!sessionDate || !playerId || !status) {
-      return res.status(400).json({
-        message: "sessionDate, playerId and status are required",
-      });
-    }
-
-    const date = new Date(sessionDate);
-    date.setUTCHours(0, 0, 0, 0);
-
-    let attendance = await Attendance.findOne({
-      class: classId,
-      sessionDate: date,
-    });
-
-    if (!attendance) {
-      attendance = await Attendance.create({
-        class: classId,
-        sessionDate: date,
-        records: [],
-        markedBy: req.user?.id || req.admin?._id,
-      });
-    }
-
-    const existingRecord = attendance.records.find(
-      (r) => r.player.toString() === playerId
-    );
-
-    const trimmedReason = reason !== undefined ? String(reason).trim() : (remarks !== undefined ? String(remarks).trim() : undefined);
-
-    if (existingRecord) {
-      existingRecord.status = status;
-      if (trimmedReason !== undefined) {
-        existingRecord.reason = trimmedReason;
-        existingRecord.remarks = trimmedReason;
-      }
-      if (comment !== undefined) existingRecord.comment = comment;
-      if (status === "LATE") existingRecord.lateArrival = true;
-    } else {
-      attendance.records.push({
-        player: playerId,
-        status,
-        reason: trimmedReason || "",
-        remarks: trimmedReason || "",
-        comment: comment || "",
-        lateArrival: status === "LATE",
-      });
-    }
-
-    await attendance.save();
-
-    res.json({
-      message: "Attendance updated successfully",
-      data: {
-        classId,
-        sessionDate: date,
-        playerId,
-        status,
-        reason: trimmedReason,
-      },
-    });
-
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-};
-
+exports.markSingleAttendance = require('../services/attendanceService').markSingleAttendance;
 
 exports.getAttendanceByClass = async (req, res) => {
   try {
@@ -4065,22 +3734,31 @@ exports.getClassFiltersWithTimeSlots = async (req, res) => {
   try {
     const { categoryId, programId, day, termId, term } = req.query;
     const selectedTerm = termId || term;
+    const { WEEKDAYS, weekday, classOccurrences, compareOccurrences } = require("../utils/classSchedule");
+    const allDays = !day || ["ALL", "VIEW ALL"].includes(String(day).trim().toUpperCase());
+    const selectedDay = allDays ? null : weekday(day);
+    if (!allDays && !selectedDay) return res.status(400).json({ message: "Choose a weekday or View All" });
 
     const query = {};
-    if (categoryId) query.category = categoryId;
-    if (programId) query.program = programId;
-    if (day) {
+    for (const [key, value] of [["category", categoryId], ["program", programId], ["term", selectedTerm]]) {
+      if (!value) continue;
+      if (!mongoose.Types.ObjectId.isValid(value)) return res.status(400).json({ message: `Invalid ${key} ID` });
+      query[key] = value;
+    }
+    if (selectedDay) {
       query.$or = [
-        { dayOfWeek: { $regex: new RegExp(`^${day}$`, "i") } },
-        { "schedule.dayOfWeek": { $regex: new RegExp(`^${day}$`, "i") } },
+        { dayOfWeek: { $regex: new RegExp(`^${selectedDay}$`, "i") } },
+        { "schedule.dayOfWeek": { $regex: new RegExp(`^${selectedDay}$`, "i") } },
       ];
     }
-    if (selectedTerm) query.term = selectedTerm;
 
     const classes = await Class.find(query)
+      .select("name dayOfWeek startTime endTime scheduleType schedule coach category program term players status")
+      .populate("coach", "name")
       .populate("category", "name")
       .populate("program", "name")
-      .populate("term", "name year startDate endDate");
+      .populate("term", "name year startDate endDate")
+      .lean();
 
     const categories = [...new Map(
       classes.filter(c => c.category).map(c => [c.category._id.toString(), c.category])
@@ -4091,42 +3769,12 @@ exports.getClassFiltersWithTimeSlots = async (req, res) => {
     ).values()];
 
     const terms = [...new Map(
-      classes.filter(c => c.term).map(c => [c.term._id.toString(), c.term])
+      classes.filter(c => c.term).map(c => [c.term._id.toString(), serializeTerm(c.term)])
     ).values()];
 
-    const daysSet = new Set();
-    classes.forEach((c) => {
-      if (c.dayOfWeek) daysSet.add(c.dayOfWeek);
-      if (c.schedule && c.schedule.length > 0) {
-        c.schedule.forEach((s) => { if (s.dayOfWeek) daysSet.add(s.dayOfWeek); });
-      }
-    });
-    const days = [...daysSet];
-
-    let timeSlots = [];
-
-    if (day) {
-      classes.forEach((c) => {
-        if (c.schedule && c.schedule.length > 0) {
-          const matchingEntry = c.schedule.find((s) =>
-            (s.dayOfWeek || "").toUpperCase() === day.toUpperCase()
-          );
-          if (matchingEntry) {
-            timeSlots.push({
-              classId: c._id,
-              startTime: matchingEntry.startTime,
-              endTime: matchingEntry.endTime,
-            });
-            return;
-          }
-        }
-        timeSlots.push({
-          classId: c._id,
-          startTime: c.startTime,
-          endTime: c.endTime,
-        });
-      });
-    }
+    const allOccurrences = classes.flatMap((c) => classOccurrences(c));
+    const days = WEEKDAYS.filter((value) => allOccurrences.some((slot) => slot.dayOfWeek === value));
+    const timeSlots = allOccurrences.filter((slot) => !selectedDay || slot.dayOfWeek === selectedDay).sort(compareOccurrences);
 
     res.json({
       terms,
@@ -4134,6 +3782,8 @@ exports.getClassFiltersWithTimeSlots = async (req, res) => {
       programs,
       days,
       timeSlots,
+      totalClasses: new Set(timeSlots.map((slot) => String(slot.classId))).size,
+      totalOccurrences: timeSlots.length,
     });
 
   } catch (err) {
@@ -4249,6 +3899,7 @@ exports.getClassFullTable = async (req, res) => {
       classId: cls._id,
       className: cls.name,
       coach: cls.coach ? { _id: cls.coach._id, name: cls.coach.name } : null,
+      term: serializeTerm(cls.term),
       broadcastChatRoomId: broadcastRoom ? broadcastRoom._id : null,
       broadcastRoomId: broadcastRoom ? broadcastRoom._id : null,
       totalSessions: sessionDates.length,
@@ -4303,10 +3954,10 @@ exports.exportClassCSV = async (req, res) => {
     const row = {
       Name: player.fullName,
       Email: player.email,
-      DOB: player.dob ? new Date(player.dob).toISOString().split("T")[0] : "",
+      DOB: player.dob ? formatDateOnly(player.dob) : "",
       Phone: player.phone,
       Guardian: player.contactName,
-      paymentStatus: (player.classPaymentStatuses || []).find((item) => item.class && item.class.toString() === classId.toString())?.paymentStatus || "TRIAL"
+      "Payment Status": (player.classPaymentStatuses || []).find((item) => item.class && item.class.toString() === classId.toString())?.paymentStatus || "TRIAL"
     };
 
     sessionDates.forEach((date) => {
@@ -4331,7 +3982,7 @@ exports.exportClassCSV = async (req, res) => {
     "Phone",
     "Guardian",
     "Payment Status",
-    ...sessionDates,
+    ...sessionDates.map((value) => ({ label: formatDateOnly(value), value })),
   ];
 
   const parser = new Parser({ fields });
@@ -4604,7 +4255,7 @@ exports.getTeamFullTable = async (req, res) => {
       coach: team.coach ? { _id: team.coach._id, name: team.coach.name } : null,
       broadcastChatRoomId: broadcastRoom ? broadcastRoom._id : null,
       broadcastRoomId: broadcastRoom ? broadcastRoom._id : null,
-      term: targetTerm ? { _id: targetTerm._id, name: targetTerm.name, startDate: targetTerm.startDate, endDate: targetTerm.endDate } : null,
+      term: serializeTerm(targetTerm),
       round: effectiveRound || null,
       league: selectedLeague ? {
         _id: selectedLeague.league?._id || selectedLeague.league,
@@ -4712,7 +4363,7 @@ exports.exportTeamCSV = async (req, res) => {
       const row = {
         Name: player.fullName || `${player.firstName || ""} ${player.lastName || ""}`.trim() || "",
         Email: player.email,
-        DOB: player.dob ? new Date(player.dob).toISOString().split("T")[0] : "",
+        DOB: player.dob ? formatDateOnly(player.dob) : "",
         Phone: player.phone,
         Guardian: player.contactName,
         "Payment Status": item.paymentStatus || "TRIAL",
@@ -4746,7 +4397,7 @@ exports.exportTeamCSV = async (req, res) => {
       "Goals",
       "Assists",
       "Appearances",
-      ...sessionDates,
+      ...sessionDates.map((value) => ({ label: formatDateOnly(value), value })),
     ];
 
     const parser = new Parser({ fields });
@@ -4857,6 +4508,7 @@ exports.getPlayerDetails = async (req, res) => {
       .populate({ path: "league", select: "name season term startDate endDate", populate: { path: "term", select: "name year startDate endDate isEvent" } })
       .populate({ path: "event", select: "title eventType category termId startDate endDate", populate: { path: "termId", select: "name year startDate endDate isEvent" } })
       .populate("campSession", "sessionDate sessionLabel sessionType")
+      .populate("records.noteAuthor", "name")
       .sort({ sessionDate: -1 })
       .lean();
 
@@ -4893,6 +4545,9 @@ exports.getPlayerDetails = async (req, res) => {
         comment: playerRecord?.comment || "",
         remarks: playerRecord?.remarks || "",
         reason: playerRecord?.reason || "",
+        note: playerRecord?.note || playerRecord?.reason || playerRecord?.remarks || playerRecord?.comment || "",
+        noteAuthorName: playerRecord?.noteAuthor?.name || "",
+        noteUpdatedAt: playerRecord?.noteUpdatedAt || null,
         markedByParent: playerRecord?.markedByParent || false,
         lateArrival: playerRecord?.lateArrival || false,
         attendanceType: playerRecord?.attendanceType || "REGULAR",
@@ -4985,7 +4640,7 @@ exports.getPlayerDetails = async (req, res) => {
     };
 
     const classPaymentStatuses = player.classPaymentStatuses || [];
-    
+
     // Combine unique classes
     const classMap = new Map();
     (player.assignedClasses || []).forEach((cls) => {
@@ -5440,6 +5095,7 @@ exports.getPlayerDetails = async (req, res) => {
       "records.player": playerId,
     })
       .populate("team", "teamName ageGroup startTime endTime")
+      .populate("records.noteAuthor", "name")
       .sort({ sessionDate: -1 })
       .lean();
 
@@ -5456,6 +5112,9 @@ exports.getPlayerDetails = async (req, res) => {
         comment: playerRecord?.comment || "",
         remarks: playerRecord?.remarks || "",
         reason: playerRecord?.reason || "",
+        note: playerRecord?.note || playerRecord?.reason || playerRecord?.remarks || playerRecord?.comment || "",
+        noteAuthorName: playerRecord?.noteAuthor?.name || "",
+        noteUpdatedAt: playerRecord?.noteUpdatedAt || null,
         markedByParent: playerRecord?.markedByParent || false,
         lateArrival: playerRecord?.lateArrival || false,
         attendanceType: playerRecord?.attendanceType || "REGULAR",
@@ -6160,7 +5819,7 @@ exports.getAdminDashboardOverview = async (req, res) => {
       Program.countDocuments({ status: "ACTIVE" }),
       Category.countDocuments({}),
       Term.countDocuments({}),
-      Term.countDocuments({ startDate: { $lte: new Date() }, endDate: { $gte: new Date() } }),
+      Term.countDocuments({ startDate: { $lte: dateOnlyEndUtc(todayDateOnly()) }, endDate: { $gte: dateOnlyStartUtc(todayDateOnly()) } }),
 
       RegistrationRequest.countDocuments({}),
       RegistrationRequest.countDocuments({ status: "PENDING" }),
@@ -6641,7 +6300,7 @@ const computeEarningsForTerm = async ({ termId, classId, status }) => {
   // 3. Holiday Camps & Events Stream
   const eventDateFilter = {};
   if (!isAllTime && termDoc.startDate && termDoc.endDate) {
-    eventDateFilter.createdAt = { $gte: new Date(termDoc.startDate), $lte: new Date(termDoc.endDate) };
+    eventDateFilter.createdAt = calendarTimestampRange(termDoc.startDate, termDoc.endDate);
   }
   const eventRegistrations = await EventRegistration.find(eventDateFilter)
     .populate("event", "title startDate endDate category")
@@ -6729,7 +6388,7 @@ const computeEarningsForTerm = async ({ termId, classId, status }) => {
   // 4. Store Merchandise Orders Stream
   const orderDateFilter = {};
   if (!isAllTime && termDoc.startDate && termDoc.endDate) {
-    orderDateFilter.createdAt = { $gte: new Date(termDoc.startDate), $lte: new Date(termDoc.endDate) };
+    orderDateFilter.createdAt = calendarTimestampRange(termDoc.startDate, termDoc.endDate);
   }
   const orders = await Order.find(orderDateFilter)
     .populate("parent", "fullName email phone")
@@ -6914,301 +6573,67 @@ exports.getTermEarningsReport = async (req, res) => {
   }
 };
 
-exports.updatePlayer = async (req, res) => {
+exports.updatePlayer = async (req, res, next) => {
+  const tx = await mongoose.startSession();
+  let result; let oldImage; let committed = false;
   try {
+    if (!req.admin || !['ADMIN','SUPER_ADMIN'].includes(req.admin.role)) return res.status(403).json({ success: false, message: 'Admin access required' });
     const { playerId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(playerId)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid player ID format.",
-      });
-    }
-
-    const player = await User.findById(playerId);
-
-    if (!player) {
-      return res.status(404).json({
-        success: false,
-        message: "Player not found.",
-      });
-    }
-
-    const updateFields = {};
-
-    // Full Name & First/Last Name
-    if (req.body.fullName !== undefined) {
-      updateFields.fullName =
-        typeof req.body.fullName === "string"
-          ? req.body.fullName.trim()
-          : req.body.fullName;
-      const parts = (updateFields.fullName || "").split(" ");
-      updateFields.firstName = parts[0] || "";
-      updateFields.lastName = parts.slice(1).join(" ") || "";
-    } else {
-      if (req.body.firstName !== undefined) {
-        updateFields.firstName =
-          typeof req.body.firstName === "string"
-            ? req.body.firstName.trim()
-            : req.body.firstName;
+    if (!mongoose.isValidObjectId(playerId)) return res.status(400).json({ success: false, message: 'Invalid player ID' });
+    await tx.withTransaction(async () => {
+      const player = await User.findById(playerId).session(tx);
+      if (!player) throw Object.assign(new Error('Player not found'), { status: 404 });
+      const input = req.body; const update = {};
+      for (const key of ['school','comments','additionalComments','contactName','relationship','club']) if (input[key] !== undefined) update[key] = String(input[key]).trim();
+      if (input.fullName !== undefined) {
+        const name = String(input.fullName).trim(); if (!name) throw Object.assign(new Error('Player name is required'),{status:400});
+        update.fullName=name; const [first,...last]=name.split(/\s+/); update.firstName=first; update.lastName=last.join(' ');
+      } else if (input.firstName !== undefined || input.lastName !== undefined) {
+        update.firstName=String(input.firstName ?? player.firstName ?? '').trim(); update.lastName=String(input.lastName ?? player.lastName ?? '').trim(); update.fullName=[update.firstName,update.lastName].filter(Boolean).join(' ');
       }
-
-      if (req.body.lastName !== undefined) {
-        updateFields.lastName =
-          typeof req.body.lastName === "string"
-            ? req.body.lastName.trim()
-            : req.body.lastName;
+      for (const key of ['email','phone']) if (input[key] !== undefined) update[key]=String(input[key] || '').trim() || null;
+      if(update.email) update.email=update.email.toLowerCase();
+      for(const key of ['gender','playerStatus']) if(input[key] !== undefined) update[key]=String(input[key]).toUpperCase();
+      const foot=input.prefferedFoot ?? input.preferredFoot; if(foot !== undefined) update.prefferedFoot=String(foot).toUpperCase();
+      for(const key of ['jerseyNumber','rating']) if(input[key] !== undefined && input[key] !== '') { const value=Number(input[key]); if(!Number.isFinite(value)) throw Object.assign(new Error('Invalid '+key),{status:400}); update[key]=value; }
+      if(input.isBlocked !== undefined) {if(![true,false,'true','false'].includes(input.isBlocked))throw Object.assign(new Error('Invalid blocked flag'),{status:400});update.isBlocked=input.isBlocked===true||input.isBlocked==='true';}
+      const dates=require('../utils/dateTime');
+      if(input.dob) { update.dob=dates.dateOnlyToUtc(input.dob,'Date of birth'); if(dates.dateOnly(update.dob)>dates.todayDateOnly()) throw Object.assign(new Error('Date of birth cannot be in the future'),{status:400}); }
+      for(const [key,Model] of [['term',Term],['category',Category]]) if(input[key] !== undefined) {
+        if(!input[key])update[key]=null;
+        else {if(!mongoose.isValidObjectId(input[key])||!await Model.exists({_id:input[key]}).session(tx))throw Object.assign(new Error('Invalid '+key),{status:400});update[key]=input[key];}
       }
-
-      if (
-        req.body.firstName !== undefined ||
-        req.body.lastName !== undefined
-      ) {
-        const first =
-          req.body.firstName !== undefined
-            ? updateFields.firstName
-            : player.firstName || "";
-        const last =
-          req.body.lastName !== undefined
-            ? updateFields.lastName
-            : player.lastName || "";
-        updateFields.fullName = `${first || ""} ${last || ""}`.trim();
+      if(input.parentId && String(input.parentId)!==String(player.parentId)) throw Object.assign(new Error('Household transfers require verified parent ownership; update the existing parent contact here'),{status:409});
+      if(input.programs !== undefined || input.program !== undefined) {
+        let programs=input.programs ?? [input.program]; if(typeof programs==='string'){try{programs=JSON.parse(programs)}catch{programs=programs.split(',')}}
+        if(!Array.isArray(programs)||programs.some(value=>!mongoose.isValidObjectId(value)))throw Object.assign(new Error('Invalid programs'),{status:400});
+        programs=[...new Set(programs.map(String))];if(await Program.countDocuments({_id:{$in:programs}}).session(tx)!==programs.length)throw Object.assign(new Error('Program not found'),{status:400});update.programs=programs;
       }
-    }
-
-    // Email & Phone
-    if (req.body.email !== undefined) {
-      updateFields.email = req.body.email
-        ? req.body.email.trim().toLowerCase()
-        : null;
-    }
-
-    if (req.body.phone !== undefined) {
-      updateFields.phone = req.body.phone ? req.body.phone.trim() : null;
-    }
-
-    // School
-    if (req.body.school !== undefined) {
-      updateFields.school = req.body.school;
-    }
-
-    // Gender enum validation ["MALE", "FEMALE", "OTHER"]
-    if (req.body.gender !== undefined) {
-      updateFields.gender = req.body.gender
-        ? req.body.gender.toUpperCase()
-        : null;
-    }
-
-    // Preferred Foot enum ["LEFT", "RIGHT", "BOTH"]
-    const footVal = req.body.prefferedFoot !== undefined ? req.body.prefferedFoot : req.body.preferredFoot;
-    if (footVal !== undefined) {
-      updateFields.prefferedFoot = footVal
-        ? footVal.toUpperCase()
-        : null;
-    }
-
-    // Jersey Number
-    if (req.body.jerseyNumber !== undefined) {
-      updateFields.jerseyNumber =
-        req.body.jerseyNumber === "" || req.body.jerseyNumber === null
-          ? null
-          : Number(req.body.jerseyNumber);
-    }
-
-    // Medical conditions
-    if (req.body.isMedicalCondition !== undefined) {
-      updateFields.isMedicalCondition =
-        req.body.isMedicalCondition === true ||
-        req.body.isMedicalCondition === "true";
-    }
-
-    if (req.body.medicalConditionDetails !== undefined) {
-      updateFields.medicalConditionDetails = req.body.medicalConditionDetails;
-    }
-
-    // Comments & Guardian details
-    if (req.body.comments !== undefined) {
-      updateFields.comments = req.body.comments;
-    }
-
-    if (req.body.additionalComments !== undefined) {
-      updateFields.additionalComments = req.body.additionalComments;
-    }
-
-    if (req.body.contactName !== undefined) {
-      updateFields.contactName = req.body.contactName;
-    }
-
-    if (req.body.relationship !== undefined) {
-      updateFields.relationship = req.body.relationship;
-    }
-
-    if (req.body.club !== undefined) {
-      updateFields.club = req.body.club;
-    }
-
-    // Admin-specific controls: rating, playerStatus, isBlocked
-    if (req.body.rating !== undefined && req.body.rating !== "") {
-      const rating = Number(req.body.rating);
-      if (!isNaN(rating) && rating >= 1 && rating <= 5) {
-        updateFields.rating = rating;
+      const parentFields={parentFullName:'fullName',parentPhone:'phone',parentEmail:'email',emergencyContact:'emergencyContact',parentRelationship:'relationship'};
+      const contact={};for(const [from,to] of Object.entries(parentFields))if(input[from]!==undefined){contact[to]=String(input[from]).trim();if(!contact[to])throw Object.assign(new Error(to+' cannot be empty'),{status:400});}
+      if(contact.email)contact.email=contact.email.toLowerCase();
+      if(Object.keys(contact).length) await Parent.findByIdAndUpdate(player.parentId,{$set:contact},{runValidators:true,session:tx});
+      const MedicalProfile=require('../models/MedicalProfile');
+      if(['isMedicalCondition','medicalConditions','medicalConditionDetails','allergies'].some(key=>input[key]!==undefined)){
+        const profile=await MedicalProfile.findOne({player:playerId}).session(tx);
+        const normalized=require('../utils/medicalStatus').normalizeMedicalStatus({isMedicalCondition:input.isMedicalCondition ?? player.isMedicalCondition,medicalConditionDetails:input.medicalConditionDetails ?? input.medicalConditions ?? player.medicalConditionDetails,allergies:input.allergies ?? profile?.allergies ?? []});
+        update.isMedicalCondition=normalized.isMedicalCondition;update.medicalConditionDetails=normalized.medicalConditionDetails;
+        await MedicalProfile.updateOne({player:playerId},{$set:{medicalConditions:normalized.medicalConditions,allergies:normalized.allergies}},{upsert:true,session:tx,runValidators:true});
+        await require('../models/MedicalRevision').create([{player:playerId,actor:req.admin._id,actorType:'ADMIN',previous:{isMedicalCondition:player.isMedicalCondition,medicalConditionDetails:player.medicalConditionDetails},current:normalized}],{session:tx});
       }
-    }
-
-    if (req.body.playerStatus !== undefined) {
-      updateFields.playerStatus = req.body.playerStatus
-        ? req.body.playerStatus.toUpperCase()
-        : null;
-    }
-
-    if (req.body.isBlocked !== undefined) {
-      updateFields.isBlocked =
-        req.body.isBlocked === true || req.body.isBlocked === "true";
-    }
-
-    // References: term, category, parentId
-    if (req.body.term !== undefined) {
-      updateFields.term =
-        req.body.term && mongoose.Types.ObjectId.isValid(req.body.term)
-          ? req.body.term
-          : null;
-    }
-
-    if (req.body.category !== undefined) {
-      updateFields.category =
-        req.body.category && mongoose.Types.ObjectId.isValid(req.body.category)
-          ? req.body.category
-          : null;
-    }
-
-    // Programs
-    if (req.body.programs !== undefined) {
-      let progs = req.body.programs;
-      if (typeof progs === "string") {
-        try {
-          progs = JSON.parse(progs);
-        } catch {
-          progs = progs.split(",").map((p) => p.trim());
-        }
-      }
-      if (Array.isArray(progs)) {
-        updateFields.programs = progs.filter((p) =>
-          mongoose.Types.ObjectId.isValid(p)
-        );
-      } else if (mongoose.Types.ObjectId.isValid(progs)) {
-        updateFields.programs = [progs];
-      }
-    } else if (
-      req.body.program !== undefined &&
-      mongoose.Types.ObjectId.isValid(req.body.program)
-    ) {
-      updateFields.programs = [req.body.program];
-    }
-
-    if (
-      req.body.parentId &&
-      mongoose.Types.ObjectId.isValid(req.body.parentId)
-    ) {
-      updateFields.parentId = req.body.parentId;
-    }
-
-    // Optional: update parent contact if provided
-    if (player.parentId) {
-      const parentUpdate = {};
-      if (req.body.parentFullName) {
-        parentUpdate.fullName = req.body.parentFullName.trim();
-      }
-      if (req.body.parentPhone) {
-        parentUpdate.phone = req.body.parentPhone.trim();
-      }
-      if (req.body.parentEmail) {
-        parentUpdate.email = req.body.parentEmail.trim().toLowerCase();
-      }
-      if (req.body.emergencyContact) {
-        parentUpdate.emergencyContact = req.body.emergencyContact.trim();
-      }
-      if (req.body.parentRelationship) {
-        parentUpdate.relationship = req.body.parentRelationship.trim();
-      }
-      if (Object.keys(parentUpdate).length > 0) {
-        await Parent.findByIdAndUpdate(player.parentId, parentUpdate);
-      }
-    }
-
-    // Date of Birth parsing (supports DD/MM/YYYY and YYYY-MM-DD / ISO)
-    if (req.body.dob) {
-      let parsedDob;
-      if (typeof req.body.dob === "string" && req.body.dob.includes("/")) {
-        const parts = req.body.dob.split("/");
-        if (parts.length === 3) {
-          // DD/MM/YYYY -> YYYY-MM-DD
-          parsedDob = new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
-        } else {
-          parsedDob = new Date(req.body.dob);
-        }
-      } else {
-        parsedDob = new Date(req.body.dob);
-      }
-
-      if (isNaN(parsedDob.getTime())) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Invalid date format for dob. Expected DD/MM/YYYY or YYYY-MM-DD.",
-        });
-      }
-      updateFields.dob = parsedDob;
-    }
-
-    // Profile Image: supports req.file or req.files (from multer) or direct profileImage URL / path
-    const uploadedFile =
-      req.file ||
-      req.files?.profileImage?.[0] ||
-      req.files?.profile?.[0] ||
-      req.files?.profiles?.[0];
-
-    if (uploadedFile) {
-      updateFields.profileImage = `uploads/profiles/${uploadedFile.filename}`;
-
-      if (player.profileImage) {
-        const oldPath = path.resolve(process.cwd(), player.profileImage);
-        fs.access(oldPath, fs.constants.F_OK, (err) => {
-          if (!err) {
-            fs.unlink(oldPath, () => { });
-          }
-        });
-      }
-    } else if (req.body.profileImage !== undefined) {
-      updateFields.profileImage = req.body.profileImage;
-    }
-
-    const updatedPlayer = await User.findByIdAndUpdate(
-      playerId,
-      updateFields,
-      {
-        new: true,
-        runValidators: true,
-      }
-    )
-      .populate(
-        "parentId",
-        "fullName firstName lastName email phone emergencyContact relationship profileImage"
-      )
-      .populate("category", "name")
-      .populate("programs", "name")
-      .populate("term", "name");
-
-    return res.status(200).json({
-      success: true,
-      message: "Player updated successfully.",
-      data: updatedPlayer,
+      if(req.file){oldImage=player.profileImage;update.profileImage='uploads/profiles/'+req.file.filename;}
+      else if(input.profileImage === ''){oldImage=player.profileImage;update.profileImage='';}
+      else if(input.profileImage !== undefined && input.profileImage !== player.profileImage)throw Object.assign(new Error('Upload a file to change the profile image'),{status:400});
+      Object.assign(player,update);await player.save({session:tx});
+      result=await User.findById(playerId).populate('parentId','fullName email phone emergencyContact relationship profileImage').populate('category','name').populate('programs','name').populate('term','name year').session(tx).lean();
+      if(result.dob)result.dob=dates.dateOnly(result.dob);
     });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
-  }
+    committed = true;
+    if(oldImage && oldImage !== result.profileImage) await require('../utils/upload').removeStoredUpload(oldImage).catch(()=>{});
+    return res.json({success:true,message:'Player updated successfully',data:result});
+  } catch(error) {
+    return next(error);
+  } finally {await tx.endSession();if(!committed && req.file?.filename)await require('../utils/upload').removeStoredUpload('uploads/profiles/'+req.file.filename).catch(()=>{});}
 };
 
 /**
@@ -7227,12 +6652,11 @@ const calculateSidebarBadges = async () => {
     // 1. Verification requests (parent/player registration requests pending review)
     RegistrationRequest.find({
       status: "PENDING",
-      requestType: { $nin: ["TEMPORARY_PLAYER", "TEMPORARY"] },
     })
       .select("_id")
       .lean(),
     // 2. Temporary players (pending coach temporary player approvals)
-    User.find({ playerStatus: "PENDING_APPROVAL" }).select("_id").lean(),
+    RegistrationRequest.find({ status: "PENDING", requestType: { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] } }).select("_id").lean(),
     // 3. Unallocated players (players without assigned classes or with pending class requests)
     User.find({
       parentId: { $exists: true },
@@ -7285,7 +6709,7 @@ const calculateSidebarBadges = async () => {
     orders: orderDocs.length,
     pendingItemIds,
     playersManagementTotal:
-      verificationRequestDocs.length + temporaryPlayerDocs.length,
+      verificationRequestDocs.length,
     financeTotal: unpaidInvoiceDocs.length + pendingPaymentDocs.length,
   };
 };
@@ -7306,4 +6730,4 @@ exports.getSidebarBadges = async (req, res) => {
       message: error.message,
     });
   }
-};
+};

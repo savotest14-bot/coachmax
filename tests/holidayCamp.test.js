@@ -5,10 +5,10 @@
 
 const assert = require("assert");
 const mongoose = require("mongoose");
-const dotenv = require("dotenv");
+// Manual legacy fixture suite: never loads application credentials.
 const path = require("path");
 
-dotenv.config({ path: path.join(__dirname, "../.env") });
+
 
 const Event = require("../models/Event");
 const CampSession = require("../models/CampSession");
@@ -21,7 +21,8 @@ const User = require("../models/User");
 async function runTests() {
   console.log("🚀 Starting Holiday Camp Event Management Automated Test Suite...\n");
 
-  const mongoUri = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/coachmax";
+  const mongoUri = process.env.LEGACY_CAMP_TEST_URI;
+  if (!mongoUri || !new RegExp("^mongodb://(127\\.0\\.0\\.1|localhost)(:\\d+)?/coachmax_legacy_test(?:\\?|$)").test(mongoUri)) throw new Error("Set LEGACY_CAMP_TEST_URI to a disposable loopback coachmax_legacy_test database");
   await mongoose.connect(mongoUri);
   console.log(" Connected to MongoDB:", mongoose.connection.name);
 
@@ -340,4 +341,4 @@ async function runTests() {
   }
 }
 
-runTests();
+if (require.main === module && process.env.RUN_LEGACY_CAMP_TEST === "1") runTests();

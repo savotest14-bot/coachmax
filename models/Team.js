@@ -1,5 +1,7 @@
+const { dateOnly } = require("../utils/dateTime");
 const mongoose = require("mongoose");
 const teamTemporaryPlayerSchema = require("./TeamTemporaryPlayer");
+const { normalizeTeamName } = require("../utils/leagueIntegrity");
 
 const teamSchema = new mongoose.Schema(
   {
@@ -7,6 +9,8 @@ const teamSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    normalizedName: { type: String, required: true },
+    archivedAt: { type: Date, default: null },
     logo: {
       type: String,
       default: "",
@@ -42,6 +46,15 @@ const teamSchema = new mongoose.Schema(
           enum: ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "EXTRA", "SUBSTITUTE", "TBC", "HANDSHAKE"],
           default: "UNPAID",
         },
+        statistics: {
+          appearances: { type: Number, min: 0, default: 0 },
+          goals: { type: Number, min: 0, default: 0 },
+          assists: { type: Number, min: 0, default: 0 },
+          cleanSheets: { type: Number, min: 0, default: 0 },
+          yellowCards: { type: Number, min: 0, default: 0 },
+          redCards: { type: Number, min: 0, default: 0 },
+          minutesPlayed: { type: Number, min: 0, default: 0 },
+        },
       },
     ],
     teamType: {
@@ -52,10 +65,14 @@ const teamSchema = new mongoose.Schema(
     term: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Term",
+      required: true,
     },
     dayOfWeek: {
       type: String,
     },
+    round: { type: Number, min: 1 },
+    sessionDates: [{ type: Date }],
+    teamFee: { type: Number, min: 0, default: 0 },
     startTime: String,
     endTime: String,
     venue: String,
@@ -152,7 +169,13 @@ const teamSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+teamSchema.pre("validate", function () { this.normalizedName = normalizeTeamName(this.teamName); });
+teamSchema.index({ term: 1, normalizedName: 1 }, { unique: true, name: "team_term_normalized_name", partialFilterExpression: { normalizedName: { $type: "string" }, term: { $type: "objectId" } } });
 teamSchema.index({ "leagues.league": 1 });
 
+teamSchema.set("toJSON", { transform: (_doc, result) => {
+  if (result.sessionDates) result.sessionDates = result.sessionDates.map((date) => dateOnly(date));
+  return result;
+} });
 module.exports = mongoose.model("Team", teamSchema);
 

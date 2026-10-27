@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 
 const notificationSchema = new mongoose.Schema(
   {
+    idempotencyKey: { type: String },
     recipientType: {
       type: String,
       enum: ["ADMIN", "COACH", "PARENT", "ALL"],
@@ -68,4 +69,5 @@ const notificationSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+notificationSchema.index({ idempotencyKey: 1 }, { unique: true, partialFilterExpression: { idempotencyKey: { $type: "string" } } });
 module.exports = mongoose.model("Notification", notificationSchema);

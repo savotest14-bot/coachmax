@@ -62,6 +62,9 @@ const parentSchema = new mongoose.Schema(
     fcmTokens: [{ type: String }],
     otp: String,
     otpExpire: Date,
+    otpAttempts: { type: Number, default: 0 },
+    resetTokenHash: { type: String, select: false },
+    resetTokenExpire: { type: Date, select: false },
     isOtpVerified: {
       type: Boolean,
       default: false,

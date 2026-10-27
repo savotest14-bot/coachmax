@@ -53,6 +53,9 @@ const attendanceSchema = new mongoose.Schema(
           type: String,
           default: "",
         },
+        note: { type: String, default: "", maxlength: 2000 },
+        noteAuthor: { type: mongoose.Schema.Types.ObjectId, ref: "Admin" },
+        noteUpdatedAt: Date,
         remarks: {
           type: String,
           default: "",
@@ -65,6 +68,9 @@ const attendanceSchema = new mongoose.Schema(
           type: Boolean,
           default: false,
         },
+        parentAbsenceReason: { type: String, default: "", maxlength: 2000 },
+        parentReporter: { type: mongoose.Schema.Types.ObjectId, ref: "Parent" },
+        parentReportedAt: Date,
         lateArrival: {
           type: Boolean,
           default: false,
@@ -100,6 +106,7 @@ attendanceSchema.index(
   }
 );
 attendanceSchema.index({ trainingSessionId: 1 }, { unique: true, sparse: true });
+attendanceSchema.index({ team: 1, sessionDate: 1 }, { unique: true, partialFilterExpression: { team: { $type: "objectId" }, league: null } });
 attendanceSchema.index(
   { event: 1, sessionDate: 1, campSession: 1 },
   {

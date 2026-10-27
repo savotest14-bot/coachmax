@@ -7,6 +7,9 @@ const orderSchema = new mongoose.Schema(
       ref: "Parent",
       required: true,
     },
+    checkoutKey: { type: String },
+    totalAmountMinor: { type: Number, min: 0 },
+    currency: { type: String, default: "AUD" },
     items: [
       {
         product: {
@@ -18,11 +21,13 @@ const orderSchema = new mongoose.Schema(
           type: Number,
           required: true,
           min: 1,
+          validate: Number.isSafeInteger,
         },
         price: {
           type: Number,
           required: true,
         },
+        priceMinor: { type: Number, min: 0 },
         selectedSize: {
           type: String,
           default: "",
@@ -58,5 +63,7 @@ const orderSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+orderSchema.index({ parent: 1, checkoutKey: 1 }, { unique: true, partialFilterExpression: { checkoutKey: { $type: "string" } } });
 
 module.exports = mongoose.model("Order", orderSchema);

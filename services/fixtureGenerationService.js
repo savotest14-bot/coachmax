@@ -3,36 +3,15 @@ const Fixture = require("../models/Fixture");
 const Standing = require("../models/Standing");
 const League = require("../models/League");
 const Team = require("../models/Team");
-const { dateOnly, dateOnlyStartUtc, zonedDateTimeToUtc } = require("../utils/dateTime");
+const { assertTeamLeagueScope, assertRoundParticipants, domainError } = require("../utils/leagueIntegrity");
+const { dateOnly, dateOnlyStartUtc, zonedDateTimeToUtc, todayDateOnly, DEFAULT_TIMEZONE } = require("../utils/dateTime");
 
 /**
  * Parses any date format (YYYY-MM-DD, DD-MM-YYYY, ISO) to a Date at UTC midnight.
  */
 function parseDateToMidnight(input) {
   if (!input) return null;
-  const str = String(input).trim();
-  // Check DD-MM-YYYY or DD/MM/YYYY
-  const dmyMatch = str.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
-  if (dmyMatch) {
-    const day = parseInt(dmyMatch[1], 10);
-    const month = parseInt(dmyMatch[2], 10);
-    const year = parseInt(dmyMatch[3], 10);
-    return dateOnlyStartUtc(`${year.toString().padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
-  }
-  // Check YYYY-MM-DD
-  const ymdMatch = str.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
-  if (ymdMatch) {
-    const year = parseInt(ymdMatch[1], 10);
-    const month = parseInt(ymdMatch[2], 10);
-    const day = parseInt(ymdMatch[3], 10);
-    return dateOnlyStartUtc(`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
-  }
-  try {
-    const normalized = dateOnly(str, "date");
-    return normalized ? dateOnlyStartUtc(normalized, "date") : null;
-  } catch (error) {
-    return null;
-  }
+  try { return dateOnlyStartUtc(dateOnly(input, "date"), "date"); } catch { return null; }
 }
 
 /**
@@ -87,9 +66,11 @@ function validateTournamentConfig(params) {
     };
   }
 
+  if (parsedFormat === "KNOCKOUT") return { isValid: false, message: "Knockout fixtures require round-by-round progression. Use manual scheduling; automatic round-robin generation is not valid for knockouts." };
+
   // 3. Group count validation
   const parsedGroupCount = groupCount !== undefined && groupCount !== null ? parseInt(groupCount, 10) : 1;
-  if (isNaN(parsedGroupCount) || parsedGroupCount < 1) {
+  if (!Number.isInteger(Number(groupCount)) || parsedGroupCount < 1) {
     return {
       isValid: false,
       message: "groupCount must be at least 1.",
@@ -114,7 +95,7 @@ function validateTournamentConfig(params) {
   // 4. Number of rounds
   const parsedNumberOfRounds =
     numberOfRounds !== undefined && numberOfRounds !== null ? parseInt(numberOfRounds, 10) : 1;
-  if (isNaN(parsedNumberOfRounds) || parsedNumberOfRounds < 1) {
+  if (!Number.isInteger(Number(numberOfRounds)) || parsedNumberOfRounds < 1) {
     return {
       isValid: false,
       message: "numberOfRounds must be at least 1.",
@@ -144,7 +125,7 @@ function validateTournamentConfig(params) {
   // 7. Number of fields
   const parsedFields =
     numberOfFields !== undefined && numberOfFields !== null ? parseInt(numberOfFields, 10) : 1;
-  if (isNaN(parsedFields) || parsedFields < 1) {
+  if (!Number.isInteger(Number(numberOfFields)) || parsedFields < 1) {
     return {
       isValid: false,
       message: "numberOfFields must be at least 1.",
@@ -421,10 +402,8 @@ function scheduleFixturesAcrossSlotsAndFields(params) {
   const minutesFromStartOfDay = startHour * 60 + startMinute;
   const minutesUntilMidnight = 24 * 60 - minutesFromStartOfDay;
   // Last match starts at slot S, ends at S + matchDuration <= minutesUntilMidnight
-  const maxSlotsPerDay = Math.max(
-    1,
-    Math.floor((minutesUntilMidnight - matchDuration) / slotDurationMinutes) + 1
-  );
+  const maxSlotsPerDay = Math.floor((minutesUntilMidnight - matchDuration) / slotDurationMinutes) + 1;
+  if (maxSlotsPerDay < 1) throw domainError("No match can finish before midnight with this start time and duration.");
 
   const scheduledFixtures = [];
 
@@ -442,9 +421,11 @@ function scheduleFixturesAcrossSlotsAndFields(params) {
 
     const roundExplicitDate =
       Array.isArray(sessionDates) && sessionDates.length >= r && sessionDates[r - 1]
-        ? parseDateToMidnight(sessionDates[r - 1]) || new Date(sessionDates[r - 1])
+        ? parseDateToMidnight(sessionDates[r - 1])
         : null;
 
+    if (Array.isArray(sessionDates) && sessionDates[r - 1] && !roundExplicitDate) throw domainError("Invalid explicit round session date.");
+    if (roundExplicitDate && (roundExplicitDate < startDate || roundExplicitDate > endDate)) throw domainError("Round session dates must stay within the league date range.");
     if (roundExplicitDate) {
       currentSlotIndex = 0;
     } else if (spreadOneRoundPerDay) {
@@ -464,6 +445,7 @@ function scheduleFixturesAcrossSlotsAndFields(params) {
         currentSlotIndex = 0;
       }
 
+      if (roundExplicitDate && currentSlotIndex >= maxSlotsPerDay) throw domainError("Matches in this round cannot fit before midnight on its configured session date.");
       // Check if currentDayIndex exceeds totalDays
       if (!roundExplicitDate && currentDayIndex >= totalDays) {
         throw new Error(
@@ -497,8 +479,9 @@ function scheduleFixturesAcrossSlotsAndFields(params) {
           group: match.group || "",
           homeTeam: match.homeTeam,
           awayTeam: match.awayTeam,
+          participants: [match.homeTeam, match.awayTeam],
           kickoffTime,
-          sessionDate: roundExplicitDate || parseDateToMidnight(kickoffTime),
+          sessionDate: matchDate,
           endTime,
           field: fieldName,
           venue: venueDisplay,
@@ -557,7 +540,13 @@ async function generateAndSaveLeagueFixtures({ league, teams, config = {}, sessi
     throw error;
   }
 
+  if (!session) throw domainError("Fixture generation requires a transactional database connection.", 503);
+  await League.updateOne({ _id: league._id }, { $inc: { schedulingRevision: 1 } }, { session });
   const norm = validation.normalized;
+  const selectedTeams = await Team.find({ _id: { $in: norm.teamIds }, archivedAt: null }).session(session || null);
+  if (selectedTeams.length !== norm.teamIds.length) throw domainError("Every selected team must exist and be active.");
+  assertTeamLeagueScope(league, selectedTeams);
+
 
   // 2. Distribute teams into groups
   const groups = distributeTeamsIntoGroups(norm.teamIds, norm.groupCount);
@@ -605,6 +594,7 @@ async function generateAndSaveLeagueFixtures({ league, teams, config = {}, sessi
     league: league._id,
   }));
 
+  assertRoundParticipants(fixtureDocsToCreate);
   // 5. Batch insert fixtures
   const insertOptions = session ? { session } : {};
   const createdFixtures = await Fixture.insertMany(fixtureDocsToCreate, insertOptions);
@@ -723,7 +713,13 @@ async function reconcileAndSaveLeagueFixtures({
     throw error;
   }
 
+  if (!session) throw domainError("Fixture generation requires a transactional database connection.", 503);
+  await League.updateOne({ _id: league._id }, { $inc: { schedulingRevision: 1 } }, { session });
   const norm = validation.normalized;
+  const selectedTeams = await Team.find({ _id: { $in: norm.teamIds }, archivedAt: null }).session(session || null);
+  if (selectedTeams.length !== norm.teamIds.length) throw domainError("Every selected team must exist and be active.");
+  assertTeamLeagueScope(league, selectedTeams);
+
 
   const selectedRound =
     config.round !== undefined && config.round !== null && config.round !== ""
@@ -733,7 +729,7 @@ async function reconcileAndSaveLeagueFixtures({
         : null);
 
   // 2. Fetch all existing fixtures for this league
-  const existingFixtures = await Fixture.find({ league: league._id }).sort({
+  const existingFixtures = await Fixture.find({ league: league._id }).session(session || null).sort({
     round: 1,
     kickoffTime: 1,
     _id: 1,
@@ -781,7 +777,7 @@ async function reconcileAndSaveLeagueFixtures({
   }
 
   // 5. Generate new randomized schedule
-  const groups = distributeTeamsIntoGroups(norm.teamIds, norm.groupCount, randomize);
+  const groups = manualFixtures.length && league.groups?.length ? league.groups.map((group) => ({ name: group.name, teams: group.teams.map(String).filter((id) => norm.teamIds.includes(id)) })) : distributeTeamsIntoGroups(norm.teamIds, norm.groupCount, randomize);
   const roundMatchesMap = new Map();
   let maxRounds = 0;
   const allByes = [];
@@ -819,9 +815,44 @@ async function reconcileAndSaveLeagueFixtures({
     venueName: venue || league.name || "",
   });
 
-  const targetScheduledFixtures = selectedRound !== null
-    ? schedulingResult.scheduledFixtures.filter((f) => f.round === selectedRound)
-    : schedulingResult.scheduledFixtures;
+  const originalTargets = selectedRound !== null ? schedulingResult.scheduledFixtures.filter((f) => f.round === selectedRound) : schedulingResult.scheduledFixtures;
+  const targetScheduledFixtures = [];
+  for (const round of [...new Set(originalTargets.map((fixture) => fixture.round))]) {
+    const roundManual = manualFixtures.filter((fixture) => fixture.round === round);
+    const occupied = new Set(roundManual.flatMap((fixture) => [String(fixture.homeTeam), String(fixture.awayTeam)]));
+    for (const group of groups) {
+      const groupName = norm.groupCount > 1 ? group.name : "";
+      const templates = originalTargets.filter((fixture) => fixture.round === round && (fixture.group || "") === groupName);
+      if (!templates.length) continue;
+      const kept = templates.filter((fixture) => !occupied.has(String(fixture.homeTeam)) && !occupied.has(String(fixture.awayTeam)));
+      const paired = new Set(kept.flatMap((fixture) => [String(fixture.homeTeam), String(fixture.awayTeam)]));
+      const remaining = group.teams.map(String).filter((id) => !occupied.has(id) && !paired.has(id));
+      const allPairs = [...kept];
+      for (let i = 0; i + 1 < remaining.length; i += 2) allPairs.push({ ...templates[0], homeTeam: remaining[i], awayTeam: remaining[i + 1], participants: [remaining[i], remaining[i + 1]] });
+      targetScheduledFixtures.push(...allPairs);
+    }
+  }
+  assertRoundParticipants([...manualFixtures, ...targetScheduledFixtures].map((fixture) => ({ ...(fixture.toObject ? fixture.toObject() : fixture), league: league._id })));
+  // Field bookings are also protected when retaining a manually scheduled match.
+  const reservations = existingFixtures.filter((fixture) => !reusableFixtures.some((row) => String(row._id) === String(fixture._id)));
+  for (const target of targetScheduledFixtures) {
+    let candidate = new Date(target.kickoffTime);
+    let placed = false;
+    const sessionDate = config.sessionDates?.[target.round - 1] || league.sessionDates?.[target.round - 1];
+    for (let attempt = 0; attempt < 10000 && !placed; attempt++) {
+      const calendarDate = todayDateOnly(DEFAULT_TIMEZONE, candidate);
+      if (calendarDate > dateOnly(norm.endDate) || (sessionDate && calendarDate !== dateOnly(sessionDate))) break;
+      const endTime = new Date(candidate.getTime() + norm.matchDuration * 60000);
+      if (todayDateOnly(DEFAULT_TIMEZONE, endTime) !== calendarDate) break;
+      for (let field = 1; field <= norm.numberOfFields; field++) {
+        const label = `Field ${field}`;
+        const conflict = reservations.some((fixture) => fixture.field === label && new Date(fixture.kickoffTime) < endTime && new Date(fixture.endTime || new Date(fixture.kickoffTime).getTime() + norm.matchDuration * 60000) > candidate);
+        if (!conflict) { Object.assign(target, { kickoffTime: new Date(candidate), endTime, field: label, sessionDate: parseDateToMidnight(calendarDate) }); reservations.push(target); placed = true; break; }
+      }
+      if (!placed) candidate = new Date(candidate.getTime() + (norm.matchDuration + norm.breakBetweenMatches) * 60000);
+    }
+    if (!placed) throw domainError("Generated matches cannot fit around the preserved manual field bookings.");
+  }
   const totalTargetCount = targetScheduledFixtures.length;
   const reusableCount = reusableFixtures.length;
 
@@ -829,61 +860,12 @@ async function reconcileAndSaveLeagueFixtures({
   const createdCount = Math.max(0, totalTargetCount - reusableCount);
   const deleteCount = Math.max(0, reusableCount - totalTargetCount);
 
-  const bulkOps = [];
   const sessionOption = session ? { session } : {};
-
-  // 6. Update existing reusable fixtures in place
-  for (let i = 0; i < updateCount; i++) {
-    const existing = reusableFixtures[i];
-    const target = targetScheduledFixtures[i];
-
-    bulkOps.push({
-      updateOne: {
-        filter: { _id: existing._id },
-        update: {
-          $set: {
-            round: target.round,
-            group: target.group || "",
-            homeTeam: target.homeTeam,
-            awayTeam: target.awayTeam,
-            kickoffTime: target.kickoffTime,
-            endTime: target.endTime,
-            field: target.field,
-            venue: target.venue,
-            status: "SCHEDULED",
-            fixtureSource: "GENERATED",
-            isManuallyModified: false,
-          },
-        },
-      },
-    });
-  }
-
-  // 7. Delete excess fixtures if fewer are now needed
-  if (deleteCount > 0) {
-    const excessIds = reusableFixtures.slice(totalTargetCount).map((f) => f._id);
-    bulkOps.push({
-      deleteMany: {
-        filter: { _id: { $in: excessIds } },
-      },
-    });
-  }
-
-  if (bulkOps.length > 0) {
-    await Fixture.bulkWrite(bulkOps, sessionOption);
-  }
-
-  // 8. Create new fixtures if more are needed
-  if (createdCount > 0) {
-    const newDocs = targetScheduledFixtures.slice(reusableCount).map((f) => ({
-      ...f,
-      league: league._id,
-      fixtureSource: "GENERATED",
-      isManuallyModified: false,
-      status: "SCHEDULED",
-    }));
-    await Fixture.insertMany(newDocs, sessionOption);
-  }
+  if (!session) throw domainError("Fixture regeneration requires a transactional database connection.", 503);
+  // Remove only unplayed reusable rows inside the transaction, then reuse their IDs.
+  // Updating in place sequentially can transiently collide with a team held by another row.
+  if (reusableFixtures.length) await Fixture.deleteMany({ _id: { $in: reusableFixtures.map((f) => f._id) } }, sessionOption);
+  if (targetScheduledFixtures.length) await Fixture.insertMany(targetScheduledFixtures.map((f, i) => ({ ...f, _id: reusableFixtures[i]?._id || new mongoose.Types.ObjectId(), league: league._id, participants: [f.homeTeam, f.awayTeam], fixtureSource: "GENERATED", isManuallyModified: false })), sessionOption);
 
   // 9. Initialize / update standings for all participating teams
   const standingOps = [];
@@ -938,7 +920,7 @@ async function reconcileAndSaveLeagueFixtures({
   }
 
   // Fetch final updated fixtures to return
-  const finalFixtures = await Fixture.find({ league: league._id })
+  const finalFixtures = await Fixture.find({ league: league._id }).session(session || null)
     .sort({ round: 1, kickoffTime: 1 })
     .populate("homeTeam", "teamName logo")
     .populate("awayTeam", "teamName logo");

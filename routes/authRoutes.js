@@ -1,18 +1,20 @@
 const express = require("express");
 const auth = require("../middleware/authMiddleware");
-const { forgotPassword, resendOTP, verifyOtp, resetPassword, getMyProfile, updateMyProfile, updateChild } = require("../controllers/authController");
+const { forgotPassword, resendOTP, verifyOtp, resetPassword, changePassword, getMyProfile, updateMyProfile, updateChild } = require("../controllers/authController");
 const { uploads } = require("../utils/upload");
 const { getMyRole } = require("../controllers/adminAuthController");
 
 const router = express.Router();
+const resetRateLimit = require("../middleware/authRateLimit");
 
-router.post("/forgotPassword", forgotPassword);
+router.post("/forgotPassword", resetRateLimit, forgotPassword);
 
-router.post("/resendOtp", resendOTP);
+router.post("/resendOtp", resetRateLimit, resendOTP);
 
-router.post("/verifyOtp", verifyOtp);
+router.post("/verifyOtp", resetRateLimit, verifyOtp);
 
-router.post("/resetPassword", resetPassword);
+router.post("/resetPassword", resetRateLimit, resetPassword);
+router.post("/changePassword", auth, resetRateLimit, changePassword);
 
 router.get("/getMyProfile", auth, getMyProfile);
 

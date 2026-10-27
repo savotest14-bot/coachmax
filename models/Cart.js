@@ -8,6 +8,7 @@ const cartSchema = new mongoose.Schema(
       required: true,
       unique: true,
     },
+    lastCheckoutKey: { type: String },
     items: [
       {
         product: {
@@ -19,6 +20,7 @@ const cartSchema = new mongoose.Schema(
           type: Number,
           required: true,
           min: 1,
+          validate: Number.isSafeInteger,
           default: 1,
         },
         selectedSize: {
@@ -32,7 +34,7 @@ const cartSchema = new mongoose.Schema(
       },
     ],
   },
-  { timestamps: true }
+  { timestamps: true, optimisticConcurrency: true }
 );
 
 module.exports = mongoose.model("Cart", cartSchema);

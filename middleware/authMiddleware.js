@@ -3,6 +3,7 @@ const Admin = require("../models/Admin");
 const Parent = require("../models/Parent");
 
 const auth = async (req, res, next) => {
+  if (req.authenticated === true) return next();
   try {
     const token = req.header("Authorization")?.replace("Bearer ", "");
 
@@ -18,12 +19,13 @@ const auth = async (req, res, next) => {
     });
 
     if (admin) {
-      if (admin.role === "COACH" && admin.isActive === false) {
+      if (admin.isActive === false) {
         return res.status(403).json({ message: "Coach is inactive and cannot perform this action" });
       }
       req.admin = admin;
       req.role = "ADMIN";
       req.token = token;
+      req.authenticated = true;
       return next();
     }
     const parent = await Parent.findOne({
@@ -47,6 +49,7 @@ const auth = async (req, res, next) => {
       req.parent = parent;
       req.role = "PARENT";
       req.token = token;
+      req.authenticated = true;
 
       return next();
     }

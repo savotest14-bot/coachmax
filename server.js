@@ -1,74 +1,79 @@
-const express = require("express")
-const dotenv = require("dotenv");
+const express = require("express");
+if (require.main === module) require("dotenv").config();
 const cors = require("cors");
-const connectDB = require("./config/db.js");
 const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
-const adminRoutes = require("./routes/adminRoutes");
-const seedAdmin = require("./config/seedAdmin.js");
-const userRoutes = require("./routes/userRoutes.js")
-const authRoutes = require("./routes/authRoutes.js")
-const coachRoutes = require("./routes/coachRoutes.js")
+const mongoose = require("mongoose");
 const path = require("path");
-
-dotenv.config();
-connectDB().then(async () => {
-    await seedAdmin();
-})
-
+const { UPLOAD_ROOT } = require("./utils/upload");
+const { privateMediaGate, issueMediaLink, signPrivateJson } = require("./middleware/privateMedia");
+const auth = require("./middleware/authMiddleware");
 const app = express();
-
-app.set("trust proxy", 1);
-
+app.disable("x-powered-by");
+app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS ?? 0));
 app.use(helmet({ crossOriginResourcePolicy: false }));
-
-app.use(cors({
-    origin: "*",
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning"]
-}));
-
-app.use(express.json());
-
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
-app.use("/public", express.static(path.join(__dirname, "public")));
-
-
-app.get("/", (req, res) => {
-    res.send("server is running");
-});
-
-app.get("/swagger.json", (req, res) => {
-    res.sendFile(path.join(__dirname, "swagger.json"));
-});
-
-app.get("/api-docs", (req, res) => {
-    res.sendFile(path.join(__dirname, "swagger.json"));
-});
-
-app.use("/api/admin", adminRoutes);
-app.use("/api/user", userRoutes);
-app.use("/api/auth", authRoutes)
-app.use("/api/coach", coachRoutes)
-
+const configuredOrigins = () => new Set([...(process.env.ALLOWED_ORIGINS || "").split(","), process.env.FRONTEND_URL, process.env.CLIENT_URL, process.env.APP_URL].filter(Boolean).flatMap((value) => { try { return [new URL(value.trim()).origin]; } catch { return []; } }));
+app.use(cors({ origin(origin, callback) {
+  if (!origin || configuredOrigins().has(origin) || (process.env.NODE_ENV !== "production" && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin))) return callback(null, true);
+  return callback(Object.assign(new Error("Origin is not allowed"), { status: 403 }));
+}, methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "ngrok-skip-browser-warning"] }));
+app.use(express.json({ limit: "1mb" }));
+app.use(signPrivateJson);
+app.get("/health/live", (req, res) => res.json({ status: "ok" }));
+app.get("/health/ready", (req, res) => res.status(mongoose.connection.readyState === 1 ? 200 : 503).json({ ready: mongoose.connection.readyState === 1 }));
+app.get("/api/auth/media-link", auth, issueMediaLink);
+app.use("/uploads", privateMediaGate, express.static(UPLOAD_ROOT, { dotfiles: "deny", setHeaders(res) { res.setHeader("X-Content-Type-Options", "nosniff"); } }));
+app.use("/public", express.static(path.join(__dirname, "public"), { dotfiles: "deny" }));
+app.get("/", (req, res) => res.json({ service: "CoachMax API" }));
+app.get(["/swagger.json", "/api-docs"], (req, res) => res.sendFile(path.join(__dirname, "swagger.json")));
+app.use("/api/admin", require("./routes/adminRoutes"));
+app.use("/api/user", require("./routes/userRoutes"));
+app.use("/api/auth", require("./routes/authRoutes"));
+app.use("/api/coach", require("./routes/coachRoutes"));
+app.use((req, res) => res.status(404).json({ success: false, message: "Endpoint not found" }));
 app.use((err, req, res, next) => {
-    console.error(err);
-    res.status(err.status || 500).json({
-        success: false,
-        message: err.message || "Internal Server Error",
-    });
+  if (res.headersSent) return next(err);
+  const status = err.code === "LIMIT_FILE_SIZE" || err.type === "entity.too.large" ? 413 : err.name === "ValidationError" || err.name === "CastError" || err instanceof TypeError ? 400 : err.code === 11000 ? 409 : err.status || err.statusCode || 500;
+  if (status >= 500) console.error("Request failed", { name: err.name, code: err.code });
+  return res.status(status).json({ success: false, message: status >= 500 ? "The request could not be completed. Please try again." : err.message, ...(err.code ? { code: err.code } : {}) });
 });
-
-const http = require("http");
-const { initSocket } = require("./sockets/chatSocket");
-
-const server = http.createServer(app);
-
-initSocket(server);
-
-const { initCronJobs } = require("./services/cronService");
-initCronJobs();
-
-const PORT = process.env.PORT || 4001;
-server.listen(PORT, () => console.log(`🚀 Server with Socket.IO running on port ${PORT}`));
-
+async function start() {
+  if (!process.env.MONGO_URI || !process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) throw new Error("MONGO_URI and a JWT_SECRET of at least 32 characters are required");
+  if (process.env.NODE_ENV === "production" && !configuredOrigins().size) throw new Error("Set ALLOWED_ORIGINS or a trusted app URL before production startup");
+  new Intl.DateTimeFormat("en", { timeZone: require("./utils/dateTime").DEFAULT_TIMEZONE }).format();
+  mongoose.set("autoIndex", false);
+  let server, socketServer;
+  let jobs = [];
+  try {
+    await require("./config/db")();
+    try {
+      await require("./services/criticalIndexes").assertCriticalIndexes();
+    } catch (indexError) {
+      if (process.env.NODE_ENV === "production") throw indexError;
+      console.warn("⚠️ [DEV WARNING] Critical indexes check failed (allowed in dev):", indexError.message);
+    }
+    await require("./config/seedAdmin")();
+    server = require("http").createServer(app);
+    require("./sockets/chatSocket").initSocket(server);
+    socketServer = require("./sockets/chatSocket").getIO();
+    await new Promise((resolve, reject) => { server.once("error", reject); server.listen(process.env.PORT || 4001, resolve); });
+    jobs = require("./services/cronService").initCronJobs();
+    console.log("CoachMax API ready");
+    let closing;
+    const close = () => closing ||= (async () => {
+      jobs.forEach((job) => job.stop());
+      await require("./sockets/chatSocket").closeSocket();
+      if (server.listening) await new Promise((resolve) => server.close(resolve));
+      await mongoose.disconnect();
+    })();
+    process.once("SIGINT", close); process.once("SIGTERM", close);
+    return { server, close };
+  } catch (error) {
+    jobs.forEach((job) => job.stop());
+    if (socketServer) await require("./sockets/chatSocket").closeSocket();
+    else if (server?.listening) await new Promise((resolve) => server.close(resolve));
+    await mongoose.disconnect();
+    throw error;
+  }
+}
+if (require.main === module) start().catch((error) => { console.error("Startup failed:", error.message); process.exitCode = 1; });
+module.exports = { app, start };

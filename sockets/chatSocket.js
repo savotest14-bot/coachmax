@@ -1,6 +1,5 @@
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
 const Admin = require("../models/Admin");
@@ -12,66 +11,76 @@ const User = require("../models/User");
 const { sendNotification } = require("../services/notificationService");
 
 let io = null;
+let closeSessionResources = async () => {};
 
 const onlineUsersMap = new Map();
 
-const saveSocketAttachment = (att) => {
-  if (!att) return null;
-
-  // Already uploaded URL
+const { saveValidatedBuffer, signatureType, UPLOAD_ROOT } = require('../utils/upload');
+const { canonicalMediaPath, canReadMedia, signMedia } = require('../middleware/privateMedia');
+const saveSocketAttachment = async (att, socket, newUploads) => {
+  if (!att || typeof att !== 'object') throw new Error('Invalid attachment');
   if (att.url && !att.buffer && !att.fileData && !att.base64) {
-    return {
-      fileType: att.fileType || "FILE",
-      url: att.url,
-    };
+    const relative=canonicalMediaPath(att.url);
+    const identity={admin:socket.refModel==='Admin'?socket.user:null,parent:socket.refModel==='Parent'?socket.user:null};
+    if(!relative || !relative.startsWith('uploads/chat/') || !await canReadMedia(identity,relative))throw new Error('Attachment access denied');
+    return {fileType:att.fileType || 'FILE',url:relative};
   }
-
-  const chatDir = path.join(process.cwd(), "uploads", "chat");
-  if (!fs.existsSync(chatDir)) {
-    fs.mkdirSync(chatDir, { recursive: true });
-  }
-
-  let fileBuffer = null;
-  let ext = ".bin";
-
-  if (att.fileName) {
-    ext = path.extname(att.fileName) || ".bin";
-  } else if (att.fileType === "IMAGE") {
-    ext = ".jpg";
-  } else if (att.fileType === "VIDEO") {
-    ext = ".mp4";
-  } else if (att.fileType === "AUDIO") {
-    ext = ".mp3";
-  }
-
-  if (Buffer.isBuffer(att.buffer || att.fileData)) {
-    fileBuffer = att.buffer || att.fileData;
-  } else if (typeof att.base64 === "string") {
-    const base64Data = att.base64.replace(/^data:.*?;base64,/, "");
-    fileBuffer = Buffer.from(base64Data, "base64");
-  } else if (typeof att.fileData === "string") {
-    const base64Data = att.fileData.replace(/^data:.*?;base64,/, "");
-    fileBuffer = Buffer.from(base64Data, "base64");
-  }
-
-  if (!fileBuffer) return null;
-
-  const filename = `${crypto.randomUUID()}${ext}`;
-  const fullPath = path.join(chatDir, filename);
-  fs.writeFileSync(fullPath, fileBuffer);
-
-  let fileType = att.fileType || "FILE";
-  if (!att.fileType) {
-    if (ext.match(/\.(jpg|jpeg|png|gif|webp)$/i)) fileType = "IMAGE";
-    else if (ext.match(/\.(mp4|webm|mov|avi)$/i)) fileType = "VIDEO";
-    else if (ext.match(/\.(mp3|wav|ogg|m4a)$/i)) fileType = "AUDIO";
-  }
-
-  return {
-    fileType,
-    url: `uploads/chat/${filename}`,
-  };
+  const raw=att.buffer || att.fileData || att.base64;
+  if (typeof raw === 'string' && raw.length > 70*1024*1024) throw new Error('Attachment is too large');
+  const buffer=Buffer.isBuffer(raw)?raw:typeof raw==='string'?Buffer.from(raw.replace(/^data:.*?;base64,/,''),'base64'):null;
+  if(!buffer || !buffer.length || buffer.length>50*1024*1024)throw new Error('Invalid attachment size');
+  const mime=signatureType(buffer);if(!mime)throw new Error('Unsupported attachment type');
+  const file=await saveValidatedBuffer(buffer,mime,'file');
+  newUploads.push({ path: file.path, url: 'uploads/chat/'+file.filename });
+  return {fileType:file.mimetype.startsWith('image/')?'IMAGE':file.mimetype.startsWith('video/')?'VIDEO':file.mimetype.startsWith('audio/')?'AUDIO':'FILE',url:'uploads/chat/'+file.filename};
 };
+
+const sessionFailure = () => Object.assign(new Error("Session expired or revoked. Please sign in again."), { code: "SESSION_REVOKED" });
+async function authenticateSocket(socket, token = socket.sessionToken) {
+  if (typeof token !== "string" || !token) throw sessionFailure();
+  let decoded;
+  try { decoded = jwt.verify(token, process.env.JWT_SECRET); } catch { throw sessionFailure(); }
+  if (!decoded.id || (socket.userId && String(decoded.id) !== socket.userId)) throw sessionFailure();
+  let user, refModel;
+  if (!socket.refModel || socket.refModel === "Admin") {
+    user = await Admin.findOne({ _id: decoded.id, tokens: token, isActive: { $ne: false } });
+    if (user && ["SUPER_ADMIN", "COACH"].includes(user.role)) refModel = "Admin";
+    else user = null;
+  }
+  if (!user && (!socket.refModel || socket.refModel === "Parent")) {
+    user = await Parent.findOne({ _id: decoded.id, tokens: token, isBlocked: { $ne: true }, status: "APPROVED" });
+    if (user) refModel = "Parent";
+  }
+  if (!user) throw sessionFailure();
+  socket.sessionToken = token;
+  socket.user = user;
+  socket.userId = String(user._id);
+  socket.refModel = refModel;
+  socket.role = refModel === "Parent" ? "PARENT" : user.role;
+  socket.tokenExpiresAt = Number(decoded.exp || 0) * 1000;
+  if (socket.connected && socket.role !== "SUPER_ADMIN") await socket.leave("admin_channel");
+  return user;
+}
+
+function revokeSocket(socket) {
+  if (!socket.connected) return;
+  socket.emit("session_revoked", { success: false, code: "SESSION_REVOKED", message: sessionFailure().message });
+  socket.disconnect(true);
+}
+
+async function removeUnpersistedUploads(uploads) {
+  const base = path.resolve(UPLOAD_ROOT, "chat");
+  for (const upload of uploads) {
+    const target = path.resolve(upload.path);
+    if (!target.startsWith(base + path.sep)) continue;
+    try {
+      // A lost database response can follow a committed Message.create. Never
+      // remove an attachment referenced by any persisted or forwarded message.
+      if (await Message.exists({ "attachments.url": { $in: [upload.url, `/${upload.url}`] } })) continue;
+      await fs.promises.unlink(target);
+    } catch (error) { if (error.code !== "ENOENT") console.error("Unable to clean unused socket attachment:", error.code || error.name); }
+  }
+}
 
 /**
  * Helper: Check if a user is online
@@ -110,10 +119,14 @@ const calculateTickStatus = (message, senderId) => {
 /**
  * Initialize Socket.IO with HTTP Server
  */
-const initSocket = (server) => {
+const initSocket = (server, { sessionCheckIntervalMs = 15000 } = {}) => {
   io = new Server(server, {
+    maxHttpBufferSize: 70 * 1024 * 1024,
     cors: {
-      origin: "*",
+      origin(origin, callback) {
+        const allowed=new Set([...(process.env.ALLOWED_ORIGINS||'').split(','),process.env.FRONTEND_URL,process.env.CLIENT_URL,process.env.APP_URL].filter(Boolean).map(value=>{try{return new URL(value.trim()).origin}catch{return ''}}));
+        callback(null,!origin || allowed.has(origin) || (process.env.NODE_ENV!=='production' && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)));
+      },
       methods: ["GET", "POST"],
     },
   });
@@ -125,44 +138,57 @@ const initSocket = (server) => {
         socket.handshake.auth?.token ||
         socket.handshake.headers?.authorization?.replace("Bearer ", "");
 
-      if (!token) {
-        return next(new Error("Authentication token required"));
-      }
-
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-      // Check Admin / Coach
-      const admin = await Admin.findOne({ _id: decoded.id, tokens: token });
-      if (admin) {
-        socket.user = admin;
-        socket.role = admin.role; // SUPER_ADMIN or COACH
-        socket.userId = admin._id.toString();
-        socket.refModel = "Admin";
-        return next();
-      }
-
-      // Check Parent
-      const parent = await Parent.findOne({ _id: decoded.id, tokens: token });
-      if (parent) {
-        if (parent.isBlocked) {
-          return next(new Error("Account blocked"));
-        }
-        socket.user = parent;
-        socket.role = "PARENT";
-        socket.userId = parent._id.toString();
-        socket.refModel = "Parent";
-        return next();
-      }
-
-      return next(new Error("Invalid token"));
+      await authenticateSocket(socket, token);
+      return next();
     } catch (err) {
-      return next(new Error("Unauthorized: " + err.message));
+      return next(sessionFailure());
     }
   });
+
+  // Change streams revoke idle connections promptly after logout, password
+  // reset or account blocking. Per-packet checks and a periodic fallback remain
+  // authoritative if a stream is temporarily unavailable.
+  const watchers = [];
+  const resources = new Map();
+  for (const [Model, refModel] of [[Admin, "Admin"], [Parent, "Parent"]]) {
+    const watcher = Model.watch([{ $match: { operationType: { $in: ["update", "replace", "delete"] } } }]);
+    watcher.on("change", (change) => {
+      if (change.operationType === "update" && !Object.keys(change.updateDescription?.updatedFields || {}).concat(change.updateDescription?.removedFields || []).some((key) => /^(tokens(?:\.|$)|isActive$|isBlocked$|status$|role$)/.test(key))) return;
+      for (const socket of io?.sockets.sockets.values() || []) if (socket.refModel === refModel && socket.userId === String(change.documentKey?._id)) authenticateSocket(socket).catch(() => revokeSocket(socket));
+    });
+    watcher.on("error", () => { watcher.close().catch(() => {}); });
+    watchers.push(watcher);
+  }
+  const cleanupSessions = async () => {
+    for (const clear of resources.values()) clear();
+    resources.clear();
+    await Promise.all(watchers.map((watcher) => watcher.close().catch(() => {})));
+  };
+  closeSessionResources = cleanupSessions;
+  server.once("close", () => { cleanupSessions().catch(() => {}); });
 
   //  Connection Handler
   io.on("connection", async (socket) => {
     const userIdStr = socket.userId;
+    socket.use(async (packet, next) => {
+      try { await authenticateSocket(socket); return next(); }
+      catch {
+        const callback = packet[packet.length - 1];
+        if (typeof callback === "function") callback({ success: false, code: "SESSION_REVOKED", message: sessionFailure().message });
+        revokeSocket(socket);
+      }
+    });
+    const interval = setInterval(() => { authenticateSocket(socket).catch(() => revokeSocket(socket)); }, Math.max(100, Number(sessionCheckIntervalMs) || 15000));
+    interval.unref?.();
+    let expiryTimer;
+    const expire = () => {
+      if (!socket.tokenExpiresAt || !socket.connected) return;
+      const remaining = socket.tokenExpiresAt - Date.now();
+      if (remaining <= 0) revokeSocket(socket);
+      else { expiryTimer = setTimeout(expire, Math.min(remaining, 2147483647)); expiryTimer.unref?.(); }
+    };
+    if (socket.tokenExpiresAt) { expiryTimer = setTimeout(expire, Math.max(0, Math.min(socket.tokenExpiresAt - Date.now(), 2147483647))); expiryTimer.unref?.(); }
+    resources.set(socket.id, () => { clearInterval(interval); clearTimeout(expiryTimer); });
     console.log(`⚡ Socket connected: ${socket.id} (User: ${userIdStr}, Role: ${socket.role})`);
 
     // ─────────────────────────────────────────────
@@ -183,10 +209,9 @@ const initSocket = (server) => {
     socket.join(`user_${userIdStr}`);
 
     // Auto-join all chat rooms for this user
-    try {
-      const userRooms = await ChatRoom.find({ "members.user": userIdStr }).select("_id");
-      userRooms.forEach((r) => socket.join(`room_${r._id}`));
-    } catch (e) {}
+    ChatRoom.find({ members: { $elemMatch: { user: userIdStr, refModel: socket.refModel } } }).select("_id").then((rooms) => {
+      if (socket.connected) rooms.forEach((room) => socket.join(`room_${room._id}`));
+    }).catch(() => {});
 
     // Broadcast online status to all connected sockets
     io.emit("user_status_change", {
@@ -197,7 +222,7 @@ const initSocket = (server) => {
     });
 
     // Auto-deliver unread messages for this user (Single Tick ➔ Double Gray Tick)
-    autoDeliverUnreadMessages(userIdStr);
+    authenticateSocket(socket).then(() => { if (socket.connected) return autoDeliverUnreadMessages(userIdStr, socket.refModel); }).catch(() => revokeSocket(socket));
 
     // Join admin channel and send initial badges if admin
     if (socket.role === "SUPER_ADMIN" || socket.role === "ADMIN") {
@@ -217,6 +242,10 @@ const initSocket = (server) => {
     // Explicit request from client to fetch sidebar badges via socket
     socket.on("get_sidebar_badges", async (callback) => {
       try {
+        if (socket.role !== "SUPER_ADMIN") {
+          if (typeof callback === "function") callback({ success: false, message: "Administrator role required." });
+          return;
+        }
         const { calculateSidebarBadges } = require("../controllers/adminAuthController");
         const badges = await calculateSidebarBadges();
         if (typeof callback === "function") {
@@ -300,6 +329,7 @@ const initSocket = (server) => {
     // Real-Time Send Message (Single/Double/Blue Ticks + Attachment Upload)
     // ─────────────────────────────────────────────
     socket.on("send_message", async (data, callback) => {
+      const newUploads = [];
       try {
         const { roomId, text, attachments } = data;
 
@@ -322,11 +352,13 @@ const initSocket = (server) => {
           return;
         }
 
+        if (typeof text !== 'undefined' && (typeof text !== 'string' || text.length > 10000)) throw new Error('Message is too long');
+        if (attachments && (!Array.isArray(attachments) || attachments.length>5)) throw new Error('Maximum five attachments per message');
         // Process & Save Attachments (Buffer / Base64 / File object / Pre-uploaded URL)
         let processedAttachments = [];
         if (attachments && Array.isArray(attachments) && attachments.length > 0) {
           for (const att of attachments) {
-            const saved = saveSocketAttachment(att);
+            const saved = await saveSocketAttachment(att, socket, newUploads);
             if (saved) processedAttachments.push(saved);
           }
         }
@@ -371,6 +403,7 @@ const initSocket = (server) => {
           .populate("sender.user", "name fullName email profileImage")
           .lean();
 
+        populatedMsg.attachments = (populatedMsg.attachments || []).map(att=>({...att,url:canonicalMediaPath(att.url)?signMedia(canonicalMediaPath(att.url)):att.url}));
         populatedMsg.tickStatus = calculateTickStatus(populatedMsg, userIdStr);
 
         // Emit real-time message to room AND to user channels
@@ -425,6 +458,7 @@ const initSocket = (server) => {
 
         if (callback) callback({ success: true, data: populatedMsg });
       } catch (err) {
+        await removeUnpersistedUploads(newUploads);
         if (callback) callback({ success: false, message: err.message });
       }
     });
@@ -680,6 +714,8 @@ const initSocket = (server) => {
     //  Disconnect Handler
     // ─────────────────────────────────────────────
     socket.on("disconnect", () => {
+      resources.get(socket.id)?.();
+      resources.delete(socket.id);
       console.log(`🔌 Socket disconnected: ${socket.id}`);
 
       const userTrack = onlineUsersMap.get(userIdStr);
@@ -705,10 +741,10 @@ const initSocket = (server) => {
 /**
  * Auto-deliver unread messages when a user connects (Updates Single Tick to Double Gray Tick)
  */
-const autoDeliverUnreadMessages = async (userId) => {
+const autoDeliverUnreadMessages = async (userId, refModel) => {
   try {
     const userRooms = await ChatRoom.find({
-      "members.user": userId,
+      members: { $elemMatch: { user: userId, refModel } },
     }).select("_id");
 
     const roomIds = userRooms.map((r) => r._id);
@@ -756,6 +792,15 @@ const getIO = () => {
   return io;
 };
 
+async function closeSocket() {
+  const instance = io;
+  if (!instance) return;
+  await closeSessionResources();
+  await new Promise((resolve) => instance.close(resolve));
+  if (io === instance) io = null;
+  onlineUsersMap.clear();
+}
+
 /**
  * Broadcast updated sidebar badges to all connected admins
  */
@@ -779,4 +824,5 @@ module.exports = {
   getUserLastSeen,
   calculateTickStatus,
   broadcastSidebarBadges,
+  closeSocket,
 };

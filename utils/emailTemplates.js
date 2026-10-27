@@ -35,6 +35,34 @@ exports.welcomeEmail = (name) => {
   </div>
   `;
 };
+
+const escapeHtml = (value = "") => String(value).replace(/[&<>"']/g, (character) => ({
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+}[character]));
+
+exports.temporaryPlayerAccessEmail = ({ parentName, playerName, email, isNewAccount = false, loginUrl }) => {
+  const safeParentName = escapeHtml(parentName || "Parent/Guardian");
+  const safePlayerName = escapeHtml(playerName || "your player");
+  const safeEmail = escapeHtml(email || "");
+  const safeLoginUrl = escapeHtml(loginUrl);
+  return `<div style="font-family:Arial,sans-serif;background:#f4f6f8;padding:24px;color:#172033">
+    <div style="max-width:600px;margin:auto;background:#fff;border-radius:12px;overflow:hidden">
+      <div style="background:#08245b;color:#fff;padding:22px 28px"><h2 style="margin:0">CoachMax account access</h2></div>
+      <div style="padding:28px"><p>Hello ${safeParentName},</p>
+        <p>${isNewAccount ? `A CoachMax parent account was created when <b>${safePlayerName}</b> was added as a temporary player.` : `<b>${safePlayerName}</b> was added to your existing CoachMax parent account.`}</p>
+        <p>Account email: <b>${safeEmail}</b></p>
+        ${isNewAccount ? `<p>Open the link below and enter this email to request your six-digit code. Verify the code to choose your own password. The code expires after ten minutes; the verified reset grant expires after five minutes and works once.</p>` : `<p>Use your existing CoachMax password. If you need help, choose <b>Forgot password</b> on the login page.</p>`}
+        <div style="margin:28px 0;text-align:center"><a href="${safeLoginUrl}" style="display:inline-block;background:#064bff;color:#fff;padding:13px 24px;text-decoration:none;border-radius:7px;font-weight:bold">${isNewAccount ? "Choose your password" : "Open CoachMax and sign in"}</a></div>
+        <p style="font-size:13px;color:#64748b">If the button does not work, copy this link into your browser:<br/><a href="${safeLoginUrl}">${safeLoginUrl}</a></p>
+        <p style="font-size:13px;color:#64748b">If you did not expect this message, contact the CoachMax team.</p>
+      </div>
+    </div>
+  </div>`;
+};
 exports.newUserAdminEmail = (user) => {
   return `
   <div style="font-family: Arial, sans-serif; background:#f4f6f8; padding:20px;">

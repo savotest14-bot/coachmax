@@ -641,14 +641,14 @@ exports.registerForEvent = async (req, res) => {
         if (dateKey < eventStart || dateKey > eventEnd) {
           return res.status(400).json({
             success: false,
-            message: `Session date ${dateKey} is outside the configured camp range`,
+            message: `Session date ${formatDateOnly(dateKey)} is outside the configured camp range`,
           });
         }
 
         if (dateMap.has(dateKey)) {
           return res.status(400).json({
             success: false,
-            message: `Conflicting sessions selected for date ${dateKey}. You can select at most one session per date.`,
+            message: `Conflicting sessions selected for date ${formatDateOnly(dateKey)}. You can select at most one session per date.`,
           });
         }
         dateMap.set(dateKey, true);
@@ -658,7 +658,7 @@ exports.registerForEvent = async (req, res) => {
           if (s.registeredCount >= s.capacity) {
             return res.status(400).json({
               success: false,
-              message: `Session on ${dateKey} (${s.sessionLabel || s.sessionType}) is fully booked`,
+              message: `Session on ${formatDateOnly(dateKey)} (${s.sessionLabel || s.sessionType}) is fully booked`,
             });
           }
         }
@@ -1189,7 +1189,7 @@ exports.exportEventParticipants = async (req, res) => {
       PreferredFoot: d.user.preferredFoot || "",
       Club: d.user.club || "",
       DOB: d.user.dob
-        ? new Date(d.user.dob).toLocaleDateString()
+        ? formatDateOnly(d.user.dob)
         : "",
       ContactName: d.user.contactName || "",
       MedicalCondition: d.user.isMedicalCondition
@@ -1332,7 +1332,7 @@ exports.configureCampSessions = async (req, res) => {
         if (seenKeys.has(key)) {
           return res.status(409).json({
             success: false,
-            message: `Duplicate camp session submitted for ${dateKey} (${sessionType})`,
+            message: `Duplicate camp session submitted for ${formatDateOnly(dateKey)} (${sessionType})`,
           });
         }
         seenKeys.add(key);
@@ -1357,7 +1357,7 @@ exports.configureCampSessions = async (req, res) => {
         if (existingSession && keyOwner && keyOwner._id.toString() !== existingSession._id.toString()) {
           return res.status(409).json({
             success: false,
-            message: `A ${sessionType} session already exists for ${dateKey}`,
+            message: `A ${sessionType} session already exists for ${formatDateOnly(dateKey)}`,
           });
         }
 
@@ -1367,7 +1367,7 @@ exports.configureCampSessions = async (req, res) => {
           if (originalDate !== dateKey || existingSession.sessionType !== sessionType) {
             return res.status(409).json({
               success: false,
-              message: `Registered session ${originalDate} (${existingSession.sessionType}) cannot be moved or changed`,
+              message: `Registered session ${formatDateOnly(originalDate)} (${existingSession.sessionType}) cannot be moved or changed`,
             });
           }
         }
@@ -1380,7 +1380,7 @@ exports.configureCampSessions = async (req, res) => {
           : (existingSession ? existingSession.capacity : null);
 
         if (parsedCapacity !== null && (!Number.isFinite(parsedCapacity) || parsedCapacity < 0)) {
-          return res.status(400).json({ success: false, message: `Invalid capacity for ${dateKey}` });
+          return res.status(400).json({ success: false, message: `Invalid capacity for ${formatDateOnly(dateKey)}` });
         }
 
         if (!existingSession) {
@@ -1479,7 +1479,7 @@ exports.toggleCampDateAvailability = async (req, res) => {
 
     res.json({
       success: true,
-      message: `Date ${dateKey} set to ${isAvailable ? "available" : "unavailable"}`,
+      message: `Date ${formatDateOnly(dateKey)} set to ${isAvailable ? "available" : "unavailable"}`,
       data: updatedSessions.map(serializeCampSession),
     });
   } catch (error) {

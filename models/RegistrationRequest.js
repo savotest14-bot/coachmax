@@ -44,7 +44,7 @@ const registrationRequestSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["PENDING", "COMPLETED"],
+      enum: ["PENDING", "APPROVED", "REJECTED", "CANCELLED", "COMPLETED"],
       default: "PENDING",
     },
     createdBy: {
@@ -60,8 +60,15 @@ const registrationRequestSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    allocatedClasses: [{ type: mongoose.Schema.Types.ObjectId, ref: "Class" }],
+    allocationPaymentStatus: { type: String, default: "" },
+    rejectionReason: { type: String, default: "", maxlength: 2000 },
+    overrideReason: { type: String, default: "", maxlength: 2000 },
   },
   { timestamps: true }
 );
+
+registrationRequestSchema.index({ status: 1, createdAt: -1 });
+registrationRequestSchema.index({ player: 1, status: 1 });
 
 module.exports = mongoose.model("RegistrationRequest", registrationRequestSchema);

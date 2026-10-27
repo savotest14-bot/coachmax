@@ -10,7 +10,7 @@ const isCoach = async (req, res, next) => {
       });
     }
 
-    if (req.admin.role === "SUPER_ADMIN") {
+    if (["SUPER_ADMIN", "ADMIN"].includes(req.admin.role)) {
       return next();
     }
 

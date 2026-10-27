@@ -9,7 +9,7 @@ const mongoose = require("mongoose");
 const Admin = require("../models/Admin");
 const Notification = require("../models/Notification");
 const ChatRoom = require("../models/ChatRoom");
-const { dateOnly, dateOnlyStartUtc, dateOnlyEndUtc } = require("../utils/dateTime");
+const { dateOnly, dateOnlyStartUtc, dateOnlyEndUtc, ageGroupForYear, ageGroupContextYear } = require("../utils/dateTime");
 
 const _generateDatesForDayCoach = (start, end, targetDay) => {
   const dates = [];
@@ -693,6 +693,7 @@ exports.getPlayerProfile = async (req, res) => {
         className: att.class?.name,
         sessionDate: att.sessionDate,
         status: playerRecord?.status || "NOT_MARKED",
+        note: playerRecord?.note || playerRecord?.reason || playerRecord?.remarks || playerRecord?.comment || "",
         comment: playerRecord?.comment || "",
         remarks: playerRecord?.remarks || "",
       };
@@ -704,16 +705,7 @@ exports.getPlayerProfile = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    let currentAge = null;
-    if (player.dob) {
-      const today = new Date();
-      const birthDate = new Date(player.dob);
-      currentAge = today.getFullYear() - birthDate.getFullYear();
-      const monthDiff = today.getMonth() - birthDate.getMonth();
-      if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
-        currentAge--;
-      }
-    }
+    const currentAge = ageGroupForYear(player.dob);
 
     const medicalAlerts = {
       hasMedicalCondition: player.isMedicalCondition || false,
@@ -737,6 +729,8 @@ exports.getPlayerProfile = async (req, res) => {
           profileImage: player.profileImage,
           dob: player.dob,
           currentAge,
+          ageGroup: currentAge === null ? null : `U${currentAge}`,
+          ageGroupYear: ageGroupContextYear(),
           gender: player.gender,
           club: player.club,
           jerseyNumber: player.jerseyNumber,
@@ -833,6 +827,7 @@ exports.getClassPlayers = async (req, res) => {
 exports.getUniquePlayersByCoach = async (req, res) => {
   try {
     const coachId = req.params.coachId || req.query.coachId || req.admin?._id;
+    if (req.admin?.role === "COACH" && String(coachId) !== String(req.admin._id)) return res.status(403).json({ success: false, message: "You may only access your own players" });
     let { page = 1, limit = 10, search = "" } = req.query;
 
     page = Number(page);
@@ -951,6 +946,7 @@ exports.getPlayerDetails = async (req, res) => {
         class: att.class,
         sessionDate: att.sessionDate,
         status: playerRecord?.status || "NOT_MARKED",
+        note: playerRecord?.note || playerRecord?.reason || playerRecord?.remarks || playerRecord?.comment || "",
         comment: playerRecord?.comment || "",
         remarks: playerRecord?.remarks || "",
         reason: playerRecord?.reason || "",
@@ -1097,6 +1093,7 @@ exports.getPlayerDetails = async (req, res) => {
         teamName: att.team?.teamName || "",
         sessionDate: att.sessionDate,
         status: playerRecord?.status || "NOT_MARKED",
+        note: playerRecord?.note || playerRecord?.reason || playerRecord?.remarks || playerRecord?.comment || "",
         comment: playerRecord?.comment || "",
         remarks: playerRecord?.remarks || "",
         reason: playerRecord?.reason || "",

@@ -1,3 +1,5 @@
+const Term = require("../models/Term");
+const { normalizeTeamName, entityId, escapeRegex, domainError, assertTeamLeagueScope, validateFixtureSchedule, PLAYER_STAT_KEYS, contributionDeltas } = require("../utils/leagueIntegrity");
 const League = require("../models/League");
 const Team = require("../models/Team");
 const Fixture = require("../models/Fixture");
@@ -22,14 +24,28 @@ const {
 } = require("../services/fixtureGenerationService");
 const mongoose = require("mongoose");
 const fs = require("fs");
+const { UPLOAD_ROOT } = require("../utils/upload");
 const path = require("path");
-const { dateOnly, dateOnlyStartUtc } = require("../utils/dateTime");
+const { dateOnly, dateOnlyStartUtc, todayDateOnly, DEFAULT_TIMEZONE } = require("../utils/dateTime");
 const {
   normalizePaymentStatus,
   comparePlayersByPaymentStatus,
 } = require("../utils/paymentStatus");
 
 const activeLeagueGenerationLocks = new Set();
+
+exports.updateLeagueTeamStatus = async (req, res) => {
+  try {
+    const { leagueId, teamId } = req.params;
+    if (![leagueId, teamId].every(mongoose.Types.ObjectId.isValid)) throw domainError("Invalid league or team ID.");
+    if (!["ACTIVE", "INACTIVE"].includes(req.body.status)) throw domainError("Status must be ACTIVE or INACTIVE.");
+    const league = await League.findById(leagueId);
+    if (!league || league.archivedAt || !(league.teams || []).some((team) => entityId(team) === teamId)) throw domainError("Team enrollment not found.", 404);
+    const updated = await Team.updateOne({ _id: teamId, "leagues.league": leagueId }, { $set: { "leagues.$.status": req.body.status === "ACTIVE" ? "ACTIVE" : "WITHDRAWN" } });
+    if (!updated.matchedCount) throw domainError("Team enrollment not found.", 404);
+    return res.json({ success: true, message: "Team status updated." });
+  } catch (error) { return res.status(error.statusCode || 500).json({ success: false, message: error.message }); }
+};
 
 const syncTeamsLeagueData = async ({
   teamIds,
@@ -44,17 +60,6 @@ const syncTeamsLeagueData = async ({
   if (!teamIds || teamIds.length === 0) return;
 
   const validIds = teamIds.map((id) => id.toString());
-
-  // 1. Remove any previous enrollment for this league to prevent duplicate array elements
-  await Team.updateMany(
-    { _id: { $in: validIds } },
-    {
-      $pull: {
-        leagues: { league: leagueId },
-      },
-    },
-    sessionOption
-  );
 
   // 2. Map teams to groups if tournament groups exist
   const teamGroupMap = {};
@@ -83,16 +88,17 @@ const syncTeamsLeagueData = async ({
       })
       : [];
 
+    const previousEntry = existingTeam?.leagues?.find((entry) => entityId(entry.league) === entityId(leagueId));
     const entry = {
       league: leagueId,
       teamFee: teamFee !== undefined && teamFee !== null ? Number(teamFee) : 0,
       round: round != null ? Number(round) : null,
       sessionDates: Array.isArray(sessionDates) ? sessionDates : [],
       group: teamGroupMap[tId] || "",
-      status: status || "ACTIVE",
-      enrolledAt: new Date(),
-      players: defaultPlayers,
-      statistics: {
+      status: previousEntry?.status || status || "ACTIVE",
+      enrolledAt: previousEntry?.enrolledAt || new Date(),
+      players: previousEntry?.players || defaultPlayers,
+      statistics: previousEntry?.statistics || {
         played: 0,
         won: 0,
         drawn: 0,
@@ -104,13 +110,11 @@ const syncTeamsLeagueData = async ({
       },
     };
 
-    await Team.updateOne(
-      { _id: tId },
-      {
-        $push: { leagues: entry },
-      },
-      sessionOption
-    );
+    if (previousEntry) {
+      await Team.updateOne({ _id: tId, "leagues.league": leagueId }, { $set: { "leagues.$": entry } }, sessionOption);
+    } else {
+      await Team.updateOne({ _id: tId, "leagues.league": { $ne: leagueId } }, { $push: { leagues: entry } }, sessionOption);
+    }
   }
 };
 
@@ -370,6 +374,9 @@ exports.createLeague = async (req, res) => {
       };
     }
 
+    if (!mongoose.Types.ObjectId.isValid(term) || !await Term.exists({ _id: term })) throw domainError("Select a valid term for this league.");
+    const scopeTeams = await Team.find({ _id: { $in: verifiedTeamIds } });
+    assertTeamLeagueScope({ term }, scopeTeams, false);
     const rawType = (type || leagueType || competitionScope || "").toUpperCase();
     const VALID_TYPES = ["INTERNATIONAL", "NATIONAL", "STATE", "LOCAL", "OTHERS"];
     const parsedType = VALID_TYPES.includes(rawType) ? rawType : "LOCAL";
@@ -414,7 +421,7 @@ exports.createLeague = async (req, res) => {
           // registrationEndDate: registrationEndDate
           //   ? parseDateToMidnight(registrationEndDate)
           //   : null,
-          term: term || null,
+          term,
           status: parsedStatus,
           type: parsedType,
           visibility: parsedVisibility,
@@ -618,7 +625,7 @@ exports.createLeague = async (req, res) => {
 
     return res.status(statusCode).json({
       success: false,
-      message: err.message,
+      message: err.code === 11000 ? "This team name already exists in the selected term, or a team is already scheduled in this round." : err.name === "VersionError" ? "This match changed while you were editing. Refresh and try again." : err.message,
     });
   }
 };
@@ -681,18 +688,21 @@ exports.cloneLeague = async (req, res) => {
       duplicateTeams,
     } = req.body;
 
-    const newLogo = req.file ? req.file.path.replace(/\\/g, "/") : (req.body.logo || sourceLeague.logo || "");
+    const newLogo = req.file ? `/uploads/leaguelogos/${req.file.filename}` : (sourceLeague.logo || "");
     const newName = name && name.trim() ? name.trim() : `${sourceLeague.name} (Copy)`;
     const newSeason = season && season.trim() ? season.trim() : sourceLeague.season;
-    const newStartDate = startDate ? new Date(startDate) : (sourceLeague.startDate ? new Date(sourceLeague.startDate) : new Date());
-    const newEndDate = endDate ? new Date(endDate) : (sourceLeague.endDate ? new Date(sourceLeague.endDate) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000));
+    const newStartDate = parseDateToMidnight(startDate || sourceLeague.startDate);
+    const newEndDate = parseDateToMidnight(endDate || sourceLeague.endDate);
+    if (!newStartDate || !newEndDate || newEndDate < newStartDate) throw domainError("Valid ordered league dates are required.");
+    const targetTerm = term || sourceLeague.term;
+    if (!mongoose.Types.ObjectId.isValid(entityId(targetTerm)) || !await Term.exists({ _id: targetTerm })) throw domainError("Select a valid target term.");
     const newFee = fee !== undefined && fee !== null && !isNaN(Number(fee)) ? Number(fee) : (sourceLeague.fee || 0);
 
     const sourceTeams = (sourceLeague.teams || []).filter((t) => t && t._id);
     let assignedTeamIds = [];
     let newGroups = [];
 
-    const shouldDuplicateTeams = duplicateTeams === true || duplicateTeams === "true";
+    const shouldDuplicateTeams = duplicateTeams === true || duplicateTeams === "true" || entityId(targetTerm) !== entityId(sourceLeague.term);
 
     if (shouldDuplicateTeams && sourceTeams.length > 0) {
       const oldToNewMap = {};
@@ -701,7 +711,7 @@ exports.cloneLeague = async (req, res) => {
       for (const t of sourceTeams) {
         const clonedPlayers = (t.players || []).map((p) => ({
           player: p.player?._id || p.player,
-          paymentStatus: p.paymentStatus || "UNPAID",
+          paymentStatus: "UNPAID",
         }));
 
         newTeamDocs.push({
@@ -711,7 +721,8 @@ exports.cloneLeague = async (req, res) => {
           assistantCoach: t.assistantCoach,
           ageGroup: t.ageGroup || "",
           teamType: t.teamType || "INTERNAL",
-          term: t.term,
+          term: targetTerm,
+          normalizedName: normalizeTeamName(t.teamName),
           dayOfWeek: t.dayOfWeek,
           startTime: t.startTime,
           endTime: t.endTime,
@@ -755,7 +766,7 @@ exports.cloneLeague = async (req, res) => {
       endDate: newEndDate,
       status: status || "UPCOMING",
       type: type || sourceLeague.type || "LOCAL",
-      term: term || sourceLeague.term,
+      term: targetTerm,
       registrationStartDate: registrationStartDate ? new Date(registrationStartDate) : sourceLeague.registrationStartDate,
       registrationEndDate: registrationEndDate ? new Date(registrationEndDate) : sourceLeague.registrationEndDate,
       visibility: visibility || sourceLeague.visibility || "PUBLIC",
@@ -875,9 +886,9 @@ exports.cloneLeague = async (req, res) => {
       }
     }
 
-    return res.status(500).json({
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({
       success: false,
-      message: err.message,
+      message: err.code === 11000 ? "This team name already exists in the selected term, or a team is already scheduled in this round." : err.name === "VersionError" ? "This match changed while you were editing. Refresh and try again." : err.message,
     });
   }
 };
@@ -1018,7 +1029,7 @@ exports.generateRandomFixtures = async (req, res) => {
 
     return res.status(statusCode).json({
       success: false,
-      message: err.message,
+      message: err.code === 11000 ? "This team name already exists in the selected term, or a team is already scheduled in this round." : err.name === "VersionError" ? "This match changed while you were editing. Refresh and try again." : err.message,
       ...(err.protectedFixtures ? { protectedFixtures: err.protectedFixtures } : {}),
     });
   } finally {
@@ -1029,8 +1040,8 @@ exports.generateRandomFixtures = async (req, res) => {
 
 exports.getAllLeagues = async (req, res) => {
   try {
-    const page = parseInt(req.query.page, 10) || 1;
-    const limit = parseInt(req.query.limit, 10) || 10;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 10));
     const search = req.query.search?.trim() || "";
     const type = (req.query.type || req.query.leagueType || "")?.trim().toUpperCase();
     const status = req.query.status?.trim().toUpperCase();
@@ -1038,7 +1049,7 @@ exports.getAllLeagues = async (req, res) => {
 
     const skip = (page - 1) * limit;
 
-    const filter = {};
+    const filter = { archivedAt: null };
 
     if (search) {
       filter.$or = [
@@ -1137,7 +1148,7 @@ exports.getAllLeagues = async (req, res) => {
       data: leagues,
     });
   } catch (error) {
-    return res.status(500).json({
+    return res.status(error.statusCode || (error.code === 11000 || error.name === "VersionError" ? 409 : error.name === "ValidationError" || error.name === "CastError" ? 400 : 500)).json({
       success: false,
       message: error.message,
     });
@@ -1194,12 +1205,14 @@ const extractRawDates = (body) => {
 
 const parseRoundAndDates = (body) => {
   const rawDates = extractRawDates(body);
-  let parsedDates = rawDates.map(parseDateString).filter(Boolean);
+  let parsedDates = rawDates.map(parseDateString);
+  if (parsedDates.some((date) => !date)) throw domainError("Every session date must be valid.");
 
   let parsedRound = body.round !== undefined && body.round !== null && String(body.round).trim() !== ""
     ? Math.max(1, parseInt(body.round, 10))
     : null;
 
+  if (parsedRound !== null && (!Number.isInteger(parsedRound) || parsedRound < 1)) throw domainError("Round count must be a positive integer.");
   if (parsedRound && parsedDates.length > 0) {
     if (parsedDates.length > parsedRound) {
       parsedDates = parsedDates.slice(0, parsedRound);
@@ -1215,129 +1228,9 @@ const parseRoundAndDates = (body) => {
   };
 };
 
-// exports.createTeam = async (req, res) => {
-//   try {
-//     const {
-//       teamName,
-//       coach,
-//       assistantCoach,
-//       ageGroup,
-//       teamType,
-//       teamFee,
-//       fee,
-//       term,
-//       dayOfWeek,
-//       startTime,
-//       endTime,
-//       venue,
-//       location,
-//       scheduleType,
-//       schedule,
-//       players,
-//     } = req.body;
-
-//     if (!teamName) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "Team name is required",
-//       });
-//     }
-
-//     const existingTeam = await Team.findOne({
-//       teamName: teamName.trim(),
-//     });
-
-//     if (existingTeam) {
-//       return res.status(409).json({
-//         success: false,
-//         message: "Team already exists",
-//       });
-//     }
-
-//     const parsedType = teamType && ["INTERNAL", "EXTERNAL"].includes(teamType.toUpperCase())
-//       ? teamType.toUpperCase()
-//       : "INTERNAL";
-
-//     const parsedFee = fee !== undefined ? Number(fee) : teamFee !== undefined ? Number(teamFee) : 0;
-//     if (isNaN(parsedFee) || parsedFee < 0) {
-//       return res.status(400).json({ success: false, message: "Team fee must be a non-negative number" });
-//     }
-
-//     const logo = req.file ? `uploads/teamlogos/${req.file.filename}` : "";
-
-//     const { round: parsedRound, sessionDates: parsedDates } = parseRoundAndDates(req.body);
-
-//     let parsedPlayers = [];
-//     if (players) {
-//       let rawPlayers = players;
-//       if (typeof rawPlayers === "string") {
-//         try {
-//           rawPlayers = JSON.parse(rawPlayers);
-//         } catch (e) {
-//           rawPlayers = [];
-//         }
-//       }
-//       if (Array.isArray(rawPlayers)) {
-//         parsedPlayers = rawPlayers.map((p) => {
-//           const pid = p && p.player ? p.player : p;
-//           const status = p && p.paymentStatus ? p.paymentStatus : "UNPAID";
-//           const stats = p && p.statistics ? {
-//             appearances: Number(p.statistics.appearances) || 0,
-//             goals: Number(p.statistics.goals) || 0,
-//             assists: Number(p.statistics.assists) || 0,
-//             cleanSheets: Number(p.statistics.cleanSheets) || 0,
-//             yellowCards: Number(p.statistics.yellowCards) || 0,
-//             redCards: Number(p.statistics.redCards) || 0,
-//             minutesPlayed: Number(p.statistics.minutesPlayed) || 0,
-//           } : {
-//             appearances: 0,
-//             goals: 0,
-//             assists: 0,
-//             cleanSheets: 0,
-//             yellowCards: 0,
-//             redCards: 0,
-//             minutesPlayed: 0,
-//           };
-//           return { player: pid, paymentStatus: status, statistics: stats };
-//         });
-//       }
-//     }
-
-//     const team = await Team.create({
-//       teamName: teamName.trim(),
-//       logo,
-//       coach: coach || null,
-//       assistantCoach: assistantCoach || null,
-//       ageGroup: ageGroup || "",
-//       teamType: parsedType,
-//       teamFee: parsedFee,
-//       term: term || null,
-//       dayOfWeek: dayOfWeek || "",
-//       startTime: startTime || "",
-//       endTime: endTime || "",
-//       venue: venue || "",
-//       location: location || venue || "",
-//       scheduleType: scheduleType || "SINGLE_DAY",
-//       schedule: schedule || [],
-//       round: parsedRound,
-//       sessionDates: parsedDates,
-//       players: parsedPlayers,
-//     });
-
-//     return res.status(201).json({
-//       success: true,
-//       message: "Team created successfully",
-//       data: team,
-//     });
-//   } catch (err) {
-//     return res.status(500).json({
-//       success: false,
-//       message: err.message,
-//     });
-//   }
-// };
 
 exports.createTeam = async (req, res) => {
+  let created = false;
   try {
     const {
       teamName,
@@ -1363,9 +1256,9 @@ exports.createTeam = async (req, res) => {
       });
     }
 
-    const existingTeam = await Team.findOne({
-      teamName: teamName.trim(),
-    });
+    if (!String(teamName).trim() || !mongoose.Types.ObjectId.isValid(term) || !await Term.exists({ _id: term })) throw domainError("A valid term and team name are required.");
+    const normalizedName = normalizeTeamName(teamName);
+    const existingTeam = await Team.findOne({ term, $or: [{ normalizedName }, { teamName: { $regex: `^${escapeRegex(String(teamName).trim())}$`, $options: "i" } }] });
 
     if (existingTeam) {
       return res.status(409).json({
@@ -1444,8 +1337,11 @@ exports.createTeam = async (req, res) => {
       }
     }
 
+    if (parsedPlayers.length > 20 || new Set(parsedPlayers.map((p) => entityId(p.player))).size !== parsedPlayers.length || parsedPlayers.some((p) => !mongoose.Types.ObjectId.isValid(p.player))) throw domainError("Select up to 20 distinct valid players.");
+    if (await User.countDocuments({ _id: { $in: parsedPlayers.map((p) => p.player) } }) !== parsedPlayers.length) throw domainError("One or more selected players do not exist.");
     const team = await Team.create({
-      teamName: teamName.trim(),
+      teamName: String(teamName).trim().replace(/\s+/g, " "),
+      normalizedName,
       logo,
 
       coach: coach || null,
@@ -1455,7 +1351,10 @@ exports.createTeam = async (req, res) => {
 
       teamType: parsedType,
 
-      term: term || null,
+      term,
+      round: parseRoundAndDates(req.body).round,
+      sessionDates: parseRoundAndDates(req.body).sessionDates,
+      teamFee: Number(req.body.fee ?? req.body.teamFee ?? 0),
 
       dayOfWeek: dayOfWeek || "",
       startTime: startTime || "",
@@ -1470,16 +1369,19 @@ exports.createTeam = async (req, res) => {
       players: parsedPlayers,
     });
 
+    created = true;
     return res.status(201).json({
       success: true,
       message: "Team created successfully",
       data: team,
     });
   } catch (err) {
-    return res.status(500).json({
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({
       success: false,
-      message: err.message,
+      message: err.code === 11000 ? "This team name already exists in the selected term, or a team is already scheduled in this round." : err.name === "VersionError" ? "This match changed while you were editing. Refresh and try again." : err.message,
     });
+  } finally {
+    if (req.file && !created) await safeRemoveTeamLogo(`uploads/teamlogos/${req.file.filename}`);
   }
 };
 
@@ -1492,13 +1394,12 @@ exports.getAllTeams = async (req, res) => {
 
     const skip = (page - 1) * limit;
 
-    const filter = {};
+    const filter = { archivedAt: null };
 
     if (search) {
-      filter.teamName = {
-        $regex: search,
-        $options: "i",
-      };
+      const coaches = await Admin.find({ name: { $regex: escapeRegex(search), $options: "i" } }).distinct("_id");
+      filter.$or = ["teamName", "ageGroup", "teamType"].map((key) => ({ [key]: { $regex: escapeRegex(search), $options: "i" } }));
+      filter.$or.push({ coach: { $in: coaches } }, { assistantCoach: { $in: coaches } });
     }
 
     if (req.query.teamType && ["INTERNAL", "EXTERNAL"].includes(req.query.teamType.toUpperCase())) {
@@ -1507,6 +1408,7 @@ exports.getAllTeams = async (req, res) => {
 
     if (req.query.termId || req.query.term) {
       filter.term = req.query.termId || req.query.term;
+      if (!mongoose.Types.ObjectId.isValid(filter.term)) throw domainError("Invalid term ID.");
     }
 
     const [teams, total] = await Promise.all([
@@ -1517,7 +1419,7 @@ exports.getAllTeams = async (req, res) => {
         .populate("captain", "name email profileImage")
         .populate("viceCaptain", "name email profileImage")
         .populate("players.player", "fullName email profileImage")
-        .sort({ createdAt: -1 })
+        .sort({ createdAt: -1, _id: -1 })
         .skip(skip)
         .limit(limit),
 
@@ -1538,7 +1440,7 @@ exports.getAllTeams = async (req, res) => {
       data: teams,
     });
   } catch (error) {
-    return res.status(500).json({
+    return res.status(error.statusCode || (error.code === 11000 || error.name === "VersionError" ? 409 : error.name === "ValidationError" || error.name === "CastError" ? 400 : 500)).json({
       success: false,
       message: error.message,
     });
@@ -1546,304 +1448,64 @@ exports.getAllTeams = async (req, res) => {
 };
 
 exports.assignPlayerToTeam = async (req, res) => {
+  let session;
   try {
     const { teamId } = req.params;
-    const { players } = req.body;
-
-    const VALID_PAYMENT_STATUSES = [
-      "TRIAL",
-      "UNPAID",
-      "PAID",
-      "OVER_DUE",
-      "EXTRA",
-      "SUBSTITUTE",
-      "TBC",
-      "HANDSHAKE",
-    ];
-
-    if (!players) {
-      return res.status(400).json({ success: false, message: "players array is required" });
-    }
-
-    let rawPlayers = players;
-    if (typeof rawPlayers === "string") {
-      try {
-        rawPlayers = JSON.parse(rawPlayers);
-      } catch (e) {
-        return res.status(400).json({ success: false, message: "Invalid players JSON format" });
-      }
-    }
-
-    if (!Array.isArray(rawPlayers) || rawPlayers.length === 0) {
-      return res.status(400).json({ success: false, message: "players must be a non-empty array" });
-    }
-
-    // Normalize incoming players into a list of { id, paymentStatus }
-    const playerEntries = rawPlayers
-      .map((item) => {
-        if (item && typeof item === "object") {
-          const id = (item.playerId || item.player || item._id || "").toString().trim();
-          const rawStatus = (item.paymentStatus || "TRIAL")
-            .toString()
-            .toUpperCase()
-            .trim();
-          const status = VALID_PAYMENT_STATUSES.includes(rawStatus) ? rawStatus : "TRIAL";
-          return { id, paymentStatus: status };
-        } else {
-          const id = (item || "").toString().trim();
-          return { id, paymentStatus: "TRIAL" };
-        }
-      })
-      .filter((entry) => entry.id);
-
-    if (playerEntries.length === 0) {
-      return res.status(400).json({ success: false, message: "No valid player(s) provided in players array" });
-    }
-
-    const isValid = playerEntries.every((entry) => mongoose.Types.ObjectId.isValid(entry.id));
-    if (!isValid) {
-      return res.status(400).json({ success: false, message: "Invalid player ID format" });
-    }
-
-    const team = await Team.findById(teamId);
-    if (!team) {
-      return res.status(404).json({ success: false, message: "Team not found" });
-    }
-
-    const uniqueIds = [...new Set(playerEntries.map((e) => e.id))];
-    const existingPlayersCount = await User.countDocuments({ _id: { $in: uniqueIds } });
-    if (existingPlayersCount !== uniqueIds.length) {
-      return res.status(404).json({ success: false, message: "One or more players not found" });
-    }
-
-
-    const leagueId =
-      req.body?.leagueId ||
-      req.body?.league ||
-      req.query?.leagueId ||
-      req.query?.league ||
-      req.params?.leagueId;
-
+    const leagueId = req.params.leagueId || req.body.leagueId || req.body.league || req.query.leagueId;
+    if (!mongoose.Types.ObjectId.isValid(teamId) || (leagueId && !mongoose.Types.ObjectId.isValid(leagueId))) throw domainError("Invalid team or league ID.");
+    let players = req.body.players;
+    if (typeof players === "string") { try { players = JSON.parse(players); } catch { throw domainError("Invalid players JSON."); } }
+    if (!Array.isArray(players) || !players.length) throw domainError("Select at least one player.");
+    const allowedStatuses = ["TRIAL", "UNPAID", "PAID", "OVER_DUE", "EXTRA", "SUBSTITUTE", "TBC", "HANDSHAKE"];
+    const entries = players.map((row) => ({ player: entityId(row.playerId || row.player || row._id || row), paymentStatus: typeof row === "object" ? String(row.paymentStatus || "TRIAL").toUpperCase() : "TRIAL" }));
+    if (entries.some((row) => !mongoose.Types.ObjectId.isValid(row.player) || !allowedStatuses.includes(row.paymentStatus)) || new Set(entries.map((row) => row.player)).size !== entries.length) throw domainError("Players must be distinct valid IDs with valid payment statuses.");
+    session = await mongoose.startSession(); session.startTransaction();
+    if (leagueId) await League.updateOne({ _id: leagueId }, { $inc: { schedulingRevision: 1 } }, { session });
+    // Reading and saving the same Team in the transaction serializes roster capacity changes.
+    const team = await Team.findById(teamId).session(session);
+    if (!team || team.archivedAt) throw domainError("Team not found.", 404);
+    if (await User.countDocuments({ _id: { $in: entries.map((row) => row.player) }, isBlocked: { $ne: true } }).session(session) !== entries.length) throw domainError("One or more selected players is unavailable.");
+    let enrollment;
     if (leagueId) {
-      if (!mongoose.Types.ObjectId.isValid(leagueId)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid League ID format",
-        });
-      }
-
-      const league = await League.findById(leagueId);
-
-      if (!league) {
-        return res.status(404).json({
-          success: false,
-          message: "League not found",
-        });
-      }
-
-      if (!Array.isArray(team.leagues)) {
-        team.leagues = [];
-      }
-
-      // Find this league inside the team's leagues
-      let leagueEntry = team.leagues.find(
-        (l) => (l.league?._id || l.league)?.toString() === leagueId.toString()
-      );
-
-      // If team is not yet registered in this league,
-      // create the league entry using the League fee as initial teamFee.
-      if (!leagueEntry) {
-        leagueEntry = {
-          league: leagueId,
-          teamFee: Number(league.fee || 0),
-          status: "ACTIVE",
-          enrolledAt: new Date(),
-          players: [],
-          statistics: {
-            played: 0,
-            won: 0,
-            drawn: 0,
-            lost: 0,
-            goalsFor: 0,
-            goalsAgainst: 0,
-            goalDifference: 0,
-            points: 0,
-          },
-        };
-
-        team.leagues.push(leagueEntry);
-
-        leagueEntry = team.leagues[team.leagues.length - 1];
-      }
-
-      if (!Array.isArray(leagueEntry.players)) {
-        leagueEntry.players = [];
-      }
-
-      // ------------------------------------------
-      // UPDATE LEAGUE-SPECIFIC PLAYERS
-      // ------------------------------------------
-
-      const existingLeaguePlayerMap = new Map();
-
-      leagueEntry.players.forEach((p) => {
-        const pid = (p.player?._id || p.player)?.toString();
-
-        if (pid) {
-          existingLeaguePlayerMap.set(pid, {
-            paymentStatus: p.paymentStatus || "UNPAID",
-            status: p.status || "ACTIVE",
-          });
-        }
-      });
-
-      playerEntries.forEach(({ id, paymentStatus }) => {
-        if (existingLeaguePlayerMap.has(id)) {
-          const existing = existingLeaguePlayerMap.get(id);
-
-          existing.paymentStatus = paymentStatus;
-        } else {
-          existingLeaguePlayerMap.set(id, {
-            paymentStatus,
-            status: "ACTIVE",
-          });
-        }
-      });
-
-      leagueEntry.players = Array.from(
-        existingLeaguePlayerMap.entries()
-      ).map(([pId, data]) => ({
-        player: pId,
-        paymentStatus: data.paymentStatus,
-        status: data.status,
-      }));
-
-      team.markModified("leagues");
-
-      // ------------------------------------------
-      // ENSURE PLAYERS EXIST IN TEAM.PLAYERS
-      // ------------------------------------------
-
-      if (!Array.isArray(team.players)) {
-        team.players = [];
-      }
-
-      const teamPlayerSet = new Set(
-        team.players.map((p) =>
-          (p.player?._id || p.player)?.toString()
-        )
-      );
-
-      playerEntries.forEach(({ id }) => {
-        if (!teamPlayerSet.has(id)) {
-          team.players.push({
-            player: id,
-            paymentStatus: "TRIAL",
-          });
-
-          teamPlayerSet.add(id);
-        }
-      });
-
-      if (team.players.length > 20) {
-        return res.status(400).json({
-          success: false,
-          message: `Cannot assign players. A team cannot exceed 20 players. Currently has ${team.players.length} players.`,
-        });
-      }
-
-      await team.save();
-
-      // ------------------------------------------
-      // INVOICE CREATION
-      // ------------------------------------------
-
-      // IMPORTANT:
-      // Invoice amount MUST come from team.leagues[].teamFee
-      const teamFee = Number(leagueEntry.teamFee || 0);
-
-      if (teamFee > 0) {
-        const processedInvoices = new Set();
-
-        for (const { id: playerId, paymentStatus } of playerEntries) {
-          // Only UNPAID players get an invoice
-          if (
-            paymentStatus === "UNPAID" &&
-            !processedInvoices.has(playerId)
-          ) {
-            processedInvoices.add(playerId);
-
-            try {
-              await generateLeagueInvoice({
-                userId: playerId,
-                leagueId: leagueId,
-                teamId: teamId,
-                amount: teamFee,
-              });
-
-              console.log(
-                `[Team-League] Invoice created for player ${playerId}, amount=${teamFee}, team=${teamId}, league=${leagueId}`
-              );
-            } catch (invErr) {
-              console.error(
-                `[Team-League] Failed to generate invoice for player ${playerId}:`,
-                invErr.message
-              );
-            }
-          }
-        }
-      }
-    } else {
-      // Previous behavior: update team.players paymentStatus directly
-      const existingPlayerMap = new Map();
-      (team.players || []).forEach((p) => {
-        const pid = p.player ? p.player.toString() : p.toString();
-        existingPlayerMap.set(pid, {
-          paymentStatus: p.paymentStatus || "TRIAL",
-        });
-      });
-
-      // Update existing players with their passed paymentStatus, or insert new ones
-      playerEntries.forEach(({ id, paymentStatus }) => {
-        if (existingPlayerMap.has(id)) {
-          const existing = existingPlayerMap.get(id);
-          existing.paymentStatus = paymentStatus;
-        } else {
-          existingPlayerMap.set(id, {
-            paymentStatus,
-          });
-        }
-      });
-
-      if (existingPlayerMap.size > 20) {
-        return res.status(400).json({
-          success: false,
-          message: `Cannot assign players. A team cannot exceed 20 players. Currently has ${existingPlayerMap.size} players.`,
-        });
-      }
-
-      team.players = Array.from(existingPlayerMap.entries()).map(([pId, data]) => ({
-        player: pId,
-        paymentStatus: data.paymentStatus,
-      }));
-
-      await team.save();
-
+      const league = await League.findById(leagueId).session(session);
+      if (!league || league.archivedAt) throw domainError("League not found.", 404);
+      assertTeamLeagueScope(league, [team]);
+      enrollment = team.leagues.find((row) => entityId(row.league) === leagueId);
+      if (!enrollment) throw domainError("Enroll the team before assigning league players.", 409);
     }
-
-    const updatedTeam = await Team.findById(teamId)
-      .populate("players.player", "firstName lastName fullName email mobile profileImage")
-      .populate("leagues.players.player", "firstName lastName fullName email mobile profileImage");
-
-    return res.json({ success: true, message: "Player assigned to team successfully", data: updatedTeam || team });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
+    const base = new Map((team.players || []).map((row) => [entityId(row.player), row.toObject ? row.toObject() : row]));
+    for (const row of entries) {
+      if (!base.has(row.player)) base.set(row.player, { ...row, paymentStatus: leagueId ? "TRIAL" : row.paymentStatus });
+      else if (!leagueId) base.get(row.player).paymentStatus = row.paymentStatus;
+    }
+    if (base.size > 20) throw domainError("A team cannot have more than 20 players.", 409);
+    team.players = [...base.values()];
+    if (enrollment) {
+      const roster = new Map((enrollment.players || []).map((row) => [entityId(row.player), row.toObject ? row.toObject() : row]));
+      for (const row of entries) roster.set(row.player, { ...(roster.get(row.player) || {}), ...row, status: roster.get(row.player)?.status || "ACTIVE" });
+      enrollment.players = [...roster.values()];
+    }
+    await team.save({ session });
+    if (enrollment?.teamFee > 0) for (const row of entries) if (row.paymentStatus === "UNPAID") await generateLeagueInvoice({ userId: row.player, leagueId, teamId, amount: enrollment.teamFee, session });
+    await session.commitTransaction();
+    return res.json({ success: true, message: "Players assigned successfully.", data: await Team.findById(teamId).populate("players.player", "fullName profileImage").populate("leagues.players.player", "fullName profileImage") });
+  } catch (error) {
+    if (session?.inTransaction()) await session.abortTransaction();
+    return res.status(error.statusCode || ([11000, 112, 251].includes(error.code) ? 409 : 500)).json({ success: false, message: error.message });
+  } finally { if (session) await session.endSession(); }
 };
 
 exports.getAvailablePlayers = async (req, res) => {
   try {
-    const teams = await Team.find({}, "players teamName");
+    let termId = req.query.termId;
+    if (req.query.teamId) {
+      if (!mongoose.Types.ObjectId.isValid(req.query.teamId)) throw domainError("Invalid team ID.");
+      const contextTeam = await Team.findById(req.query.teamId).select("term");
+      if (!contextTeam) throw domainError("Team not found.", 404);
+      termId = contextTeam.term;
+    }
+    if (termId && !mongoose.Types.ObjectId.isValid(termId)) throw domainError("Invalid term ID.");
+    const teams = await Team.find({ archivedAt: null, ...(termId ? { term: termId } : {}) }, "players teamName term");
 
     const playerTeamMap = {};
     teams.forEach((team) => {
@@ -1882,440 +1544,93 @@ exports.getAvailablePlayers = async (req, res) => {
       data: enrichedPlayers,
     });
   } catch (err) {
-    return res.status(500).json({
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({
       success: false,
-      message: err.message,
+      message: err.code === 11000 ? "This team name already exists in the selected term, or a team is already scheduled in this round." : err.name === "VersionError" ? "This match changed while you were editing. Refresh and try again." : err.message,
     });
   }
 };
 
 exports.createFixture = async (req, res) => {
+  let session;
   try {
-    const {
-      league,
-      kickoffTime,
-      venue,
-      referee,
-      homeTeam,
-      awayTeam,
-      field,
-      endTime,
-      group,
-    } = req.body;
-
-    const targetLeague = req.params?.leagueId || league;
-
-    if (!targetLeague || !kickoffTime || !venue || !homeTeam || !awayTeam) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "League, kickoff time, venue, home team and away team are required.",
-      });
-    }
-
-    if (
-      !mongoose.Types.ObjectId.isValid(targetLeague) ||
-      !mongoose.Types.ObjectId.isValid(homeTeam) ||
-      !mongoose.Types.ObjectId.isValid(awayTeam)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid League or Team ID.",
-      });
-    }
-
-    if (homeTeam === awayTeam) {
-      return res.status(400).json({
-        success: false,
-        message: "Home team and away team cannot be the same.",
-      });
-    }
-
-    const [leagueExists, homeTeamExists, awayTeamExists] = await Promise.all([
-      League.findById(targetLeague),
-      Team.findById(homeTeam),
-      Team.findById(awayTeam),
-    ]);
-
-    if (!leagueExists) {
-      return res.status(404).json({
-        success: false,
-        message: "League not found.",
-      });
-    }
-
-    if (!homeTeamExists || !awayTeamExists) {
-      return res.status(404).json({
-        success: false,
-        message: "One or both teams not found.",
-      });
-    }
-
-    const existingFixture = await Fixture.findOne({
-      league: targetLeague,
-      kickoffTime: new Date(kickoffTime),
-      $or: [
-        { homeTeam, awayTeam },
-        { homeTeam: awayTeam, awayTeam: homeTeam },
-      ],
-    });
-
-    if (existingFixture) {
-      return res.status(409).json({
-        success: false,
-        message: "Fixture already exists.",
-      });
-    }
-
-    const roundNumber = req.body.round ? Math.max(1, parseInt(req.body.round, 10)) : 1;
-
-    const explicitSessionDate = req.body.sessionDate ? parseDateToMidnight(req.body.sessionDate) : null;
-    const leagueSessionDate =
-      leagueExists.sessionDates && Array.isArray(leagueExists.sessionDates) && leagueExists.sessionDates[roundNumber - 1]
-        ? leagueExists.sessionDates[roundNumber - 1]
-        : null;
-    const fixtureSessionDate = explicitSessionDate || leagueSessionDate || parseDateToMidnight(kickoffTime);
-
-    const fixture = await Fixture.create({
-      league: targetLeague,
-      round: roundNumber,
-      kickoffTime: new Date(kickoffTime),
-      sessionDate: fixtureSessionDate,
-      endTime: endTime ? new Date(endTime) : undefined,
-      venue: venue.trim(),
-      field: field ? String(field).trim() : "",
-      group: group ? String(group).trim() : "",
-      referee: referee || "",
-      homeTeam,
-      awayTeam,
-      status: "SCHEDULED",
-      fixtureSource: "MANUAL",
-      isManuallyModified: true,
-    });
-
-    // Auto-enroll teams into the league's teams roster if not already present
-    await League.findByIdAndUpdate(targetLeague, {
-      $addToSet: { teams: { $each: [homeTeam, awayTeam] } },
-    });
-
-    // Synchronize team fee, sessionDates, and round to homeTeam and awayTeam
-    await Team.updateMany(
-      { _id: { $in: [homeTeam, awayTeam] } },
-      {
-        $set: {
-          teamFee: leagueExists.fee || 0,
-          sessionDates: leagueExists.sessionDates || [],
-          round: leagueExists.numberOfRounds || null,
-        },
-      }
-    );
-
-    if (leagueExists.fee > 0) {
-      for (const tId of [homeTeam, awayTeam]) {
-        try {
-          await processLeagueInvoicesForTeam({ leagueId: targetLeague, teamId: tId });
-        } catch (invErr) {
-          console.error(`[League] Error processing invoices for enrolled team ${tId}:`, invErr.message);
-        }
-      }
-    }
-
-    // Ensure initial standings exist for both teams in this league
-    await Promise.all([
-      Standing.findOneAndUpdate(
-        { league, team: homeTeam },
-        {
-          $setOnInsert: {
-            played: 0,
-            won: 0,
-            drawn: 0,
-            lost: 0,
-            goalsFor: 0,
-            goalsAgainst: 0,
-            goalDifference: 0,
-            points: 0,
-          },
-        },
-        { upsert: true, new: true }
-      ),
-      Standing.findOneAndUpdate(
-        { league, team: awayTeam },
-        {
-          $setOnInsert: {
-            played: 0,
-            won: 0,
-            drawn: 0,
-            lost: 0,
-            goalsFor: 0,
-            goalsAgainst: 0,
-            goalDifference: 0,
-            points: 0,
-          },
-        },
-        { upsert: true, new: true }
-      ),
-    ]);
-
-    const data = await Fixture.findById(fixture._id)
-      .populate("league", "name season")
-      .populate("homeTeam", "teamName logo")
-      .populate("awayTeam", "teamName logo");
-
-    return res.status(201).json({
-      success: true,
-      message: "Fixture created successfully.",
-      data,
-    });
-  } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: err.message,
-    });
-  }
+    session = await mongoose.startSession();
+    session.startTransaction();
+    const leagueId = req.params?.leagueId || req.body.league;
+    if (req.params?.leagueId && req.body.league && entityId(req.body.league) !== leagueId) throw domainError("League in URL and request must match.");
+    const homeTeam = entityId(req.body.homeTeam), awayTeam = entityId(req.body.awayTeam);
+    if (![leagueId, homeTeam, awayTeam].every(mongoose.Types.ObjectId.isValid)) throw domainError("Invalid league or team ID.");
+    if (homeTeam === awayTeam) throw domainError("Home and away teams must differ.");
+    await League.updateOne({ _id: leagueId, archivedAt: null }, { $inc: { schedulingRevision: 1 } }, { session });
+    const [league, home, away] = await Promise.all([League.findById(leagueId).session(session), Team.findById(homeTeam).session(session), Team.findById(awayTeam).session(session)]);
+    if (!league || league.archivedAt) throw domainError("League not found.", 404);
+    if (!home || !away) throw domainError("Team not found.", 404);
+    assertTeamLeagueScope(league, [home, away]);
+    const timing = validateFixtureSchedule(league, { ...req.body, round: req.body.round ?? 1 });
+    const conflict = await Fixture.exists({ league: leagueId, round: timing.round, $or: [{ homeTeam: { $in: [homeTeam, awayTeam] } }, { awayTeam: { $in: [homeTeam, awayTeam] } }] }).session(session);
+    if (conflict) throw domainError("A selected team is already scheduled in this round.", 409);
+    const fieldConflict = await Fixture.exists({ league: leagueId, field: timing.field, kickoffTime: { $lt: timing.endTime }, endTime: { $gt: timing.kickoffTime } }).session(session);
+    if (fieldConflict) throw domainError("This field is already booked at that time.", 409);
+    const sessionDate = parseDateToMidnight(req.body.sessionDate || league.sessionDates?.[timing.round - 1] || todayDateOnly(DEFAULT_TIMEZONE, timing.kickoffTime));
+    if (!sessionDate) throw domainError("Invalid session date.");
+    const [fixture] = await Fixture.create([{ league: leagueId, ...timing, sessionDate, venue: String(req.body.venue || league.venue || league.name).trim(), group: String(req.body.group || "").trim(), referee: String(req.body.referee || "").trim(), homeTeam, awayTeam, participants: [homeTeam, awayTeam], status: "SCHEDULED", fixtureSource: "MANUAL", isManuallyModified: true }], { session });
+    await session.commitTransaction();
+    const data = await Fixture.findById(fixture._id).populate("league", "name season").populate("homeTeam", "teamName logo").populate("awayTeam", "teamName logo");
+    return res.status(201).json({ success: true, message: "Fixture created successfully.", data });
+  } catch (err) { if (session?.inTransaction()) await session.abortTransaction(); return res.status(err.statusCode || ([11000, 112, 251].includes(err.code) ? 409 : err.name === "ValidationError" ? 400 : 500)).json({ success: false, message: err.code === 11000 ? "A selected team is already scheduled in this round." : err.message }); } finally { if (session) await session.endSession(); }
 };
 
 exports.recordMatchEvent = async (req, res) => {
+  let session;
   try {
     const { matchId } = req.params;
     const { player, team, eventType, minute, details } = req.body;
-
-    if (!player || !team || !eventType || minute === undefined) {
-      return res.status(400).json({ success: false, message: "Required fields missing" });
+    if (![matchId, player, team].every(mongoose.Types.ObjectId.isValid) || !["GOAL", "ASSIST", "YELLOW_CARD", "RED_CARD", "SUBSTITUTION"].includes(eventType) || !Number.isInteger(Number(minute)) || Number(minute) < 0) throw domainError("Valid match, player, team, event type and minute are required.");
+    session = await mongoose.startSession(); session.startTransaction();
+    const match = await Fixture.findById(matchId).session(session);
+    if (!match) throw domainError("Match not found.", 404);
+    if (req.params.leagueId && entityId(match.league) !== req.params.leagueId) throw domainError("Fixture does not belong to the specified league.", 404);
+    if (match.status === "COMPLETED") throw domainError("Correct completed results through the result editor.", 409);
+    if (![entityId(match.homeTeam), entityId(match.awayTeam)].includes(team)) throw domainError("Event team must participate in this match.");
+    const teamDoc = await Team.findById(team).session(session);
+    if (!teamDoc || !checkPlayerBelongsToTeam(player, teamDoc)) throw domainError("Event player must belong to its team.");
+    await League.updateOne({ _id: match.league, archivedAt: null }, { $inc: { schedulingRevision: 1 } }, { session });
+    if (eventType === "ASSIST") {
+      const goal = match.goals.id(req.body.goalId);
+      if (!goal || entityId(goal.team) !== team || entityId(goal.scorer) === player) throw domainError("Select a goal by this team and a different player before recording an assist.");
+      goal.assist = player;
     }
-
-    const match = await Fixture.findById(matchId);
-    if (!match) {
-      return res.status(404).json({ success: false, message: "Match not found" });
+    if (eventType === "GOAL") {
+      match.goals.push({ team, scorer: player, minute: Number(minute) });
+      const scoreKey = entityId(match.homeTeam) === team ? "homeScore" : "awayScore";
+      match.score[scoreKey] = Number(match.score[scoreKey] || 0) + 1;
     }
-
-    const event = await MatchEvent.create({
-      match: matchId,
-      player,
-      team,
-      eventType,
-      minute,
-      details,
-    });
-
+    let performance = match.resultPlayers.find((row) => entityId(row.player) === player);
+    if (!performance) { match.resultPlayers.push({ player, team, appearances: 1 }); performance = match.resultPlayers[match.resultPlayers.length - 1]; }
+    if (eventType === "YELLOW_CARD") performance.yellowCards += 1;
+    if (eventType === "RED_CARD") performance.redCards += 1;
+    const [event] = await MatchEvent.create([{ match: matchId, player, team, eventType, minute: Number(minute), details: typeof details === "string" ? details : "" }], { session });
     match.events.push(event._id);
-
-    if (eventType === "GOAL") {
-      if (match.homeTeam.toString() === team) {
-        match.score.homeScore += 1;
-      } else if (match.awayTeam.toString() === team) {
-        match.score.awayScore += 1;
-      }
-    }
-
-    await match.save();
-
-    const playerUpdate = {};
-    const statsUpdate = {};
-
-    if (eventType === "GOAL") {
-      playerUpdate.$inc = { goals: 1 };
-      statsUpdate.$inc = { goals: 1 };
-    } else if (eventType === "ASSIST") {
-      playerUpdate.$inc = { assists: 1 };
-      statsUpdate.$inc = { assists: 1 };
-    } else if (eventType === "YELLOW_CARD") {
-      playerUpdate.$inc = { yellowCards: 1 };
-      statsUpdate.$inc = { yellowCards: 1 };
-    } else if (eventType === "RED_CARD") {
-      playerUpdate.$inc = { redCards: 1 };
-      statsUpdate.$inc = { redCards: 1 };
-    }
-
-    if (playerUpdate.$inc) {
-      await User.findByIdAndUpdate(player, playerUpdate);
-
-      await PlayerStatistics.findOneAndUpdate(
-        { player, league: match.league },
-        { ...statsUpdate, $set: { team }, $setOnInsert: { appearances: 0, cleanSheets: 0, minutesPlayed: 0 } },
-        { upsert: true, new: true }
-      );
-    }
-
-    res.status(201).json({ success: true, message: "Match event recorded successfully", data: event });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
+    match.status = "LIVE";
+    await match.save({ session });
+    // Aggregate player/standing effects are applied exactly once by final-result deltas.
+    await session.commitTransaction();
+    return res.status(201).json({ success: true, message: "Match event recorded.", data: event });
+  } catch (error) {
+    if (session?.inTransaction()) await session.abortTransaction();
+    return res.status(error.statusCode || ([11000, 112, 251].includes(error.code) || error.name === "VersionError" ? 409 : 500)).json({ success: false, message: error.message });
+  } finally { if (session) await session.endSession(); }
 };
 
 exports.completeMatch = async (req, res) => {
-  try {
-    const { matchId } = req.params;
-    const { homeScore, awayScore, players = [] } = req.body;
-
-    const match = await Fixture.findById(matchId);
-
-    if (!match) {
-      return res.status(404).json({
-        success: false,
-        message: "Match not found",
-      });
-    }
-
-    if (match.status === "COMPLETED") {
-      return res.status(400).json({
-        success: false,
-        message: "Match already completed",
-      });
-    }
-
-    match.score.homeScore = Number(homeScore);
-    match.score.awayScore = Number(awayScore);
-
-    match.playerRatings = players.map((player) => ({
-      player: player.player,
-      rating: player.rating || 0,
-    }));
-
-    match.status = "COMPLETED";
-
-    await match.save();
-
-    const homeGoals = Number(homeScore);
-    const awayGoals = Number(awayScore);
-
-    let homeWon = 0,
-      homeDrawn = 0,
-      homeLost = 0,
-      homePoints = 0;
-
-    let awayWon = 0,
-      awayDrawn = 0,
-      awayLost = 0,
-      awayPoints = 0;
-
-    if (homeGoals > awayGoals) {
-      homeWon = 1;
-      awayLost = 1;
-      homePoints = 3;
-    } else if (awayGoals > homeGoals) {
-      awayWon = 1;
-      homeLost = 1;
-      awayPoints = 3;
-    } else {
-      homeDrawn = 1;
-      awayDrawn = 1;
-      homePoints = 1;
-      awayPoints = 1;
-    }
-
-    await Standing.findOneAndUpdate(
-      {
-        league: match.league,
-        team: match.homeTeam,
-      },
-      {
-        $inc: {
-          played: 1,
-          won: homeWon,
-          drawn: homeDrawn,
-          lost: homeLost,
-          goalsFor: homeGoals,
-          goalsAgainst: awayGoals,
-          goalDifference: homeGoals - awayGoals,
-          points: homePoints,
-        },
-      },
-      {
-        upsert: true,
-        new: true,
-      }
-    );
-
-    await Standing.findOneAndUpdate(
-      {
-        league: match.league,
-        team: match.awayTeam,
-      },
-      {
-        $inc: {
-          played: 1,
-          won: awayWon,
-          drawn: awayDrawn,
-          lost: awayLost,
-          goalsFor: awayGoals,
-          goalsAgainst: homeGoals,
-          goalDifference: awayGoals - homeGoals,
-          points: awayPoints,
-        },
-      },
-      {
-        upsert: true,
-        new: true,
-      }
-    );
-
-    for (const player of players) {
-      const team = await Team.findOne({
-        players: player.player,
-      });
-
-      await User.findByIdAndUpdate(player.player, {
-        $inc: {
-          "statistics.appearances": 1,
-          "statistics.minutesPlayed": player.minutesPlayed || 0,
-          "statistics.goals": player.goals || 0,
-          "statistics.assists": player.assists || 0,
-          "statistics.cleanSheets": player.cleanSheet ? 1 : 0,
-          "statistics.yellowCards": player.yellowCards || 0,
-          "statistics.redCards": player.redCards || 0,
-        },
-      });
-
-      if (team) {
-        await PlayerStatistics.findOneAndUpdate(
-          {
-            player: player.player,
-            league: match.league,
-          },
-          {
-            $inc: {
-              appearances: 1,
-              minutesPlayed: player.minutesPlayed || 0,
-              goals: player.goals || 0,
-              assists: player.assists || 0,
-              cleanSheets: player.cleanSheet ? 1 : 0,
-              yellowCards: player.yellowCards || 0,
-              redCards: player.redCards || 0,
-            },
-            $set: {
-              team: team._id,
-              rating: player.rating || 0,
-            },
-          },
-          {
-            upsert: true,
-            new: true,
-          }
-        );
-      }
-    }
-
-    const completedMatch = await Fixture.findById(match._id)
-      .populate("league", "name season")
-      .populate("homeTeam", "teamName logo")
-      .populate("awayTeam", "teamName logo");
-
-    return res.status(200).json({
-      success: true,
-      message: "Match completed successfully.",
-      data: completedMatch,
-    });
-  } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: err.message,
-    });
-  }
+  // All result writes use the same correction-aware transactional implementation.
+  req.body = { ...req.body, status: "COMPLETED", finalize: true };
+  return exports.updateFixture(req, res);
 };
-
 
 exports.updatePlayerStatistics = async (req, res) => {
   try {
+    for (const key of PLAYER_STAT_KEYS) if (req.body[key] !== undefined && (!Number.isInteger(Number(req.body[key])) || Number(req.body[key]) < 0)) throw domainError(`${key} must be a non-negative integer.`);
     const { playerId } = req.params;
 
     const {
@@ -2377,7 +1692,7 @@ exports.updatePlayerStatistics = async (req, res) => {
       data: updatedPlayer.statistics,
     });
   } catch (error) {
-    return res.status(500).json({
+    return res.status(error.statusCode || (error.code === 11000 || error.name === "VersionError" ? 409 : error.name === "ValidationError" || error.name === "CastError" ? 400 : 500)).json({
       success: false,
       message: error.message,
     });
@@ -2397,7 +1712,7 @@ exports.getLeagueStandings = async (req, res) => {
 
     res.json({ success: true, data: filtered });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({ success: false, message: err.message });
   }
 };
 
@@ -2416,7 +1731,7 @@ exports.getLeagueLeaderboard = async (req, res) => {
 
     res.json({ success: true, data: filtered });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({ success: false, message: err.message });
   }
 };
 
@@ -2449,7 +1764,7 @@ exports.getFixtures = async (req, res) => {
 
     res.json({ success: true, data: filtered });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({ success: false, message: err.message });
   }
 };
 
@@ -2676,9 +1991,9 @@ exports.getTeamById = async (req, res) => {
       data: teamObj,
     });
   } catch (err) {
-    return res.status(500).json({
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({
       success: false,
-      message: err.message,
+      message: err.code === 11000 ? "This team name already exists in the selected term, or a team is already scheduled in this round." : err.name === "VersionError" ? "This match changed while you were editing. Refresh and try again." : err.message,
     });
   }
 };
@@ -2863,9 +2178,9 @@ exports.getTeamPlayers = async (req, res) => {
       players: allTeamPlayers,
     });
   } catch (err) {
-    return res.status(500).json({
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({
       success: false,
-      message: err.message,
+      message: err.code === 11000 ? "This team name already exists in the selected term, or a team is already scheduled in this round." : err.name === "VersionError" ? "This match changed while you were editing. Refresh and try again." : err.message,
     });
   }
 };
@@ -2994,11 +2309,13 @@ exports.unassignPlayerFromTeam = async (req, res) => {
       data: updatedTeam || team,
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({ success: false, message: err.message });
   }
 };
 
 exports.updateTeam = async (req, res) => {
+  let previousLogo = null;
+  let logoSaved = false;
   try {
     const { teamId } = req.params;
     const {
@@ -3031,7 +2348,8 @@ exports.updateTeam = async (req, res) => {
       return res.status(404).json({ success: false, message: "Team not found" });
     }
 
-    if (term !== undefined) team.term = term || null;
+    if (team.archivedAt) throw domainError("Archived teams cannot be modified.", 409);
+    if (term !== undefined && entityId(term) !== entityId(team.term)) throw domainError("A team belongs to one term. Clone it to create an independent team in another term.", 409);
     if (dayOfWeek !== undefined) team.dayOfWeek = dayOfWeek;
     if (startTime !== undefined) team.startTime = startTime;
     if (endTime !== undefined) team.endTime = endTime;
@@ -3063,7 +2381,8 @@ exports.updateTeam = async (req, res) => {
 
       const duplicateTeam = await Team.findOne({
         _id: { $ne: teamId },
-        teamName: { $regex: new RegExp(`^${trimmedName}$`, "i") },
+        term: team.term,
+        $or: [{ normalizedName: normalizeTeamName(trimmedName) }, { teamName: { $regex: `^${escapeRegex(trimmedName)}$`, $options: "i" } }],
       });
       if (duplicateTeam) {
         return res.status(409).json({ success: false, message: "Another team already exists with this name" });
@@ -3089,14 +2408,7 @@ exports.updateTeam = async (req, res) => {
     }
 
     if (req.file) {
-      if (team.logo) {
-        const oldPath = path.join(__dirname, "..", team.logo);
-        fs.unlink(oldPath, (err) => {
-          if (err && err.code !== "ENOENT") {
-            console.error("Failed to delete old team logo:", err);
-          }
-        });
-      }
+      previousLogo = team.logo;
       team.logo = `uploads/teamlogos/${req.file.filename}`;
     }
 
@@ -3245,6 +2557,8 @@ exports.updateTeam = async (req, res) => {
     }
 
     await team.save();
+    logoSaved = true;
+    if (previousLogo && previousLogo !== team.logo) await safeRemoveTeamLogo(previousLogo);
 
     return res.status(200).json({
       success: true,
@@ -3252,68 +2566,24 @@ exports.updateTeam = async (req, res) => {
       data: team,
     });
   } catch (err) {
-    return res.status(500).json({
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({
       success: false,
-      message: err.message,
+      message: err.code === 11000 ? "This team name already exists in the selected term, or a team is already scheduled in this round." : err.name === "VersionError" ? "This match changed while you were editing. Refresh and try again." : err.message,
     });
+  } finally {
+    if (req.file && !logoSaved) await safeRemoveTeamLogo(`uploads/teamlogos/${req.file.filename}`);
   }
 };
 
 exports.deleteTeam = async (req, res) => {
   try {
     const { teamId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(teamId)) {
-      return res.status(400).json({ success: false, message: "Invalid Team ID format" });
-    }
-
+    if (!mongoose.Types.ObjectId.isValid(teamId)) throw domainError("Invalid team ID.");
     const team = await Team.findById(teamId);
-    if (!team) {
-      return res.status(404).json({ success: false, message: "Team not found" });
-    }
-
-    if (team.logo) {
-      const logoPath = path.join(__dirname, "..", team.logo);
-      fs.unlink(logoPath, (err) => {
-        if (err && err.code !== "ENOENT") {
-          console.error("Failed to delete team logo on team deletion:", err);
-        }
-      });
-    }
-
-    // 1. Remove team from all leagues (both teams list and groups)
-    await League.updateMany(
-      { teams: teamId },
-      { $pull: { teams: teamId, "groups.$[].teams": teamId } }
-    );
-
-    // 2. Remove standings and player statistics associated with this team
-    await Standing.deleteMany({ team: teamId });
-    await PlayerStatistics.deleteMany({ team: teamId });
-
-    // 3. Remove non-completed fixtures involving this team and clean up events
-    const fixturesToDelete = await Fixture.find({
-      $or: [{ homeTeam: teamId }, { awayTeam: teamId }],
-      status: { $ne: "COMPLETED" },
-    }).select("_id");
-    const fixtureIds = fixturesToDelete.map((f) => f._id);
-    if (fixtureIds.length > 0) {
-      await MatchEvent.deleteMany({ match: { $in: fixtureIds } });
-      await Fixture.deleteMany({ _id: { $in: fixtureIds } });
-    }
-
-    await Team.findByIdAndDelete(teamId);
-
-    return res.status(200).json({
-      success: true,
-      message: "Team deleted successfully",
-    });
-  } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: err.message,
-    });
-  }
+    if (!team) throw domainError("Team not found.", 404);
+    if (!team.archivedAt) { team.archivedAt = new Date(); await team.save(); }
+    return res.status(200).json({ success: true, message: "Team archived. Historical matches, attendance, payments and league references are preserved." });
+  } catch (err) { return res.status(err.statusCode || 500).json({ success: false, message: err.message }); }
 };
 
 exports.createTeamTemporaryPlayers = async (req, res) => {
@@ -3400,7 +2670,7 @@ exports.createTeamTemporaryPlayers = async (req, res) => {
       data: newTemporaryPlayers,
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({ success: false, message: err.message });
   }
 };
 
@@ -3423,7 +2693,7 @@ exports.getTeamTemporaryPlayers = async (req, res) => {
       data: team.temporaryPlayers || [],
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({ success: false, message: err.message });
   }
 };
 
@@ -3505,7 +2775,7 @@ exports.updateTeamTemporaryPlayer = async (req, res) => {
       data: tempPlayer,
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({ success: false, message: err.message });
   }
 };
 
@@ -3544,7 +2814,7 @@ exports.deleteTeamTemporaryPlayer = async (req, res) => {
       message: "Temporary player deleted successfully",
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({ success: false, message: err.message });
   }
 };
 
@@ -3557,7 +2827,7 @@ exports.getAdminLeagueData = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid League ID format" });
     }
 
-    const league = await League.findById(leagueId).populate({
+    const league = await League.findById(leagueId).populate("term", "name year startDate endDate").populate({
       path: "teams",
       select: "teamName logo coach assistantCoach ageGroup teamType players leagues temporaryPlayers statistics",
       populate: [
@@ -3628,23 +2898,7 @@ exports.getAdminLeagueData = async (req, res) => {
         ? t.leagues.find((l) => l.league && l.league.toString() === leagueId.toString())
         : null;
       const leagueStat = leagueEntry?.statistics;
-      const tStat = t.statistics || {};
-      const record = (s && (s.played > 0 || s.points > 0 || s.won > 0 || s.drawn > 0 || s.lost > 0))
-        ? s
-        : (leagueStat && (leagueStat.played > 0 || leagueStat.points > 0 || leagueStat.won > 0 || leagueStat.drawn > 0 || leagueStat.lost > 0))
-          ? leagueStat
-          : (tStat.played > 0 || tStat.points > 0 || tStat.won > 0 || tStat.drawn > 0 || tStat.lost > 0)
-            ? tStat
-            : (s || leagueStat || tStat || {
-              played: 0,
-              won: 0,
-              drawn: 0,
-              lost: 0,
-              goalsFor: 0,
-              goalsAgainst: 0,
-              goalDifference: 0,
-              points: 0,
-            });
+      const record = s || leagueStat || { played: 0, won: 0, drawn: 0, lost: 0, goalsFor: 0, goalsAgainst: 0, goalDifference: 0, points: 0 };
 
       const playersCount =
         (Array.isArray(t.players) ? t.players.length : 0) +
@@ -3673,7 +2927,7 @@ exports.getAdminLeagueData = async (req, res) => {
           }
           : null,
         playersCount,
-        status: "ACTIVE",
+        status: leagueEntry?.status === "WITHDRAWN" ? "INACTIVE" : leagueEntry?.status || "ACTIVE",
         record: {
           played: record.played || 0,
           won: record.won || 0,
@@ -3790,6 +3044,7 @@ exports.getAdminLeagueData = async (req, res) => {
 
       roundsMap[r].matches.push({
         _id: fix._id,
+        version: fix.__v,
         round: r,
         kickoffTime: fix.kickoffTime,
         venue: fix.venue,
@@ -3942,13 +3197,13 @@ exports.getAdminLeagueData = async (req, res) => {
             totalPoints: (ps.goals || 0) + (ps.assists || 0),
           };
         } else {
-          if ((ps.goals || 0) > playerTelemetryMap[pId].goals) playerTelemetryMap[pId].goals = ps.goals;
-          if ((ps.assists || 0) > playerTelemetryMap[pId].assists) playerTelemetryMap[pId].assists = ps.assists;
+          playerTelemetryMap[pId].goals = ps.goals || 0;
+          playerTelemetryMap[pId].assists = ps.assists || 0;
           playerTelemetryMap[pId].appearances = Math.max(playerTelemetryMap[pId].appearances, ps.appearances || 0);
           playerTelemetryMap[pId].totalPoints = playerTelemetryMap[pId].goals + playerTelemetryMap[pId].assists;
         }
       });
-    } catch (e) {}
+    } catch (e) { throw e; }
 
     const allPlayerStatsList = Object.values(playerTelemetryMap);
 
@@ -3997,8 +3252,8 @@ exports.getAdminLeagueData = async (req, res) => {
       progression: [],
     }));
 
-    const winPts = league.pointsForWin || 3;
-    const drawPts = league.pointsForDraw || 1;
+    const winPts = league.pointsForWin ?? 3;
+    const drawPts = league.pointsForDraw ?? 1;
 
     sortedRounds.forEach((r) => {
       const roundMatches = completedFixtures.filter((f) => (f.round || 1) === r);
@@ -4049,14 +3304,19 @@ exports.getAdminLeagueData = async (req, res) => {
         _id: league._id,
         name: league.name,
         season: league.season,
+        term: league.term,
+        venue: league.venue,
+        fee: league.fee,
+        teams: league.teams.map((team) => ({ _id: team._id, teamName: team.teamName, logo: team.logo })),
+        sessionDates: (league.sessionDates || []).map((date) => dateOnly(date)),
         logo: league.logo,
         description: league.description,
         type: league.type,
         status: league.status,
-        startDate: league.startDate,
-        endDate: league.endDate,
-        registrationStartDate: league.registrationStartDate,
-        registrationEndDate: league.registrationEndDate,
+        startDate: dateOnly(league.startDate),
+        endDate: dateOnly(league.endDate),
+        registrationStartDate: dateOnly(league.registrationStartDate),
+        registrationEndDate: dateOnly(league.registrationEndDate),
         visibility: league.visibility,
         pointsForWin: league.pointsForWin,
         pointsForDraw: league.pointsForDraw,
@@ -4065,7 +3325,7 @@ exports.getAdminLeagueData = async (req, res) => {
         fixtureFormat: league.fixtureFormat || "ROUND_ROBIN",
         numberOfRounds: league.numberOfRounds || 1,
         matchDuration: league.matchDuration || 90,
-        breakBetweenMatches: league.breakBetweenMatches || 15,
+        breakBetweenMatches: league.breakBetweenMatches ?? 15,
         numberOfFields: league.numberOfFields || 1,
         startTime: league.startTime || "10:00",
         fixtureGenerated: !!league.fixtureGenerated,
@@ -4107,14 +3367,19 @@ exports.getAdminLeagueData = async (req, res) => {
         _id: league._id,
         name: league.name,
         season: league.season,
+        term: league.term,
+        venue: league.venue,
+        fee: league.fee,
+        teams: league.teams.map((team) => ({ _id: team._id, teamName: team.teamName, logo: team.logo })),
+        sessionDates: (league.sessionDates || []).map((date) => dateOnly(date)),
         logo: league.logo,
         description: league.description,
         type: league.type,
         status: league.status,
-        startDate: league.startDate,
-        endDate: league.endDate,
-        registrationStartDate: league.registrationStartDate,
-        registrationEndDate: league.registrationEndDate,
+        startDate: dateOnly(league.startDate),
+        endDate: dateOnly(league.endDate),
+        registrationStartDate: dateOnly(league.registrationStartDate),
+        registrationEndDate: dateOnly(league.registrationEndDate),
         visibility: league.visibility,
         pointsForWin: league.pointsForWin,
         pointsForDraw: league.pointsForDraw,
@@ -4148,605 +3413,176 @@ exports.getAdminLeagueData = async (req, res) => {
       data: fullData,
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({ success: false, message: err.message });
   }
 };
 
 exports.updateLeague = async (req, res) => {
+  let session;
+  let saved = false;
+  let oldLogo;
   try {
     const { leagueId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(leagueId)) {
-      return res.status(400).json({ success: false, message: "Invalid League ID format" });
+    if (!mongoose.Types.ObjectId.isValid(leagueId)) throw domainError("Invalid league ID.");
+    session = await mongoose.startSession();
+    session.startTransaction();
+    await League.updateOne({ _id: leagueId }, { $inc: { schedulingRevision: 1 } }, { session });
+    const league = await League.findById(leagueId).session(session);
+    if (!league || league.archivedAt) throw domainError("League not found.", 404);
+    const body = req.body;
+    if (body.term !== undefined && entityId(body.term) !== entityId(league.term)) throw domainError("League term cannot change. Clone this league into the target term.", 409);
+    for (const key of ["name", "season", "description", "venue"]) if (body[key] !== undefined) league[key] = String(body[key]).trim();
+    if (!league.name || !league.season) throw domainError("Name and season are required.");
+    if (await League.exists({ _id: { $ne: leagueId }, name: league.name, season: league.season }).session(session)) throw domainError("League already exists for this season.", 409);
+    for (const key of ["startDate", "endDate", "registrationStartDate", "registrationEndDate"]) if (body[key] !== undefined) {
+      league[key] = body[key] ? parseDateToMidnight(body[key]) : null;
+      if (body[key] && !league[key]) throw domainError(`Invalid ${key}.`);
     }
-
-    const league = await League.findById(leagueId);
-    if (!league) {
-      return res.status(404).json({ success: false, message: "League not found" });
+    if (!league.startDate || !league.endDate || league.endDate < league.startDate) throw domainError("Valid ordered start and end dates are required.");
+    if (league.registrationStartDate && league.registrationEndDate && league.registrationEndDate < league.registrationStartDate) throw domainError("Registration end must follow registration start.");
+    for (const key of ["numberOfRounds", "groupCount", "numberOfFields", "matchDuration"]) if (body[key] !== undefined) {
+      if (!Number.isInteger(Number(body[key])) || Number(body[key]) < 1) throw domainError(`${key} must be a positive integer.`);
+      league[key] = Number(body[key]);
     }
-
-    const {
-      name,
-      season,
-      description,
-      startDate,
-      endDate,
-      // registrationStartDate,
-      // registrationEndDate,
-      status,
-      type,
-      leagueType,
-      competitionScope,
-      visibility,
-      pointsForWin,
-      pointsForDraw,
-      allowDraws,
-      automaticLadderRecalculation,
-      teams,
-      term,
-      fee,
-      sessionDates,
-      numberOfRounds,
-      fixtureFormat,
-      groupCount,
-      matchDuration,
-      breakBetweenMatches,
-      numberOfFields,
-      startTime,
-      generationType,
-      groups,
-    } = req.body;
-
-    // Validate and update name / season with duplicate check
-    const newName = name !== undefined ? name.trim() : league.name;
-    const newSeason = season !== undefined ? season.trim() : league.season;
-
-    if (!newName || !newSeason) {
-      return res.status(400).json({
-        success: false,
-        message: "Name and season cannot be empty.",
-      });
+    for (const key of ["fee", "pointsForWin", "pointsForDraw", "breakBetweenMatches"]) if (body[key] !== undefined) {
+      if (!Number.isFinite(Number(body[key])) || Number(body[key]) < 0) throw domainError(`${key} must be non-negative.`);
+      league[key] = Number(body[key]);
     }
-
-    if (name !== undefined || season !== undefined) {
-      const existingLeague = await League.findOne({
-        _id: { $ne: leagueId },
-        name: newName,
-        season: newSeason,
-      });
-
-      if (existingLeague) {
-        return res.status(409).json({
-          success: false,
-          message: "League already exists for this season.",
-        });
-      }
-
-      league.name = newName;
-      league.season = newSeason;
+    for (const key of ["allowDraws", "automaticLadderRecalculation"]) if (body[key] !== undefined) {
+      if (![true, false, "true", "false"].includes(body[key])) throw domainError(`${key} must be boolean.`);
+      league[key] = body[key] === true || body[key] === "true";
     }
-
-    if (description !== undefined) {
-      league.description = description.trim();
+    const enums = { status: ["UPCOMING", "ACTIVE", "COMPLETED"], visibility: ["PUBLIC", "PRIVATE"], fixtureFormat: ["ROUND_ROBIN", "GROUP", "KNOCKOUT"], generationType: ["AUTOMATIC", "MANUAL"] };
+    for (const [key, choices] of Object.entries(enums)) if (body[key] !== undefined) {
+      const value = String(body[key]).toUpperCase();
+      if (!choices.includes(value)) throw domainError(`Invalid ${key}.`);
+      league[key] = value;
     }
-
-    // Dates validation
-    let effectiveStartDate = league.startDate;
-    let effectiveEndDate = league.endDate;
-
-    if (startDate !== undefined) {
-      const parsedStart = parseDateToMidnight(startDate);
-      if (!parsedStart) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid start date format.",
-        });
-      }
-      effectiveStartDate = parsedStart;
-      league.startDate = parsedStart;
+    const type = body.type || body.leagueType || body.competitionScope;
+    if (type !== undefined) {
+      if (!["INTERNATIONAL", "NATIONAL", "STATE", "LOCAL", "OTHERS"].includes(String(type).toUpperCase())) throw domainError("Invalid league type.");
+      league.type = String(type).toUpperCase();
     }
-
-    if (endDate !== undefined) {
-      const parsedEnd = parseDateToMidnight(endDate);
-      if (!parsedEnd) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid end date format.",
-        });
-      }
-      effectiveEndDate = parsedEnd;
-      league.endDate = parsedEnd;
+    if (body.startTime !== undefined) {
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(body.startTime)) throw domainError("Start time must use HH:mm.");
+      league.startTime = body.startTime;
     }
-
-    if (effectiveEndDate < effectiveStartDate) {
-      return res.status(400).json({
-        success: false,
-        message: "End date cannot be earlier than start date.",
-      });
+    const parseArray = (value, field) => {
+      try { const parsed = typeof value === "string" ? JSON.parse(value) : value; if (!Array.isArray(parsed)) throw new Error(); return parsed; }
+      catch { throw domainError(`${field} must be an array.`); }
+    };
+    if (body.sessionDates !== undefined) {
+      league.sessionDates = parseArray(body.sessionDates, "sessionDates").map((value) => { const date = parseDateToMidnight(value); if (!date) throw domainError("Every session date must be valid."); return date; });
     }
-
-    // if (registrationStartDate !== undefined) {
-    //   league.registrationStartDate = registrationStartDate ? parseDateToMidnight(registrationStartDate) : null;
-    // }
-    // if (registrationEndDate !== undefined) {
-    //   league.registrationEndDate = registrationEndDate ? parseDateToMidnight(registrationEndDate) : null;
-    // }
-
-    if (status && ["UPCOMING", "ACTIVE", "COMPLETED"].includes(status.toUpperCase())) {
-      league.status = status.toUpperCase();
+    if (league.sessionDates.length && league.sessionDates.length !== league.numberOfRounds) throw domainError("Provide exactly one session date per round.");
+    if (league.sessionDates.some((date) => date < league.startDate || date > league.endDate)) throw domainError("Session dates must stay within league dates.");
+    const previousIds = (league.teams || []).map(entityId);
+    if (body.teams !== undefined) {
+      const ids = parseArray(body.teams, "teams").map(entityId);
+      if (ids.some((id) => !mongoose.Types.ObjectId.isValid(id)) || new Set(ids).size !== ids.length) throw domainError("Every team ID must be valid and distinct.");
+      const teams = await Team.find({ _id: { $in: ids } }).session(session);
+      if (teams.length !== ids.length) throw domainError("Selected team not found.");
+      assertTeamLeagueScope(league, teams, false);
+      league.teams = ids;
     }
-
-    const rawType = (type || leagueType || competitionScope || "").toUpperCase();
-    const VALID_TYPES = ["INTERNATIONAL", "NATIONAL", "STATE", "LOCAL", "OTHERS"];
-    if (rawType && VALID_TYPES.includes(rawType)) {
-      league.type = rawType;
+    const nextIds = (league.teams || []).map(entityId);
+    const removed = previousIds.filter((id) => !nextIds.includes(id));
+    if (removed.length && await Fixture.exists({ league: leagueId, $or: [{ homeTeam: { $in: removed } }, { awayTeam: { $in: removed } }] }).session(session)) throw domainError("Cannot remove teams referenced by fixtures. Historical matches must be preserved.", 409);
+    if (body.groups !== undefined) league.groups = parseArray(body.groups, "groups");
+    const grouped = new Set();
+    for (const group of league.groups || []) for (const team of group.teams || []) {
+      if (!nextIds.includes(entityId(team)) || grouped.has(entityId(team))) throw domainError("Groups must contain enrolled teams once only.");
+      grouped.add(entityId(team));
     }
-
-    if (visibility && ["PUBLIC", "PRIVATE"].includes(visibility.toUpperCase())) {
-      league.visibility = visibility.toUpperCase();
+    if (await Fixture.exists({ league: leagueId, round: { $gt: league.numberOfRounds } }).session(session)) throw domainError("Round count cannot exclude existing fixtures.", 409);
+    if (await Fixture.exists({ league: leagueId, field: { $nin: Array.from({ length: league.numberOfFields }, (_, i) => `Field ${i + 1}`) } }).session(session)) throw domainError("Field count cannot exclude existing fixtures. Update fixtures first.", 409);
+    if (req.file) { oldLogo = league.logo; league.logo = `/uploads/leaguelogos/${req.file.filename}`; }
+    await league.save({ session });
+    await syncTeamsLeagueData({ teamIds: league.teams, leagueId, teamFee: league.fee, round: league.numberOfRounds, sessionDates: league.sessionDates, groups: league.groups, sessionOption: { session } });
+    if (removed.length) {
+      await Team.updateMany({ _id: { $in: removed } }, { $pull: { leagues: { league: leagueId } } }, { session });
+      await Standing.deleteMany({ league: leagueId, team: { $in: removed }, played: 0 }, { session });
     }
-
-    if (term !== undefined) {
-      if (!term || term === "null" || term === "") {
-        league.term = null;
-      } else if (mongoose.Types.ObjectId.isValid(term)) {
-        league.term = term;
-      } else {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid Term ID format.",
-        });
-      }
+    for (const teamId of nextIds.filter((id) => !previousIds.includes(id))) {
+      await Standing.updateOne({ league: leagueId, team: teamId }, { $setOnInsert: { played: 0 } }, { upsert: true, session });
+      if (league.fee > 0) await processLeagueInvoicesForTeam({ leagueId, teamId, session });
     }
-
-    // Points and rules
-    let pointsChanged = false;
-    if (pointsForWin !== undefined && !isNaN(Number(pointsForWin))) {
-      const newWinPts = Number(pointsForWin);
-      if (league.pointsForWin !== newWinPts) {
-        league.pointsForWin = newWinPts;
-        pointsChanged = true;
-      }
-    }
-
-    if (pointsForDraw !== undefined && !isNaN(Number(pointsForDraw))) {
-      const newDrawPts = Number(pointsForDraw);
-      if (league.pointsForDraw !== newDrawPts) {
-        league.pointsForDraw = newDrawPts;
-        pointsChanged = true;
-      }
-    }
-
-    if (allowDraws !== undefined) {
-      const newAllowDraws = Boolean(allowDraws === "true" || allowDraws === true);
-      if (league.allowDraws !== newAllowDraws) {
-        league.allowDraws = newAllowDraws;
-        pointsChanged = true;
-      }
-    }
-
-    if (automaticLadderRecalculation !== undefined) {
-      league.automaticLadderRecalculation = Boolean(
-        automaticLadderRecalculation === "true" || automaticLadderRecalculation === true
-      );
-    }
-
-    // Fee
-    let feeChanged = false;
-    if (fee !== undefined && fee !== null && !isNaN(Number(fee))) {
-      const parsedFee = Math.max(0, Number(fee));
-      if (league.fee !== parsedFee) {
-        league.fee = parsedFee;
-        feeChanged = true;
-      }
-    }
-
-    // Session dates
-    let sessionDatesChanged = false;
-    let parsedSessionDates = null;
-    if (sessionDates !== undefined) {
-      let rawSessionDates = sessionDates;
-      if (typeof rawSessionDates === "string") {
-        try {
-          rawSessionDates = JSON.parse(rawSessionDates);
-        } catch (e) {
-          rawSessionDates = rawSessionDates
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean);
-        }
-      }
-
-      if (Array.isArray(rawSessionDates)) {
-        parsedSessionDates = rawSessionDates
-          .map((d) => parseDateToMidnight(d))
-          .filter(Boolean);
-        league.sessionDates = parsedSessionDates;
-        sessionDatesChanged = true;
-      }
-    }
-
-    // Number of rounds
-    let roundsChanged = false;
-    if (numberOfRounds !== undefined && !isNaN(parseInt(numberOfRounds, 10))) {
-      const parsedRounds = Math.max(1, parseInt(numberOfRounds, 10));
-      if (league.numberOfRounds !== parsedRounds) {
-        league.numberOfRounds = parsedRounds;
-        roundsChanged = true;
-      }
-    } else if (sessionDatesChanged && parsedSessionDates && parsedSessionDates.length > 0) {
-      league.numberOfRounds = parsedSessionDates.length;
-      roundsChanged = true;
-    }
-
-    // Tournament & scheduling configs
-    if (fixtureFormat) {
-      const validFormats = ["ROUND_ROBIN", "GROUP", "KNOCKOUT"];
-      const parsedFmt = fixtureFormat.toString().toUpperCase().trim();
-      if (validFormats.includes(parsedFmt)) {
-        league.fixtureFormat = parsedFmt;
-      }
-    }
-
-    if (groupCount !== undefined && !isNaN(parseInt(groupCount, 10))) {
-      league.groupCount = Math.max(1, parseInt(groupCount, 10));
-    }
-
-    if (matchDuration !== undefined && !isNaN(parseInt(matchDuration, 10))) {
-      league.matchDuration = Math.max(1, parseInt(matchDuration, 10));
-    }
-
-    if (breakBetweenMatches !== undefined && !isNaN(parseInt(breakBetweenMatches, 10))) {
-      league.breakBetweenMatches = Math.max(0, parseInt(breakBetweenMatches, 10));
-    }
-
-    if (numberOfFields !== undefined && !isNaN(parseInt(numberOfFields, 10))) {
-      league.numberOfFields = Math.max(1, parseInt(numberOfFields, 10));
-    }
-
-    if (startTime && typeof startTime === "string") {
-      league.startTime = startTime.trim();
-    }
-
-    if (generationType) {
-      const parsedGen = generationType.toString().toUpperCase().trim();
-      if (["AUTOMATIC", "MANUAL"].includes(parsedGen)) {
-        league.generationType = parsedGen;
-      }
-    }
-
-    let groupsChanged = false;
-    if (groups !== undefined) {
-      let rawGroups = groups;
-      if (typeof rawGroups === "string") {
-        try {
-          rawGroups = JSON.parse(rawGroups);
-        } catch (e) {
-          rawGroups = [];
-        }
-      }
-      if (Array.isArray(rawGroups)) {
-        league.groups = rawGroups;
-        groupsChanged = true;
-      }
-    }
-
-    // Teams
-    let teamsChanged = false;
-    let verifiedTeamIds = [];
-    let removedTeamIds = [];
-    let addedTeamIds = [];
-    if (teams !== undefined) {
-      let rawTeams = teams;
-      if (typeof rawTeams === "string") {
-        try {
-          rawTeams = JSON.parse(rawTeams);
-        } catch (e) {
-          rawTeams = rawTeams
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean);
-        }
-      }
-
-      if (Array.isArray(rawTeams)) {
-        const rawIds = rawTeams.map((id) => (id ? id.toString().trim() : "")).filter(Boolean);
-        const invalidId = rawIds.find((id) => !mongoose.Types.ObjectId.isValid(id));
-        if (invalidId) {
-          return res.status(400).json({
-            success: false,
-            message: `Invalid team ID format: "${invalidId}".`,
-          });
-        }
-        verifiedTeamIds = [...new Set(rawIds)];
-
-        if (verifiedTeamIds.length > 0) {
-          const existingCount = await Team.countDocuments({ _id: { $in: verifiedTeamIds } });
-          if (existingCount !== verifiedTeamIds.length) {
-            return res.status(404).json({
-              success: false,
-              message: "One or more selected teams do not exist in the database.",
-            });
-          }
-        }
-
-        const previousTeamIds = (league.teams || []).map((id) => id.toString());
-        const currentTeamIds = verifiedTeamIds.map((id) => id.toString());
-        removedTeamIds = previousTeamIds.filter((id) => !currentTeamIds.includes(id));
-        addedTeamIds = currentTeamIds.filter((id) => !previousTeamIds.includes(id));
-
-        league.teams = verifiedTeamIds;
-        teamsChanged = true;
-
-        // Cleanup Standings, PlayerStatistics, and non-completed fixtures for REMOVED teams
-        if (removedTeamIds.length > 0) {
-          await Standing.deleteMany({ league: league._id, team: { $in: removedTeamIds } });
-          await PlayerStatistics.deleteMany({ league: league._id, team: { $in: removedTeamIds } });
-
-          const fixturesToRemove = await Fixture.find({
-            league: league._id,
-            $or: [
-              { homeTeam: { $in: removedTeamIds } },
-              { awayTeam: { $in: removedTeamIds } },
-            ],
-            status: { $ne: "COMPLETED" },
-          }).select("_id");
-          const fixtureIdsToRemove = fixturesToRemove.map((f) => f._id);
-          if (fixtureIdsToRemove.length > 0) {
-            await MatchEvent.deleteMany({ match: { $in: fixtureIdsToRemove } });
-            await Fixture.deleteMany({ _id: { $in: fixtureIdsToRemove } });
-          }
-
-          if (Array.isArray(league.groups)) {
-            league.groups.forEach((g) => {
-              if (Array.isArray(g.teams)) {
-                g.teams = g.teams.filter(
-                  (tId) => !removedTeamIds.includes(tId ? tId.toString() : "")
-                );
-              }
-            });
-          }
-        }
-
-        // Upsert standings for all teams in the league
-        if (verifiedTeamIds.length > 0) {
-          const standingOps = verifiedTeamIds.map((tId) => ({
-            updateOne: {
-              filter: { league: league._id, team: tId },
-              update: {
-                $setOnInsert: {
-                  league: league._id,
-                  team: tId,
-                  played: 0,
-                  won: 0,
-                  drawn: 0,
-                  lost: 0,
-                  goalsFor: 0,
-                  goalsAgainst: 0,
-                  goalDifference: 0,
-                  points: 0,
-                },
-              },
-              upsert: true,
-            },
-          }));
-          await Standing.bulkWrite(standingOps);
-        }
-
-        if (addedTeamIds.length > 0 && league.fee > 0) {
-          for (const tId of addedTeamIds) {
-            try {
-              await processLeagueInvoicesForTeam({ leagueId: league._id, teamId: tId });
-            } catch (invErr) {
-              console.error(`[League] Error processing invoices for added team ${tId}:`, invErr.message);
-            }
-          }
-        }
-      }
-    }
-
-    // Logo upload
-    if (req.file) {
-      if (league.logo && league.logo.startsWith("/uploads/")) {
-        const oldLogoPath = path.join(__dirname, "..", league.logo);
-        fs.unlink(oldLogoPath, (err) => {
-          if (err && err.code !== "ENOENT") {
-            console.error("Failed to delete previous league logo:", err);
-          }
-        });
-      }
-      league.logo = `/uploads/leaguelogos/${req.file.filename}`;
-    }
-
-    // Synchronize enrolled teams with league fee, sessionDates, and numberOfRounds if updated
-    const teamsToSync = teamsChanged ? verifiedTeamIds : (league.teams || []);
-    if ((teamsChanged || feeChanged || sessionDatesChanged || roundsChanged || groupsChanged) && teamsToSync.length > 0) {
-      await syncTeamsLeagueData({
-        teamIds: teamsToSync,
-        leagueId: league._id,
-        teamFee: league.fee || 0,
-        round: league.numberOfRounds || null,
-        sessionDates: league.sessionDates || [],
-        groups: league.groups || [],
-        status: "ACTIVE",
-      });
-    }
-
-    if (teamsChanged && removedTeamIds.length > 0) {
-      await Team.updateMany(
-        { _id: { $in: removedTeamIds } },
-        {
-          $pull: {
-            leagues: { league: league._id },
-          },
-        }
-      );
-    }
-
-    // Recalculate standings if points rules were updated and automatic recalculation is enabled
-    if (pointsChanged && league.automaticLadderRecalculation) {
-      try {
-        await recalculateLeagueStandings(league._id);
-      } catch (ladderErr) {
-        console.error("[League] Error recalculating standings after league update:", ladderErr.message);
-      }
-    }
-
-    await league.save();
-
-    const updatedLeague = await League.findById(leagueId).populate("teams", "teamName logo");
-
-    return res.status(200).json({
-      success: true,
-      message: "League updated successfully",
-      data: updatedLeague,
-    });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    if (league.automaticLadderRecalculation) await recalculateLeagueStandings(leagueId, session);
+    await session.commitTransaction();
+    saved = true;
+    if (oldLogo) await safeRemoveLeagueLogo(oldLogo);
+    const data = await League.findById(leagueId).populate("teams", "teamName logo");
+    return res.json({ success: true, message: "League updated successfully.", data });
+  } catch (error) {
+    if (session?.inTransaction()) await session.abortTransaction();
+    return res.status(error.statusCode || ([11000, 112, 251].includes(error.code) ? 409 : error.name === "ValidationError" ? 400 : 500)).json({ success: false, message: error.message });
+  } finally {
+    if (session) await session.endSession();
+    if (req.file && !saved) await safeRemoveLeagueLogo(`/uploads/leaguelogos/${req.file.filename}`);
   }
 };
 
 exports.addTeamToLeague = async (req, res) => {
+  let session;
   try {
     const { leagueId } = req.params;
-    const { teamId, teamIds } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(leagueId)) {
-      return res.status(400).json({ success: false, message: "Invalid League ID format" });
+    const ids = [...new Set([req.body.teamId, ...(Array.isArray(req.body.teamIds) ? req.body.teamIds : [])].filter(Boolean).map(entityId))];
+    if (!mongoose.Types.ObjectId.isValid(leagueId) || !ids.length || ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) throw domainError("Select valid league and team IDs.");
+    session = await mongoose.startSession(); session.startTransaction();
+    await League.updateOne({ _id: leagueId }, { $inc: { schedulingRevision: 1 } }, { session });
+    const league = await League.findById(leagueId).session(session);
+    if (!league || league.archivedAt) throw domainError("League not found.", 404);
+    const teams = await Team.find({ _id: { $in: ids } }).session(session);
+    if (teams.length !== ids.length) throw domainError("Every selected team must exist.", 404);
+    assertTeamLeagueScope(league, teams, false);
+    const newIds = ids.filter((id) => !league.teams.some((team) => entityId(team) === id));
+    league.teams = [...league.teams, ...newIds];
+    await league.save({ session });
+    await syncTeamsLeagueData({ teamIds: ids, leagueId, teamFee: league.fee, round: league.numberOfRounds, sessionDates: league.sessionDates, groups: league.groups, sessionOption: { session } });
+    for (const teamId of ids) {
+      await Standing.updateOne({ league: leagueId, team: teamId }, { $setOnInsert: { played: 0 } }, { upsert: true, session });
+      if (newIds.includes(teamId) && league.fee > 0) await processLeagueInvoicesForTeam({ leagueId, teamId, session });
     }
-
-    const league = await League.findById(leagueId);
-    if (!league) {
-      return res.status(404).json({ success: false, message: "League not found" });
-    }
-
-    const teamsToAdd = [];
-    if (teamId) teamsToAdd.push(teamId);
-    if (Array.isArray(teamIds)) teamsToAdd.push(...teamIds);
-
-    const validTeamIds = teamsToAdd.filter((id) => mongoose.Types.ObjectId.isValid(id));
-    if (validTeamIds.length === 0) {
-      return res.status(400).json({ success: false, message: "No valid team ID(s) provided" });
-    }
-
-    const existingTeams = await Team.find({ _id: { $in: validTeamIds } });
-    if (existingTeams.length === 0) {
-      return res.status(404).json({ success: false, message: "Specified teams not found" });
-    }
-
-    const foundIds = existingTeams.map((t) => t._id);
-    await League.findByIdAndUpdate(leagueId, {
-      $addToSet: { teams: { $each: foundIds } },
-    });
-
-    // Synchronize enrolled teams with league fee, sessionDates, and numberOfRounds
-    await syncTeamsLeagueData({
-      teamIds: foundIds,
-      leagueId: league._id,
-      teamFee: league.fee || 0,
-      round: league.numberOfRounds || null,
-      sessionDates: league.sessionDates || [],
-      groups: league.groups || [],
-      status: "ACTIVE",
-    });
-
-    // Generate league fee invoices for UNPAID players in newly enrolled teams
-    if (league.fee > 0) {
-      for (const tId of foundIds) {
-        try {
-          await processLeagueInvoicesForTeam({ leagueId: league._id, teamId: tId });
-        } catch (invErr) {
-          console.error(`[League] Error processing invoices for enrolled team ${tId}:`, invErr.message);
-        }
-      }
-    }
-
-    const standingPromises = foundIds.map((tId) =>
-      Standing.findOneAndUpdate(
-        { league: leagueId, team: tId },
-        {
-          $setOnInsert: {
-            played: 0,
-            won: 0,
-            drawn: 0,
-            lost: 0,
-            goalsFor: 0,
-            goalsAgainst: 0,
-            goalDifference: 0,
-            points: 0,
-          },
-        },
-        { upsert: true, new: true }
-      )
-    );
-    await Promise.all(standingPromises);
-
-    const updatedLeague = await League.findById(leagueId).populate("teams", "teamName logo");
-
-    return res.status(200).json({
-      success: true,
-      message: "Team(s) enrolled into league successfully",
-      data: updatedLeague,
-    });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
+    await session.commitTransaction();
+    return res.json({ success: true, message: "Teams enrolled successfully.", data: await League.findById(leagueId).populate("teams", "teamName logo") });
+  } catch (error) {
+    if (session?.inTransaction()) await session.abortTransaction();
+    return res.status(error.statusCode || ([11000, 112, 251].includes(error.code) ? 409 : 500)).json({ success: false, message: error.message });
+  } finally { if (session) await session.endSession(); }
 };
 
 exports.removeTeamFromLeague = async (req, res) => {
+  let session;
   try {
     const { leagueId, teamId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(leagueId) || !mongoose.Types.ObjectId.isValid(teamId)) {
-      return res.status(400).json({ success: false, message: "Invalid ID format" });
-    }
-
-    const league = await League.findById(leagueId);
-    if (!league) {
-      return res.status(404).json({ success: false, message: "League not found" });
-    }
-
-    const fixtureCount = await Fixture.countDocuments({
-      league: leagueId,
-      $or: [{ homeTeam: teamId }, { awayTeam: teamId }],
-      status: "COMPLETED",
-    });
-
-    if (fixtureCount > 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Cannot remove team as it already has completed fixtures in this league.",
-      });
-    }
-
-    await League.findByIdAndUpdate(leagueId, {
-      $pull: { teams: teamId },
-    });
-
-    await Team.findByIdAndUpdate(teamId, {
-      $pull: { leagues: { league: leagueId } },
-    });
-
-    await Standing.deleteOne({ league: leagueId, team: teamId, played: 0 });
-
-    return res.status(200).json({
-      success: true,
-      message: "Team removed from league successfully",
-    });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
+    if (![leagueId, teamId].every(mongoose.Types.ObjectId.isValid)) throw domainError("Invalid league or team ID.");
+    session = await mongoose.startSession(); session.startTransaction();
+    await League.updateOne({ _id: leagueId }, { $inc: { schedulingRevision: 1 } }, { session });
+    const league = await League.findById(leagueId).session(session);
+    if (!league || league.archivedAt || !league.teams.some((team) => entityId(team) === teamId)) throw domainError("Team enrollment not found.", 404);
+    if (await Fixture.exists({ league: leagueId, $or: [{ homeTeam: teamId }, { awayTeam: teamId }] }).session(session)) throw domainError("Cannot remove teams referenced by fixtures. Historical matches must be preserved.", 409);
+    league.teams = league.teams.filter((team) => entityId(team) !== teamId);
+    for (const group of league.groups || []) group.teams = group.teams.filter((team) => entityId(team) !== teamId);
+    await league.save({ session });
+    await Team.updateOne({ _id: teamId }, { $pull: { leagues: { league: leagueId } } }, { session });
+    await Standing.deleteOne({ league: leagueId, team: teamId, played: 0 }, { session });
+    await session.commitTransaction();
+    return res.json({ success: true, message: "Team removed from league." });
+  } catch (error) {
+    if (session?.inTransaction()) await session.abortTransaction();
+    return res.status(error.statusCode || ([112, 251].includes(error.code) ? 409 : 500)).json({ success: false, message: error.message });
+  } finally { if (session) await session.endSession(); }
 };
 
-const recalculateLeagueStandings = async (leagueId) => {
-  const league = await League.findById(leagueId);
+const recalculateLeagueStandings = async (leagueId, session = null) => {
+  const league = await League.findById(leagueId).session(session);
   if (!league) return null;
 
   const pointsForWin = league.pointsForWin !== undefined ? Number(league.pointsForWin) : 3;
   const pointsForDraw = league.pointsForDraw !== undefined ? Number(league.pointsForDraw) : 1;
 
-  const fixtureTeamsHome = await Fixture.find({ league: leagueId }).distinct("homeTeam");
-  const fixtureTeamsAway = await Fixture.find({ league: leagueId }).distinct("awayTeam");
+  const fixtureTeamsHome = await Fixture.find({ league: leagueId }).session(session).distinct("homeTeam");
+  const fixtureTeamsAway = await Fixture.find({ league: leagueId }).session(session).distinct("awayTeam");
   const combinedTeamIds = new Set([
     ...(league.teams || []).map((t) => t.toString()),
     ...fixtureTeamsHome.map((t) => t.toString()),
@@ -4770,7 +3606,7 @@ const recalculateLeagueStandings = async (leagueId) => {
   const completedFixtures = await Fixture.find({
     league: leagueId,
     status: "COMPLETED",
-  });
+  }).session(session);
 
   completedFixtures.forEach((fix) => {
     const hId = fix.homeTeam?.toString();
@@ -4828,7 +3664,7 @@ const recalculateLeagueStandings = async (leagueId) => {
   }));
 
   if (bulkOps.length > 0) {
-    await Standing.bulkWrite(bulkOps);
+    await Standing.bulkWrite(bulkOps, session ? { session } : {});
   }
 
   const teamBulkOps = Object.keys(teamStats).map((tId) => ({
@@ -4838,13 +3674,14 @@ const recalculateLeagueStandings = async (leagueId) => {
     },
   }));
   if (teamBulkOps.length > 0) {
-    await Team.bulkWrite(teamBulkOps);
+    await Team.bulkWrite(teamBulkOps, session ? { session } : {});
   }
 
   return teamStats;
 };
 
 exports.recalculateLadder = async (req, res) => {
+  let session;
   try {
     const { leagueId } = req.params;
 
@@ -4857,7 +3694,10 @@ exports.recalculateLadder = async (req, res) => {
       return res.status(404).json({ success: false, message: "League not found" });
     }
 
-    const teamStats = await recalculateLeagueStandings(leagueId);
+    session = await mongoose.startSession(); session.startTransaction();
+    await League.updateOne({ _id: leagueId }, { $inc: { schedulingRevision: 1 } }, { session });
+    const teamStats = await recalculateLeagueStandings(leagueId, session);
+    await session.commitTransaction();
 
     return res.status(200).json({
       success: true,
@@ -4865,8 +3705,9 @@ exports.recalculateLadder = async (req, res) => {
       data: teamStats,
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
+    if (session?.inTransaction()) await session.abortTransaction();
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({ success: false, message: err.message });
+  } finally { if (session) await session.endSession(); }
 };
 
 // Helper: Calculate team contribution for a match
@@ -4946,6 +3787,10 @@ exports.updateFixture = async (req, res) => {
       return res.status(404).json({ success: false, message: "Fixture not found" });
     }
 
+    if (req.params.leagueId && entityId(match.league) !== req.params.leagueId) throw domainError("Fixture does not belong to the specified league.", 404);
+    if (req.body.league && entityId(req.body.league) !== entityId(match.league)) throw domainError("Fixture league cannot change.");
+    if (req.body.version !== undefined && Number(req.body.version) !== match.__v) throw domainError("This match has changed. Refresh before saving.", 409);
+
     // 1. Capture OLD state (league must NEVER change)
     const oldLeague = match.league;
     const oldHomeTeam = match.homeTeam;
@@ -4998,24 +3843,20 @@ exports.updateFixture = async (req, res) => {
         ? Number(score.awayScore)
         : oldAwayScore;
 
-    if (isNaN(newHomeScore) || newHomeScore < 0 || isNaN(newAwayScore) || newAwayScore < 0) {
+    if (!Number.isInteger(newHomeScore) || newHomeScore < 0 || !Number.isInteger(newAwayScore) || newAwayScore < 0) {
       return res.status(400).json({ success: false, message: "Scores must be non-negative numbers" });
     }
 
     const scoreChanged = newHomeScore !== oldHomeScore || newAwayScore !== oldAwayScore;
 
-    // 3. Resolve NEW status
-    let newStatus = oldStatus;
-    if (status && ["SCHEDULED", "LIVE", "COMPLETED", "POSTPONED"].includes(status.toUpperCase())) {
-      newStatus = status.toUpperCase();
-    } else if (scoreChanged && oldStatus === "SCHEDULED") {
-      newStatus = "COMPLETED";
-    }
-
-    // 4. Resolve and validate NEW teams
-    const newHomeTeam = (homeTeam && mongoose.Types.ObjectId.isValid(homeTeam)) ? homeTeam : oldHomeTeam;
-    const newAwayTeam = (awayTeam && mongoose.Types.ObjectId.isValid(awayTeam)) ? awayTeam : oldAwayTeam;
-
+    // Score submission finalizes even a 0-0 result; explicit LIVE remains a draft.
+    const hasResult = homeScore != null || awayScore != null || score?.homeScore != null || score?.awayScore != null;
+    if (status && !["SCHEDULED", "LIVE", "COMPLETED", "POSTPONED"].includes(String(status).toUpperCase())) throw domainError("Invalid fixture status.");
+    const newStatus = req.body.finalize === true ? "COMPLETED" : status ? String(status).toUpperCase() : hasResult ? "COMPLETED" : oldStatus;
+    const newHomeTeam = homeTeam !== undefined ? entityId(homeTeam) : entityId(oldHomeTeam);
+    const newAwayTeam = awayTeam !== undefined ? entityId(awayTeam) : entityId(oldAwayTeam);
+    if (![newHomeTeam, newAwayTeam].every(mongoose.Types.ObjectId.isValid)) throw domainError("Invalid team ID.");
+    if (["COMPLETED", "LIVE"].includes(oldStatus) && (newHomeTeam !== entityId(oldHomeTeam) || newAwayTeam !== entityId(oldAwayTeam))) throw domainError("Teams cannot change after a match starts. Correct the result or create a separate fixture.", 409);
     if (newHomeTeam.toString() === newAwayTeam.toString()) {
       return res.status(400).json({ success: false, message: "Home team and away team cannot be the same" });
     }
@@ -5033,6 +3874,22 @@ exports.updateFixture = async (req, res) => {
       return res.status(404).json({ success: false, message: "One or both teams not found" });
     }
 
+    if (leagueDoc.archivedAt) throw domainError("Archived league cannot be modified.", 409);
+    assertTeamLeagueScope(leagueDoc, [homeTeamDoc, awayTeamDoc]);
+    const timing = validateFixtureSchedule(leagueDoc, { round: round ?? match.round, kickoffTime: kickoffTime || match.kickoffTime, endTime: endTime || (kickoffTime ? null : match.endTime), field: field || match.field || "Field 1" });
+    const conflict = await Fixture.exists({ _id: { $ne: matchId }, league: oldLeague, round: timing.round, $or: [{ homeTeam: { $in: [newHomeTeam, newAwayTeam] } }, { awayTeam: { $in: [newHomeTeam, newAwayTeam] } }] });
+    if (conflict) throw domainError("A selected team is already scheduled in this round.", 409);
+    if (await Fixture.exists({ _id: { $ne: matchId }, league: oldLeague, field: timing.field, kickoffTime: { $lt: timing.endTime }, endTime: { $gt: timing.kickoffTime } })) throw domainError("This field is already booked at that time.", 409);
+    if (newStatus === "COMPLETED" && !leagueDoc.allowDraws && newHomeScore === newAwayScore) throw domainError("Draws are disabled for this league.");
+    if (Array.isArray(players || playerStatuses)) {
+      for (const item of players || playerStatuses) {
+        const targetId = entityId(item.teamId || item.team);
+        if (targetId && ![newHomeTeam, newAwayTeam].includes(targetId)) throw domainError("Player changes must target a participating team.");
+        const pId = entityId(item.playerId || item.player);
+        const rosterTeam = targetId === newHomeTeam ? homeTeamDoc : targetId === newAwayTeam ? awayTeamDoc : null;
+        if (!mongoose.Types.ObjectId.isValid(pId) || !(rosterTeam ? checkPlayerBelongsToTeam(pId, rosterTeam) : checkPlayerBelongsToTeam(pId, homeTeamDoc) || checkPlayerBelongsToTeam(pId, awayTeamDoc))) throw domainError("Player must belong to a participating team.");
+      }
+    }
     // 5. Validate goals
     const goalsProvided = goals !== undefined;
     let effectiveNewGoals = oldGoals;
@@ -5122,6 +3979,23 @@ exports.updateFixture = async (req, res) => {
       effectiveNewGoals = validatedGoals;
     }
 
+    const oldResultPlayers = (match.resultPlayers || []).map((row) => row.toObject ? row.toObject() : row);
+    const metricPlayers = req.body.resultPlayers !== undefined ? req.body.resultPlayers : Array.isArray(players) && players.some((row) => [...PLAYER_STAT_KEYS, "rating", "cleanSheet"].some((key) => row[key] !== undefined)) ? players : undefined;
+    let newResultPlayers = oldResultPlayers;
+    if (metricPlayers !== undefined) {
+      if (!Array.isArray(metricPlayers)) throw domainError("Result players must be an array.");
+      const seen = new Set();
+      newResultPlayers = metricPlayers.map((row) => {
+        const player = entityId(row.playerId || row.player);
+        if (seen.has(player)) throw domainError("Each player may appear only once in a result.");
+        seen.add(player);
+        const team = checkPlayerBelongsToTeam(player, homeTeamDoc) ? newHomeTeam : checkPlayerBelongsToTeam(player, awayTeamDoc) ? newAwayTeam : null;
+        if (!mongoose.Types.ObjectId.isValid(player) || !team) throw domainError("Result player must belong to a participating team.");
+        const stats = Object.fromEntries(PLAYER_STAT_KEYS.map((key) => [key, Number(key === "appearances" ? row[key] ?? 1 : key === "cleanSheets" ? row[key] ?? (row.cleanSheet ? 1 : 0) : row[key] ?? 0)]));
+        if (Object.values(stats).some((value) => !Number.isInteger(value) || value < 0) || stats.appearances > 1 || stats.cleanSheets > 1) throw domainError("Player result statistics must be non-negative integers; appearances and clean sheets must be 0 or 1.");
+        return { player, team, ...stats };
+      });
+    }
     // 6. Calculate Team Contributions (OLD vs NEW)
     const oldTeamContribs = {};
     if (oldStatus === "COMPLETED") {
@@ -5156,52 +4030,7 @@ exports.updateFixture = async (req, res) => {
       };
     }
 
-    // 7. Calculate Global Player Goal & Assist Contributions (OLD vs NEW)
-    const oldPlayerGoals = {};
-    const oldPlayerAssists = {};
-    if (oldStatus === "COMPLETED") {
-      for (const g of oldGoals) {
-        if (g.scorer) {
-          const s = g.scorer.toString();
-          oldPlayerGoals[s] = (oldPlayerGoals[s] || 0) + 1;
-        }
-        if (g.assist) {
-          const a = g.assist.toString();
-          oldPlayerAssists[a] = (oldPlayerAssists[a] || 0) + 1;
-        }
-      }
-    }
-
-    const newPlayerGoals = {};
-    const newPlayerAssists = {};
-    if (newStatus === "COMPLETED") {
-      for (const g of effectiveNewGoals) {
-        if (g.scorer) {
-          const s = g.scorer.toString();
-          newPlayerGoals[s] = (newPlayerGoals[s] || 0) + 1;
-        }
-        if (g.assist) {
-          const a = g.assist.toString();
-          newPlayerAssists[a] = (newPlayerAssists[a] || 0) + 1;
-        }
-      }
-    }
-
-    const allAffectedPlayerIds = new Set([
-      ...Object.keys(oldPlayerGoals),
-      ...Object.keys(newPlayerGoals),
-      ...Object.keys(oldPlayerAssists),
-      ...Object.keys(newPlayerAssists),
-    ]);
-
-    const playerDeltas = {};
-    for (const pId of allAffectedPlayerIds) {
-      const gDelta = (newPlayerGoals[pId] || 0) - (oldPlayerGoals[pId] || 0);
-      const aDelta = (newPlayerAssists[pId] || 0) - (oldPlayerAssists[pId] || 0);
-      if (gDelta !== 0 || aDelta !== 0) {
-        playerDeltas[pId] = { goals: gDelta, assists: aDelta };
-      }
-    }
+    const playerDeltas = contributionDeltas({ status: oldStatus, goals: oldGoals, resultPlayers: oldResultPlayers }, { status: newStatus, goals: effectiveNewGoals, resultPlayers: newResultPlayers });
 
     // 8. Execute updates within a MongoDB session/transaction if supported
     let session = null;
@@ -5211,18 +4040,27 @@ exports.updateFixture = async (req, res) => {
       session.startTransaction();
       useSession = true;
     } catch (sessionErr) {
-      useSession = false;
-      session = null;
+      if (session) await session.endSession();
+      throw domainError("Match changes require a transactional database connection.", 503);
     }
     const sessionOption = useSession ? { session } : {};
 
     try {
+      await League.updateOne({ _id: oldLeague }, { $inc: { schedulingRevision: 1 } }, sessionOption);
+      if (await Fixture.exists({ _id: { $ne: matchId }, league: oldLeague, round: timing.round, $or: [{ homeTeam: { $in: [newHomeTeam, newAwayTeam] } }, { awayTeam: { $in: [newHomeTeam, newAwayTeam] } }] }).session(session)) throw domainError("A selected team is already scheduled in this round.", 409);
+      if (await Fixture.exists({ _id: { $ne: matchId }, league: oldLeague, field: timing.field, kickoffTime: { $lt: timing.endTime }, endTime: { $gt: timing.kickoffTime } }).session(session)) throw domainError("This field is already booked at that time.", 409);
       // A. Update Fixture fields
       match.score.homeScore = newHomeScore;
       match.score.awayScore = newAwayScore;
       match.status = newStatus;
+      match.resultPlayers = newResultPlayers;
       match.homeTeam = newHomeTeam;
       match.awayTeam = newAwayTeam;
+      match.participants = [newHomeTeam, newAwayTeam];
+      match.round = timing.round;
+      match.kickoffTime = timing.kickoffTime;
+      match.endTime = timing.endTime;
+      match.field = timing.field;
 
       if (round !== undefined && !isNaN(Number(round))) {
         match.round = Math.max(1, parseInt(round, 10));
@@ -5233,7 +4071,7 @@ exports.updateFixture = async (req, res) => {
         isScheduleModified = true;
       }
       if (endTime !== undefined) {
-        match.endTime = new Date(endTime);
+        match.endTime = timing.endTime;
         isScheduleModified = true;
       }
       if (venue) {
@@ -5252,6 +4090,7 @@ exports.updateFixture = async (req, res) => {
 
       if (req.body.sessionDate) {
         match.sessionDate = parseDateToMidnight(req.body.sessionDate);
+        if (!match.sessionDate) throw domainError("Invalid session date.");
         isScheduleModified = true;
       }
       if (isScheduleModified) {
@@ -5348,8 +4187,7 @@ exports.updateFixture = async (req, res) => {
       const userBulkOps = [];
       for (const [pId, delta] of Object.entries(playerDeltas)) {
         const inc = {};
-        if (delta.goals !== 0) inc["statistics.goals"] = delta.goals;
-        if (delta.assists !== 0) inc["statistics.assists"] = delta.assists;
+        for (const key of PLAYER_STAT_KEYS) if (delta[key]) inc[`statistics.${key}`] = delta[key];
 
         if (Object.keys(inc).length > 0) {
           userBulkOps.push({
@@ -5368,13 +4206,12 @@ exports.updateFixture = async (req, res) => {
       const playerStatsOps = [];
       for (const [pId, delta] of Object.entries(playerDeltas)) {
         const inc = {};
-        if (delta.goals !== 0) inc["goals"] = delta.goals;
-        if (delta.assists !== 0) inc["assists"] = delta.assists;
+        for (const key of PLAYER_STAT_KEYS) if (delta[key]) inc[key] = delta[key];
 
         if (Object.keys(inc).length > 0) {
           const goalMatch = effectiveNewGoals.find((g) => g.scorer === pId || g.assist === pId)
             || oldGoals.find((g) => g.scorer === pId || g.assist === pId);
-          const pTeamId = goalMatch?.team || newHomeTeam;
+          const pTeamId = newResultPlayers.find((row) => entityId(row.player) === pId)?.team || oldResultPlayers.find((row) => entityId(row.player) === pId)?.team || goalMatch?.team || newHomeTeam;
 
           playerStatsOps.push({
             updateOne: {
@@ -5382,7 +4219,7 @@ exports.updateFixture = async (req, res) => {
               update: {
                 $inc: inc,
                 $set: { team: pTeamId },
-                $setOnInsert: { appearances: 0, cleanSheets: 0, minutesPlayed: 0, yellowCards: 0, redCards: 0 },
+                $setOnInsert: Object.fromEntries(PLAYER_STAT_KEYS.filter((key) => !Object.prototype.hasOwnProperty.call(inc, key)).map((key) => [key, 0])),
               },
               upsert: true,
             },
@@ -5503,92 +4340,52 @@ exports.updateFixture = async (req, res) => {
       data: formattedMatch,
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.statusCode || ([11000, 112, 251].includes(err.code) || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({ success: false, message: err.code === 11000 ? "A selected team is already scheduled in this round." : err.name === "VersionError" ? "This match changed while you were editing. Refresh and try again." : err.message });
   }
 };
 
+const hasRecordedMatchActivity = (match) => ["LIVE", "COMPLETED"].includes(match.status) || match.events?.length || match.goals?.length || match.playerRatings?.length || match.resultPlayers?.length || Number(match.score?.homeScore || 0) > 0 || Number(match.score?.awayScore || 0) > 0;
+
 exports.deleteFixture = async (req, res) => {
+  let session;
   try {
     const matchId = req.params.fixtureId || req.params.matchId;
-
-    if (!mongoose.Types.ObjectId.isValid(matchId)) {
-      return res.status(400).json({ success: false, message: "Invalid Match ID format" });
-    }
-
-    const match = await Fixture.findById(matchId);
-    if (!match) {
-      return res.status(404).json({ success: false, message: "Fixture not found" });
-    }
-
-    const leagueId = match.league;
-    const wasCompleted = match.status === "COMPLETED";
-
-    await Fixture.findByIdAndDelete(matchId);
-
-    if (wasCompleted) {
-      await recalculateLeagueStandings(leagueId);
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Fixture deleted successfully",
-    });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
+    if (!mongoose.Types.ObjectId.isValid(matchId)) throw domainError("Invalid fixture ID.");
+    const preview = await Fixture.findById(matchId).select("league");
+    if (!preview || (req.params.leagueId && entityId(preview.league) !== req.params.leagueId)) throw domainError("Fixture not found in the selected league.", 404);
+    session = await mongoose.startSession(); session.startTransaction();
+    await League.updateOne({ _id: preview.league }, { $inc: { schedulingRevision: 1 } }, { session });
+    const match = await Fixture.findById(matchId).session(session);
+    if (!match) throw domainError("Fixture not found.", 404);
+    if (hasRecordedMatchActivity(match) || await MatchEvent.exists({ match: matchId }).session(session)) throw domainError("Matches with recorded activity must be preserved. Correct their result instead.", 409);
+    await Fixture.deleteOne({ _id: matchId }, { session });
+    await session.commitTransaction();
+    return res.json({ success: true, message: "Unplayed fixture deleted." });
+  } catch (error) {
+    if (session?.inTransaction()) await session.abortTransaction();
+    return res.status(error.statusCode || ([112, 251].includes(error.code) ? 409 : 500)).json({ success: false, message: error.message });
+  } finally { if (session) await session.endSession(); }
 };
 
 exports.deleteRoundFixtures = async (req, res) => {
+  let session;
   try {
     const leagueId = req.params.leagueId || req.body.leagueId || req.query.leagueId;
-    const round = req.params.round || req.body.round || req.query.round;
-
-    if (!leagueId || !mongoose.Types.ObjectId.isValid(leagueId)) {
-      return res.status(400).json({ success: false, message: "Valid League ID is required" });
-    }
-
-    const roundNum = Number(round);
-    if (!round || isNaN(roundNum) || roundNum < 1) {
-      return res.status(400).json({ success: false, message: "A valid positive round number is required" });
-    }
-
-    const league = await League.findById(leagueId);
-    if (!league) {
-      return res.status(404).json({ success: false, message: "League not found" });
-    }
-
-    const fixtures = await Fixture.find({ league: leagueId, round: roundNum });
-    if (!fixtures || fixtures.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: `No fixtures found for round ${roundNum} in this league`,
-      });
-    }
-
-    const fixtureIds = fixtures.map((f) => f._id);
-    const wasAnyCompleted = fixtures.some((f) => f.status === "COMPLETED");
-
-    await Promise.all([
-      Fixture.deleteMany({ _id: { $in: fixtureIds } }),
-      MatchEvent.deleteMany({ match: { $in: fixtureIds } }),
-    ]);
-
-    if (wasAnyCompleted) {
-      await recalculateLeagueStandings(leagueId);
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: `Round ${roundNum} fixtures deleted successfully (${fixtures.length} fixture${fixtures.length > 1 ? "s" : ""} removed)`,
-      data: {
-        leagueId,
-        round: roundNum,
-        deletedCount: fixtures.length,
-      },
-    });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
+    const round = Number(req.params.round || req.body.round || req.query.round);
+    if (!mongoose.Types.ObjectId.isValid(leagueId) || !Number.isInteger(round) || round < 1) throw domainError("Valid league ID and positive integer round are required.");
+    session = await mongoose.startSession(); session.startTransaction();
+    if (!(await League.updateOne({ _id: leagueId }, { $inc: { schedulingRevision: 1 } }, { session })).matchedCount) throw domainError("League not found.", 404);
+    const fixtures = await Fixture.find({ league: leagueId, round }).session(session);
+    if (!fixtures.length) throw domainError("No fixtures found in this round.", 404);
+    const fixtureIds = fixtures.map((fixture) => fixture._id);
+    if (fixtures.some(hasRecordedMatchActivity) || await MatchEvent.exists({ match: { $in: fixtureIds } }).session(session)) throw domainError("This round contains recorded activity. Historical matches must be preserved.", 409);
+    await Fixture.deleteMany({ _id: { $in: fixtureIds } }, { session });
+    await session.commitTransaction();
+    return res.json({ success: true, message: "Unplayed round fixtures deleted.", data: { leagueId, round, deletedCount: fixtureIds.length } });
+  } catch (error) {
+    if (session?.inTransaction()) await session.abortTransaction();
+    return res.status(error.statusCode || ([112, 251].includes(error.code) ? 409 : 500)).json({ success: false, message: error.message });
+  } finally { if (session) await session.endSession(); }
 };
 
 exports.updateTeamStatistics = async (req, res) => {
@@ -5614,33 +4411,7 @@ exports.updateTeamStatistics = async (req, res) => {
       return res.status(404).json({ success: false, message: "Team not found" });
     }
 
-    if (!team.statistics) {
-      team.statistics = {
-        played: 0,
-        won: 0,
-        drawn: 0,
-        lost: 0,
-        goalsFor: 0,
-        goalsAgainst: 0,
-        goalDifference: 0,
-        points: 0,
-      };
-    }
-
-    if (played !== undefined) team.statistics.played = Number(played);
-    if (won !== undefined) team.statistics.won = Number(won);
-    if (drawn !== undefined) team.statistics.drawn = Number(drawn);
-    if (lost !== undefined) team.statistics.lost = Number(lost);
-    if (goalsFor !== undefined) team.statistics.goalsFor = Number(goalsFor);
-    if (goalsAgainst !== undefined) team.statistics.goalsAgainst = Number(goalsAgainst);
-
-    if (goalDifference !== undefined) {
-      team.statistics.goalDifference = Number(goalDifference);
-    } else if (goalsFor !== undefined || goalsAgainst !== undefined) {
-      team.statistics.goalDifference = team.statistics.goalsFor - team.statistics.goalsAgainst;
-    }
-
-    if (points !== undefined) team.statistics.points = Number(points);
+    team.statistics = mergedTeamStatistics(team.statistics, req.body);
 
     await team.save();
 
@@ -5654,12 +4425,13 @@ exports.updateTeamStatistics = async (req, res) => {
       },
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({ success: false, message: err.message });
   }
 };
 
 exports.updateTeamPlayerStatistics = async (req, res) => {
   try {
+    for (const key of PLAYER_STAT_KEYS) if (req.body[key] !== undefined && (!Number.isInteger(Number(req.body[key])) || Number(req.body[key]) < 0)) throw domainError(`${key} must be a non-negative integer.`);
     const { teamId, playerId } = req.params;
     const {
       appearances,
@@ -5720,7 +4492,7 @@ exports.updateTeamPlayerStatistics = async (req, res) => {
       },
     });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(error.statusCode || (error.code === 11000 || error.name === "VersionError" ? 409 : error.name === "ValidationError" || error.name === "CastError" ? 400 : 500)).json({ success: false, message: error.message });
   }
 };
 
@@ -5766,87 +4538,49 @@ exports.getTeamPlayerStatistics = async (req, res) => {
       },
     });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(error.statusCode || (error.code === 11000 || error.name === "VersionError" ? 409 : error.name === "ValidationError" || error.name === "CastError" ? 400 : 500)).json({ success: false, message: error.message });
   }
 };
 
+function mergedTeamStatistics(previous, input, league = {}) {
+  const stats = {};
+  for (const key of ["played", "won", "drawn", "lost", "goalsFor", "goalsAgainst"]) {
+    stats[key] = Number(input[key] ?? previous?.[key] ?? 0);
+    if (!Number.isInteger(stats[key]) || stats[key] < 0) throw domainError(`${key} must be a non-negative integer.`);
+  }
+  if (input.played === undefined && ["won", "drawn", "lost"].some((key) => input[key] !== undefined)) stats.played = stats.won + stats.drawn + stats.lost;
+  if (stats.played !== stats.won + stats.drawn + stats.lost) throw domainError("Played must equal wins plus draws plus losses.");
+  stats.goalDifference = stats.goalsFor - stats.goalsAgainst;
+  if (input.goalDifference !== undefined && Number(input.goalDifference) !== stats.goalDifference) throw domainError("Goal difference must equal goals for minus goals against.");
+  stats.points = Number(input.points ?? stats.won * Number(league.pointsForWin ?? 3) + stats.drawn * Number(league.pointsForDraw ?? 1));
+  if (!Number.isFinite(stats.points) || stats.points < 0) throw domainError("Points must be non-negative.");
+  return stats;
+}
+
 exports.updateLeagueTeamStatistics = async (req, res) => {
+  let session;
   try {
     const { leagueId, teamId } = req.params;
-    const {
-      played,
-      won,
-      drawn,
-      lost,
-      goalsFor,
-      goalsAgainst,
-      goalDifference,
-      points,
-    } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(leagueId) || !mongoose.Types.ObjectId.isValid(teamId)) {
-      return res.status(400).json({ success: false, message: "Invalid ID format" });
-    }
-
-    const [league, team] = await Promise.all([
-      League.findById(leagueId),
-      Team.findById(teamId),
-    ]);
-
-    if (!league) {
-      return res.status(404).json({ success: false, message: "League not found" });
-    }
-    if (!team) {
-      return res.status(404).json({ success: false, message: "Team not found" });
-    }
-
-    await League.findByIdAndUpdate(leagueId, {
-      $addToSet: { teams: teamId },
-    });
-
-    const updateFields = {};
-    if (played !== undefined) updateFields.played = Number(played);
-    if (won !== undefined) updateFields.won = Number(won);
-    if (drawn !== undefined) updateFields.drawn = Number(drawn);
-    if (lost !== undefined) updateFields.lost = Number(lost);
-    if (goalsFor !== undefined) updateFields.goalsFor = Number(goalsFor);
-    if (goalsAgainst !== undefined) updateFields.goalsAgainst = Number(goalsAgainst);
-
-    const gf = updateFields.goalsFor !== undefined ? updateFields.goalsFor : 0;
-    const ga = updateFields.goalsAgainst !== undefined ? updateFields.goalsAgainst : 0;
-    updateFields.goalDifference = goalDifference !== undefined ? Number(goalDifference) : gf - ga;
-
-    if (points !== undefined) {
-      updateFields.points = Number(points);
-    } else if (won !== undefined || drawn !== undefined) {
-      const winPts = league.pointsForWin !== undefined ? Number(league.pointsForWin) : 3;
-      const drawPts = league.pointsForDraw !== undefined ? Number(league.pointsForDraw) : 1;
-      updateFields.points = (Number(won || 0) * winPts) + (Number(drawn || 0) * drawPts);
-    }
-
-    const standing = await Standing.findOneAndUpdate(
-      { league: leagueId, team: teamId },
-      { $set: updateFields },
-      { upsert: true, new: true }
-    );
-
-    if (!team.statistics) team.statistics = {};
-    Object.assign(team.statistics, updateFields);
-    await team.save();
-
-    return res.status(200).json({
-      success: true,
-      message: "League team statistics updated successfully",
-      data: {
-        leagueId,
-        teamId,
-        teamName: team.teamName,
-        standing,
-      },
-    });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
+    if (![leagueId, teamId].every(mongoose.Types.ObjectId.isValid)) throw domainError("Invalid league or team ID.");
+    session = await mongoose.startSession(); session.startTransaction();
+    await League.updateOne({ _id: leagueId }, { $inc: { schedulingRevision: 1 } }, { session });
+    const league = await League.findById(leagueId).session(session);
+    const team = await Team.findById(teamId).session(session);
+    if (!league || league.archivedAt || !team) throw domainError("League or team not found.", 404);
+    assertTeamLeagueScope(league, [team]);
+    const standing = await Standing.findOne({ league: leagueId, team: teamId }).session(session);
+    const stats = mergedTeamStatistics(standing, req.body, league);
+    const enrollment = team.leagues.find((row) => entityId(row.league) === leagueId);
+    if (!enrollment) throw domainError("Team enrollment not found.", 404);
+    enrollment.statistics = stats;
+    await team.save({ session });
+    await Standing.updateOne({ league: leagueId, team: teamId }, { $set: stats }, { upsert: true, session });
+    await session.commitTransaction();
+    return res.json({ success: true, message: "League team statistics updated.", data: { leagueId, teamId, teamName: team.teamName, standing: stats } });
+  } catch (error) {
+    if (session?.inTransaction()) await session.abortTransaction();
+    return res.status(error.statusCode || ([112, 251].includes(error.code) ? 409 : 500)).json({ success: false, message: error.message });
+  } finally { if (session) await session.endSession(); }
 };
 
 exports.deleteLeague = async (req, res) => {
@@ -5868,55 +4602,34 @@ exports.deleteLeague = async (req, res) => {
       });
     }
 
-    // 1. Find all fixture IDs for this league to delete their associated match events
-    const fixtures = await Fixture.find({ league: leagueId }).select("_id");
-    const fixtureIds = fixtures.map((f) => f._id);
-
-    if (fixtureIds.length > 0) {
-      await MatchEvent.deleteMany({ match: { $in: fixtureIds } });
-    }
-
-    // 2. Delete all fixtures belonging to this league
-    const fixtureDeleteResult = await Fixture.deleteMany({ league: leagueId });
-
-    // 3. Delete standings and player statistics associated with this league
-    await Standing.deleteMany({ league: leagueId });
-    await PlayerStatistics.deleteMany({ league: leagueId });
-
-    // 4. Remove league logo file if stored locally
-    if (league.logo) {
-      const logoPath = path.join(__dirname, "..", league.logo);
-      fs.unlink(logoPath, (err) => {
-        if (err && err.code !== "ENOENT") {
-          console.error("Failed to delete league logo on league deletion:", err);
-        }
-      });
-    }
-
-    // 5. Clean up league enrollment from all associated teams
-    await Team.updateMany(
-      { "leagues.league": leagueId },
-      { $pull: { leagues: { league: leagueId } } }
-    );
-
-    // 6. Delete the league document
-    await League.findByIdAndDelete(leagueId);
-
-    return res.status(200).json({
-      success: true,
-      message: "League and its associated fixtures deleted successfully",
-      data: {
-        deletedLeagueId: leagueId,
-        fixturesDeleted: fixtureDeleteResult.deletedCount || 0,
-      },
-    });
+    league.archivedAt = league.archivedAt || new Date();
+    await league.save();
+    return res.status(200).json({ success: true, message: "League archived. Fixtures, results, enrollment and payment history are preserved.", data: { archivedLeagueId: leagueId } });
   } catch (err) {
-    return res.status(500).json({
+    return res.status(err.statusCode || (err.code === 11000 || err.name === "VersionError" ? 409 : err.name === "ValidationError" || err.name === "CastError" ? 400 : 500)).json({
       success: false,
-      message: err.message,
+      message: err.code === 11000 ? "This team name already exists in the selected term, or a team is already scheduled in this round." : err.name === "VersionError" ? "This match changed while you were editing. Refresh and try again." : err.message,
     });
   }
 };
 
 
 
+
+async function safeRemoveLogo(relativePath, folder, Model) {
+  const storedPath = String(relativePath).replace(/^[/\\]+/, "").replace(/\\/g, "/");
+  if (!storedPath.startsWith(`uploads/${folder}/`)) return;
+  const filename = storedPath.slice(`uploads/${folder}/`.length);
+  if (!filename || filename !== path.basename(filename)) return;
+  const base = path.resolve(UPLOAD_ROOT, folder);
+  const target = path.resolve(base, filename);
+  if (!target.startsWith(base + path.sep)) return;
+  try {
+    // Cloning may share an immutable asset. Retain it while any current or
+    // archived record still references that asset.
+    if (await Model.exists({ logo: { $in: [storedPath, `/${storedPath}`, String(relativePath)] } })) return;
+    await fs.promises.unlink(target);
+  } catch (error) { if (error.code !== "ENOENT") console.error("Unable to remove unused logo:", error.code || error.name); }
+}
+async function safeRemoveTeamLogo(relativePath) { return safeRemoveLogo(relativePath, "teamlogos", Team); }
+async function safeRemoveLeagueLogo(relativePath) { return safeRemoveLogo(relativePath, "leaguelogos", League); }

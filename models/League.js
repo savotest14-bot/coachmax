@@ -1,7 +1,11 @@
+const { dateOnly } = require("../utils/dateTime");
 const mongoose = require("mongoose");
 
 const leagueSchema = new mongoose.Schema(
   {
+    schedulingRevision: { type: Number, default: 0 },
+    archivedAt: { type: Date, default: null },
+    venue: { type: String, default: "" },
     name: {
       type: String,
       required: true,
@@ -146,4 +150,12 @@ const leagueSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+leagueSchema.set("toJSON", { transform: (_doc, result) => {
+  if (result.startDate) result.startDate = dateOnly(result.startDate);
+  if (result.endDate) result.endDate = dateOnly(result.endDate);
+  if (result.registrationStartDate) result.registrationStartDate = dateOnly(result.registrationStartDate);
+  if (result.registrationEndDate) result.registrationEndDate = dateOnly(result.registrationEndDate);
+  if (result.sessionDates) result.sessionDates = result.sessionDates.map((date) => dateOnly(date));
+  return result;
+} });
 module.exports = mongoose.model("League", leagueSchema);

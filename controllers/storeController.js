@@ -5,7 +5,8 @@ const Order = require("../models/Order");
 const Invoice = require("../models/Invoice");
 const Parent = require("../models/Parent");
 const mongoose = require("mongoose");
-const { sendNotification } = require("../services/notificationService");
+const { checkout: checkoutOrder } = require("../services/checkoutService");
+const { currencyAmount } = require("../utils/money");
 let broadcastSidebarBadges = null;
 try {
   ({ broadcastSidebarBadges } = require("../sockets/chatSocket"));
@@ -21,7 +22,7 @@ exports.createCategory = async (req, res) => {
     const category = await ProductCategory.create({ name, description });
     res.status(201).json({ success: true, message: "Product category created", data: category });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(err.statusCode || err.status || (err.name === "CastError" || err.name === "ValidationError" || err instanceof SyntaxError ? 400 : err.name === "VersionError" || err.code === 11000 ? 409 : 500)).json({ success: false, message: err.message });
   }
 };
 
@@ -47,7 +48,7 @@ exports.getAllCategories = async (req, res) => {
       data: categories,
     });
   } catch (err) {
-    res.status(500).json({
+    res.status(err.statusCode || err.status || (err.name === "CastError" || err.name === "ValidationError" || err instanceof SyntaxError ? 400 : err.name === "VersionError" || err.code === 11000 ? 409 : 500)).json({
       success: false,
       message: err.message,
     });
@@ -79,7 +80,7 @@ exports.updateCategory = async (req, res) => {
       data: category,
     });
   } catch (err) {
-    res.status(500).json({
+    res.status(err.statusCode || err.status || (err.name === "CastError" || err.name === "ValidationError" || err instanceof SyntaxError ? 400 : err.name === "VersionError" || err.code === 11000 ? 409 : 500)).json({
       success: false,
       message: err.message,
     });
@@ -117,7 +118,7 @@ exports.deleteCategory = async (req, res) => {
       message: "Category deleted successfully",
     });
   } catch (err) {
-    res.status(500).json({
+    res.status(err.statusCode || err.status || (err.name === "CastError" || err.name === "ValidationError" || err instanceof SyntaxError ? 400 : err.name === "VersionError" || err.code === 11000 ? 409 : 500)).json({
       success: false,
       message: err.message,
     });
@@ -138,13 +139,14 @@ exports.createProduct = async (req, res) => {
       availabilityStatus,
     } = req.body;
 
-    if (!name || !category || !price) {
+    if (!name || !category || price === undefined || price === "") {
       return res.status(400).json({
         success: false,
         message: "Product name, category and price are required.",
       });
     }
 
+    if (!Number.isSafeInteger(Number(stock || 0)) || Number(stock || 0) < 0) return res.status(400).json({ success: false, message: "Stock must be a non-negative integer" });
     let images = [];
 
     if (req.files && req.files.length > 0) {
@@ -158,7 +160,7 @@ exports.createProduct = async (req, res) => {
       shortHighlight,
       description,
       category,
-      price: Number(price),
+      price: currencyAmount(price),
       stock: Number(stock || 0),
       availabilityStatus:
         availabilityStatus || "IN_STOCK",
@@ -181,7 +183,7 @@ exports.createProduct = async (req, res) => {
       data: product,
     });
   } catch (error) {
-    return res.status(500).json({
+    return res.status(error.statusCode || error.status || (error.name === "CastError" || error.name === "ValidationError" || error instanceof SyntaxError ? 400 : error.name === "VersionError" || error.code === 11000 ? 409 : 500)).json({
       success: false,
       message: error.message,
     });
@@ -222,8 +224,8 @@ exports.getProducts = async (req, res) => {
       ];
     }
 
-    const currentPage = Number(page);
-    const pageLimit = Number(limit);
+    const currentPage = Math.max(1, parseInt(page, 10) || 1);
+    const pageLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 10));
     const skip = (currentPage - 1) * pageLimit;
 
     const [products, total] = await Promise.all([
@@ -250,7 +252,7 @@ exports.getProducts = async (req, res) => {
       },
     });
   } catch (err) {
-    return res.status(500).json({
+    return res.status(err.statusCode || err.status || (err.name === "CastError" || err.name === "ValidationError" || err instanceof SyntaxError ? 400 : err.name === "VersionError" || err.code === 11000 ? 409 : 500)).json({
       success: false,
       message: err.message,
     });
@@ -292,7 +294,7 @@ exports.getAdminProducts = async (req, res) => {
     }
 
     const currentPage = Math.max(1, parseInt(page, 10) || 1);
-    const pageLimit = Math.max(1, parseInt(limit, 10) || 10);
+    const pageLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 10));
     const skip = (currentPage - 1) * pageLimit;
 
     const [products, total] = await Promise.all([
@@ -318,7 +320,7 @@ exports.getAdminProducts = async (req, res) => {
       },
     });
   } catch (err) {
-    return res.status(500).json({
+    return res.status(err.statusCode || err.status || (err.name === "CastError" || err.name === "ValidationError" || err instanceof SyntaxError ? 400 : err.name === "VersionError" || err.code === 11000 ? 409 : 500)).json({
       success: false,
       message: err.message,
     });
@@ -342,7 +344,7 @@ exports.getProductById = async (req, res) => {
       data: product,
     });
   } catch (error) {
-    return res.status(500).json({
+    return res.status(error.statusCode || error.status || (error.name === "CastError" || error.name === "ValidationError" || error instanceof SyntaxError ? 400 : error.name === "VersionError" || error.code === 11000 ? 409 : 500)).json({
       success: false,
       message: error.message,
     });
@@ -378,8 +380,11 @@ exports.updateProduct = async (req, res) => {
     if (shortHighlight !== undefined) product.shortHighlight = shortHighlight;
     if (description !== undefined) product.description = description;
     if (category !== undefined) product.category = category;
-    if (price !== undefined) product.price = Number(price);
-    if (stock !== undefined) product.stock = Number(stock);
+    if (price !== undefined) product.price = currencyAmount(price);
+    if (stock !== undefined) {
+      if (!Number.isSafeInteger(Number(stock)) || Number(stock) < 0) return res.status(400).json({ success: false, message: "Stock must be a non-negative integer" });
+      product.stock = Number(stock);
+    }
     if (availabilityStatus !== undefined) product.availabilityStatus = availabilityStatus;
     if (status !== undefined) product.status = status;
 
@@ -429,7 +434,7 @@ exports.updateProduct = async (req, res) => {
       data: populatedProduct,
     });
   } catch (error) {
-    return res.status(500).json({
+    return res.status(error.statusCode || error.status || (error.name === "CastError" || error.name === "ValidationError" || error instanceof SyntaxError ? 400 : error.name === "VersionError" || error.code === 11000 ? 409 : 500)).json({
       success: false,
       message: error.message,
     });
@@ -457,7 +462,7 @@ exports.deleteProduct = async (req, res) => {
       data: product,
     });
   } catch (error) {
-    return res.status(500).json({
+    return res.status(error.statusCode || error.status || (error.name === "CastError" || error.name === "ValidationError" || error instanceof SyntaxError ? 400 : error.name === "VersionError" || error.code === 11000 ? 409 : 500)).json({
       success: false,
       message: error.message,
     });
@@ -476,10 +481,10 @@ exports.addToCart = async (req, res) => {
       });
     }
 
-    if (quantity < 0) {
+    if (!Number.isSafeInteger(quantity) || quantity < 0 || quantity > 1000) {
       return res.status(400).json({
         success: false,
-        message: "Quantity cannot be negative",
+        message: "Quantity must be an integer between 0 and 1000",
       });
     }
 
@@ -547,7 +552,7 @@ exports.addToCart = async (req, res) => {
       data: cart,
     });
   } catch (err) {
-    return res.status(500).json({
+    return res.status(err.statusCode || err.status || (err.name === "CastError" || err.name === "ValidationError" || err instanceof SyntaxError ? 400 : err.name === "VersionError" || err.code === 11000 ? 409 : 500)).json({
       success: false,
       message: err.message,
     });
@@ -579,6 +584,8 @@ exports.updateCartQuantity = async (req, res) => {
     }
 
     const product = await Product.findById(item.product);
+    if (!product || product.status !== "ACTIVE") return res.status(409).json({ success: false, message: "Product is no longer available" });
+    if (!["increment", "decrement"].includes(action)) return res.status(400).json({ success: false, message: "Action must be increment or decrement" });
 
     if (action === "increment") {
       if (item.quantity >= product.stock) {
@@ -610,7 +617,7 @@ exports.updateCartQuantity = async (req, res) => {
       data: cart,
     });
   } catch (err) {
-    res.status(500).json({
+    res.status(err.statusCode || err.status || (err.name === "CastError" || err.name === "ValidationError" || err instanceof SyntaxError ? 400 : err.name === "VersionError" || err.code === 11000 ? 409 : 500)).json({
       success: false,
       message: err.message,
     });
@@ -643,7 +650,7 @@ exports.removeCartItem = async (req, res) => {
       data: cart,
     });
   } catch (err) {
-    res.status(500).json({
+    res.status(err.statusCode || err.status || (err.name === "CastError" || err.name === "ValidationError" || err instanceof SyntaxError ? 400 : err.name === "VersionError" || err.code === 11000 ? 409 : 500)).json({
       success: false,
       message: err.message,
     });
@@ -655,18 +662,13 @@ exports.getCart = async (req, res) => {
     const parentId = req.parent._id;
 
     const page = Math.max(parseInt(req.query.page) || 1, 1);
-    const limit = Math.max(parseInt(req.query.limit) || 10, 1);
+    const limit = Math.min(100, Math.max(parseInt(req.query.limit) || 10, 1));
     const skip = (page - 1) * limit;
 
     let cart = await Cart.findOne({ parent: parentId })
       .populate("items.product", "name price images stock status");
 
-    if (!cart) {
-      cart = await Cart.create({
-        parent: parentId,
-        items: [],
-      });
-    }
+    if (!cart) cart = { _id: null, parent: parentId, items: [] };
 
     const totalItems = cart.items.length;
 
@@ -691,7 +693,7 @@ exports.getCart = async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({
+    res.status(err.statusCode || err.status || (err.name === "CastError" || err.name === "ValidationError" || err instanceof SyntaxError ? 400 : err.name === "VersionError" || err.code === 11000 ? 409 : 500)).json({
       success: false,
       message: err.message,
     });
@@ -699,136 +701,12 @@ exports.getCart = async (req, res) => {
 };
 
 exports.checkout = async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
   try {
-    const parentId = req.parent._id;
-    const { shippingAddress } = req.body;
-
-    if (!shippingAddress) {
-      return res.status(400).json({ success: false, message: "shippingAddress is required" });
-    }
-
-    const cart = await Cart.findOne({ parent: parentId }).populate("items.product");
-    if (!cart || cart.items.length === 0) {
-      return res.status(400).json({ success: false, message: "Your shopping cart is empty" });
-    }
-
-    let totalAmount = 0;
-    const orderItems = [];
-
-    for (const item of cart.items) {
-      const dbProduct = item.product;
-
-      if (!dbProduct || dbProduct.status !== "ACTIVE") {
-        return res.status(400).json({ success: false, message: `Product ${dbProduct?.name || ""} is inactive` });
-      }
-
-      if (dbProduct.stock < item.quantity) {
-        return res.status(400).json({ success: false, message: `Insufficient stock for product: ${dbProduct.name}` });
-      }
-
-      dbProduct.stock -= item.quantity;
-      await dbProduct.save({ session });
-
-      totalAmount += dbProduct.price * item.quantity;
-      orderItems.push({
-        product: dbProduct._id,
-        quantity: item.quantity,
-        price: dbProduct.price,
-        selectedSize: item.selectedSize,
-        selectedColor: item.selectedColor,
-      });
-    }
-
-    const year = new Date().getFullYear();
-    const invoiceNumber = `INV-${year}-${Date.now().toString().slice(-6)}`;
-    const dueDate = new Date();
-    dueDate.setDate(dueDate.getDate() + 7); // Due in 7 days
-
-    const invoiceItems = cart.items.map((i) => ({
-      title: i.product?.name || "Store Item",
-      description: `Size: ${i.selectedSize || "N/A"}, Color: ${i.selectedColor || "N/A"}, Qty: ${i.quantity}`,
-      amount: (i.product?.price || 0) * i.quantity,
-    }));
-
-    const invoice = await Invoice.create(
-      [
-        {
-          invoiceNumber,
-          parent: parentId,
-          items: invoiceItems,
-          subtotal: totalAmount,
-          totalAmount,
-          amount: totalAmount,
-          dueDate,
-          type: "STORE_ORDER",
-          description: `Order checkout for ${cart.items.length} item(s)`,
-          paymentStatus: "UNPAID",
-          status: "ACTIVE",
-        },
-      ],
-      { session }
-    );
-
-    const order = await Order.create(
-      [
-        {
-          parent: parentId,
-          items: orderItems,
-          totalAmount,
-          paymentStatus: "PENDING",
-          shippingAddress,
-          status: "PENDING",
-          invoice: invoice[0]._id,
-        },
-      ],
-      { session }
-    );
-
-    cart.items = [];
-    await cart.save({ session });
-
-    await session.commitTransaction();
-    session.endSession();
-
-    try {
-      const parentDoc = await Parent.findById(parentId).select("fullName");
-      const parentName = parentDoc ? parentDoc.fullName : "Parent";
-
-      await sendNotification({
-        recipientType: "ADMIN",
-        adminId: null,
-        title: "New Store Order Placed 🛒",
-        message: `${parentName} placed a store order of $${totalAmount} (${orderItems.length} item(s)). Invoice #${invoiceNumber}.`,
-        type: "ANNOUNCEMENT",
-        data: {
-          orderId: String(order[0]._id),
-          invoiceId: String(invoice[0]._id),
-          parentId: String(parentId),
-        },
-      });
-    } catch (notifErr) {
-      console.error("Admin checkout notification error:", notifErr.message);
-    }
-
-    if (broadcastSidebarBadges) {
-      broadcastSidebarBadges().catch(() => {});
-    }
-
-    res.status(201).json({
-      success: true,
-      message: "Order placed successfully. Invoice generated.",
-      data: {
-        order: order[0],
-        invoice: invoice[0],
-      },
-    });
-  } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-    res.status(500).json({ success: false, message: err.message });
+    const result = await checkoutOrder({ parentId: req.parent?._id, shippingAddress: req.body.shippingAddress, idempotencyKey: req.get("Idempotency-Key") || req.body.idempotencyKey });
+    if (broadcastSidebarBadges) broadcastSidebarBadges().catch(() => {});
+    return res.status(result.repeated ? 200 : 201).json({ success: true, message: result.repeated ? "This order was already placed" : "Order placed successfully. Invoice generated.", repeated: result.repeated, data: { order: result.order, invoice: result.invoice } });
+  } catch (error) {
+    return res.status(error.statusCode || error.status || (error.name === "ValidationError" || error.name === "CastError" ? 400 : error.code === 11000 || error.name === "VersionError" ? 409 : 500)).json({ success: false, message: error.message });
   }
 };
 
@@ -887,7 +765,7 @@ exports.getAllOrders = async (req, res) => {
     }
 
     const currentPage = Math.max(1, parseInt(page, 10) || 1);
-    const pageLimit = Math.max(1, parseInt(limit, 10) || 10);
+    const pageLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 10));
     const skip = (currentPage - 1) * pageLimit;
 
     const [orders, total] = await Promise.all([
@@ -919,7 +797,7 @@ exports.getAllOrders = async (req, res) => {
       data: orders,
     });
   } catch (err) {
-    return res.status(500).json({
+    return res.status(err.statusCode || err.status || (err.name === "CastError" || err.name === "ValidationError" || err instanceof SyntaxError ? 400 : err.name === "VersionError" || err.code === 11000 ? 409 : 500)).json({
       success: false,
       message: err.message,
     });
@@ -951,7 +829,7 @@ exports.getOrderById = async (req, res) => {
       data: order,
     });
   } catch (err) {
-    return res.status(500).json({
+    return res.status(err.statusCode || err.status || (err.name === "CastError" || err.name === "ValidationError" || err instanceof SyntaxError ? 400 : err.name === "VersionError" || err.code === 11000 ? 409 : 500)).json({
       success: false,
       message: err.message,
     });
@@ -990,7 +868,7 @@ exports.updateOrderStatus = async (req, res) => {
       data: updatedOrder,
     });
   } catch (err) {
-    return res.status(500).json({
+    return res.status(err.statusCode || err.status || (err.name === "CastError" || err.name === "ValidationError" || err instanceof SyntaxError ? 400 : err.name === "VersionError" || err.code === 11000 ? 409 : 500)).json({
       success: false,
       message: err.message,
     });
@@ -1003,7 +881,7 @@ exports.getMyOrders = async (req, res) => {
     const { page = 1, limit = 10 } = req.query;
 
     const currentPage = Math.max(1, parseInt(page, 10) || 1);
-    const pageLimit = Math.max(1, parseInt(limit, 10) || 10);
+    const pageLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 10));
     const skip = (currentPage - 1) * pageLimit;
 
     const query = { parent: parentId };
@@ -1034,7 +912,7 @@ exports.getMyOrders = async (req, res) => {
       data: orders,
     });
   } catch (err) {
-    return res.status(500).json({
+    return res.status(err.statusCode || err.status || (err.name === "CastError" || err.name === "ValidationError" || err instanceof SyntaxError ? 400 : err.name === "VersionError" || err.code === 11000 ? 409 : 500)).json({
       success: false,
       message: err.message,
     });

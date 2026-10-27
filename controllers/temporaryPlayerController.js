@@ -1,27 +1,32 @@
 const User = require("../models/User");
+const Term = require("../models/Term");
+const MedicalProfile = require("../models/MedicalProfile");
+const { normalizeMedicalStatus } = require("../utils/medicalStatus");
 const Parent = require("../models/Parent");
 const AuditLog = require("../models/AuditLog");
-const Admin = require("../models/Admin");
 const Class = require("../models/Class");
 const RegistrationRequest = require("../models/RegistrationRequest");
-const Attendance = require("../models/Attendance");
-const AttendanceHistory = require("../models/AttendanceHistory");
-const CoachNote = require("../models/CoachNote");
-const ChatRoom = require("../models/ChatRoom");
-const Message = require("../models/Message");
-const Notification = require("../models/Notification");
-const sendEmail = require("../utils/sendEmail");
-const { welcomeEmail } = require("../utils/emailTemplates");
-const { sendNotification } = require("../services/notificationService");
-const { generateClassInvoice } = require("../services/invoiceService");
+const { temporaryPlayerAccessEmail } = require("../utils/emailTemplates");
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
-const { dateOnlyToUtc, dateOnly } = require("../utils/dateTime");
+const { dateOnlyToUtc, dateOnly, todayDateOnly, serializeDateOnly, serializeTerm } = require("../utils/dateTime");
 let broadcastSidebarBadges = null;
 try {
   ({ broadcastSidebarBadges } = require("../sockets/chatSocket"));
 } catch (e) {}
+
+// Only operator-configured app domains may receive account links.
+const getAppLoginUrl = () => {
+  const candidate = process.env.PARENT_APP_URL || process.env.FRONTEND_URL || process.env.CLIENT_URL || process.env.APP_URL;
+  if (!candidate) return null;
+  try {
+    const parsed = new URL(candidate);
+    if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) return null;
+    if (process.env.NODE_ENV === "production" && parsed.protocol !== "https:") return null;
+    return new URL("/signin", parsed.origin).toString();
+  } catch { return null; }
+};
 
 exports.createTemporaryPlayer = async (req, res) => {
   const session = await mongoose.startSession();
@@ -37,28 +42,34 @@ exports.createTemporaryPlayer = async (req, res) => {
       parentPhone,
       emergencyContact,
       medicalConditions,
+      medicalConditionDetails,
+      isMedicalCondition,
       allergies,
       classId,
       sessionDate,
-      category,
-      categories,
-      programs,
       preferredTerm,
       preferredClasses,
       prefferedFoot,
       gender,
     } = req.body;
 
-    if (!name || !dob || !parentName || !parentPhone || !emergencyContact || !classId || !sessionDate) {
+    if (!name || !dob || !parentName || !parentEmail || !parentPhone || !emergencyContact || !classId || !sessionDate) {
       await session.abortTransaction();
       session.endSession();
       return res.status(400).json({
         success: false,
-        message: "name, dob, parentName, parentPhone, emergencyContact, classId, and sessionDate are required",
+        message: "name, dob, parentName, parentEmail, parentPhone, emergencyContact, classId, and sessionDate are required",
       });
     }
 
-    const classData = await Class.findById(classId).select("coach assistantCoach category program term venue location").session(session);
+    const normalizedParentEmail = String(parentEmail).trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedParentEmail)) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({ success: false, message: "Enter a valid parent email address to send the CoachMax sign-in details." });
+    }
+
+    const classData = await Class.findById(classId).select("coach assistantCoach category program term venue location status dayOfWeek schedule").session(session);
     if (!classData) {
       await session.abortTransaction();
       session.endSession();
@@ -80,23 +91,46 @@ exports.createTemporaryPlayer = async (req, res) => {
       }
     }
 
-    const emailToUse = parentEmail ? parentEmail.toLowerCase() : `temp.${Date.now()}.${Math.floor(Math.random() * 1000)}@tempcoachmax.com`;
-    let parent = await Parent.findOne({
-      $or: [{ phone: parentPhone }, { email: emailToUse }],
-    }).session(session);
+    const medical = normalizeMedicalStatus({ isMedicalCondition, medicalConditionDetails, medicalConditions, allergies });
+    const parsedDob = dateOnlyToUtc(dob, "dob");
+    const parsedSessionDate = dateOnlyToUtc(sessionDate, "sessionDate");
+    const termDoc = await Term.findById(classData.term).session(session);
+    if (classData.status !== "ACTIVE" || !termDoc || termDoc.status === "COMPLETED" || dateOnly(parsedSessionDate) < dateOnly(termDoc.startDate) || dateOnly(parsedSessionDate) > dateOnly(termDoc.endDate)) {
+      throw Object.assign(new Error("Select an active class session within its term dates"), { statusCode: 409 });
+    }
+    if (dateOnly(parsedDob) > todayDateOnly() || dateOnly(parsedDob) > dateOnly(parsedSessionDate)) throw Object.assign(new Error("Date of birth cannot be in the future"), { statusCode: 400 });
+    if (preferredTerm && String(preferredTerm) !== String(classData.term)) throw Object.assign(new Error("Requested term does not match the selected class"), { statusCode: 400 });
+    const desiredClassIds = Array.isArray(preferredClasses) && preferredClasses.length ? preferredClasses : [classId];
+    if (!desiredClassIds.some((value) => String(value) === String(classId))) throw Object.assign(new Error("Trial class must be one of the requested classes"), { statusCode: 400 });
+    const requestedClasses = await Class.find({ _id: { $in: desiredClassIds }, term: classData.term, status: "ACTIVE" }).session(session);
+    if (requestedClasses.length !== new Set(desiredClassIds.map(String)).size) throw Object.assign(new Error("One or more requested classes are unavailable in the selected term"), { statusCode: 400 });
+    const emailToUse = normalizedParentEmail;
+    const phoneDigits = String(parentPhone).replace(/\D/g, "");
+    if (phoneDigits.length < 7 || phoneDigits.length > 15) throw Object.assign(new Error("Enter a valid parent phone number"), { statusCode: 400 });
+    const phoneRegex = new RegExp(`^[\\s()+.-]*${phoneDigits.split("").join("[\\s()+.-]*")}[\\s()+.-]*$`);
+    const parents = await Parent.find({ $or: [{ email: emailToUse }, { phone: phoneRegex }] }).session(session);
+    if (parents.length > 1 || (parents[0] && (String(parents[0].email).trim().toLowerCase() !== emailToUse || String(parents[0].phone).replace(/\D/g, "") !== phoneDigits))) {
+      throw Object.assign(new Error("Parent email and phone identify different household details. Ask an administrator to verify and update the parent account first."), { statusCode: 409 });
+    }
+    let parent = parents[0] || null;
+    if (parent?.isBlocked || parent?.status === "REJECTED") throw Object.assign(new Error("This parent account is unavailable; administrator review is required"), { statusCode: 409 });
 
-    let generatedPassword = null;
+    let isNewAccount = false;
+    const appLoginUrl = getAppLoginUrl();
+    if (!appLoginUrl) throw Object.assign(new Error("Parent app URL is not configured. Set PARENT_APP_URL before creating temporary players."), { statusCode: 503 });
 
     if (!parent) {
-      generatedPassword = crypto.randomBytes(4).toString("hex") + "@1A";
-      const hashedPassword = await bcrypt.hash(generatedPassword, 10);
+      isNewAccount = true;
+      // No reusable credential is emailed or stored in a delivery job. The
+      // parent chooses a password through the existing one-use OTP grant flow.
+      const hashedPassword = await bcrypt.hash(crypto.randomBytes(32).toString("hex"), 12);
 
       const newParentDocs = await Parent.create(
         [
           {
             fullName: parentName,
             email: emailToUse,
-            phone: parentPhone,
+            phone: String(parentPhone).trim(),
             password: hashedPassword,
             emergencyContact,
             relationship: "Parent/Guardian",
@@ -112,35 +146,12 @@ exports.createTemporaryPlayer = async (req, res) => {
     const firstName = nameParts[0];
     const lastName = nameParts.slice(1).join(" ") || "";
 
-    const parsedDob = dateOnlyToUtc(dob, "dob");
-    const parsedSessionDate = dateOnlyToUtc(sessionDate, "sessionDate");
-
-    const catList = Array.isArray(categories)
-      ? categories
-      : category
-        ? Array.isArray(category)
-          ? category
-          : [category]
-        : classData.category
-          ? [classData.category]
-          : [];
-    const primaryCat = catList[0] || classData.category || null;
-
-    const progList = Array.isArray(programs)
-      ? programs
-      : programs
-        ? [programs]
-        : classData.program
-          ? [classData.program]
-          : [];
+    const catList = [...new Set(requestedClasses.map((cls) => String(cls.category)))];
+    const primaryCat = classData.category;
+    const progList = [...new Set(requestedClasses.map((cls) => String(cls.program)))];
 
     const selectedTerm = preferredTerm || classData.term || null;
-    const prefClassList = Array.isArray(preferredClasses)
-      ? preferredClasses
-      : [classId];
-
-    const hasMedical = !!(medicalConditions || allergies);
-    const medicalDetails = [medicalConditions, allergies ? `Allergies: ${allergies}` : ""].filter(Boolean).join(" | ");
+    const prefClassList = desiredClassIds;
 
     const newPlayerDocs = await User.create(
       [
@@ -149,16 +160,16 @@ exports.createTemporaryPlayer = async (req, res) => {
           lastName,
           fullName: name.trim(),
           dob: parsedDob,
-          gender: gender || "OTHER",
+          gender: String(gender || "OTHER").toUpperCase(),
           prefferedFoot: prefferedFoot || undefined,
           parentId: parent._id,
           contactName: parentName,
           relationship: "Parent/Guardian",
-          isMedicalCondition: hasMedical,
-          medicalConditionDetails: medicalDetails,
+          isMedicalCondition: medical.isMedicalCondition,
+          medicalConditionDetails: medical.medicalConditionDetails,
           playerStatus: "PENDING_APPROVAL",
           createdBy: coachId,
-          createdByRole: req.admin.role,
+          createdByRole: req.admin.role === "COACH" ? "COACH" : "SUPER_ADMIN",
           category: primaryCat,
           categories: catList,
           programs: progList,
@@ -174,6 +185,7 @@ exports.createTemporaryPlayer = async (req, res) => {
     );
 
     const player = newPlayerDocs[0];
+    await MedicalProfile.create([{ player: player._id, medicalConditions: medical.medicalConditions, allergies: medical.allergies, emergencyContact }], { session });
 
     await RegistrationRequest.create(
       [
@@ -217,40 +229,31 @@ exports.createTemporaryPlayer = async (req, res) => {
       { session }
     );
 
+    const { queueEmail, queueNotification } = require("../services/deliveryService");
+    await queueEmail(`temporary-access:${player._id}`, {
+      to: parent.email,
+      subject: isNewAccount ? "Set up your CoachMax account" : "A temporary player was added to your CoachMax account",
+      html: temporaryPlayerAccessEmail({ parentName: parent.fullName || parentName, playerName: player.fullName, email: parent.email, isNewAccount,
+        loginUrl: isNewAccount ? new URL("/forgot-password?role=PARENT", appLoginUrl).toString() : appLoginUrl }),
+    }, session);
+    await queueNotification(`temporary-created:${player._id}`, { recipientType: "ADMIN", adminId: null,
+      title: "Temporary Player Added", message: `Coach ${req.admin.name} added temporary player "${player.fullName}" for verification.`, type: "TEMPORARY_PLAYER_ADDED",
+      data: { playerId: String(player._id), parentId: String(parent._id), classId: String(classId), coachId: String(coachId) } }, session);
     await session.commitTransaction();
-    session.endSession();
-    if (generatedPassword && parentEmail) {
-      sendEmail(
-        parentEmail,
-        "Welcome to CoachMax — Account Credentials 🎉",
-        welcomeEmail(parentName) + `<p style="padding:15px; background:#e9ecef; border-radius:5px;"><b>Temporary Password:</b> ${generatedPassword}</p>`
-      ).catch((err) => console.error("Parent temp credential email error:", err.message));
-    }
-
-    const superAdmins = await Admin.find({ role: "SUPER_ADMIN" }).select("_id");
-    for (const sa of superAdmins) {
-      await sendNotification({
-        recipientType: "ADMIN",
-        adminId: sa._id,
-        title: "Temporary Player Added 🆕",
-        message: `Coach ${req.admin.name} added temporary player "${player.fullName}". Status: ${player.playerStatus}`,
-        type: "TEMPORARY_PLAYER_ADDED",
-        data: {
-          playerId: player._id.toString(),
-          parentId: parent._id.toString(),
-          classId: String(classId),
-          coachId: coachId.toString(),
-        },
-      });
-    }
+    await session.endSession();
 
     if (broadcastSidebarBadges) {
       broadcastSidebarBadges().catch(() => {});
     }
 
+    const message = isNewAccount
+      ? "Temporary player created. A password-setup email is queued for the parent."
+      : "Temporary player created. An account update and sign-in email is queued for the parent.";
+
     res.status(201).json({
       success: true,
-      message: `Temporary player created successfully. Status: ${player.playerStatus}`,
+      message,
+      emailQueued: true,
       data: {
         player,
         parent: {
@@ -259,13 +262,14 @@ exports.createTemporaryPlayer = async (req, res) => {
           email: parent.email,
           phone: parent.phone,
         },
-        tempPasswordGenerated: !!generatedPassword,
+        tempPasswordGenerated: false,
+        isNewAccount,
       },
     });
   } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-    res.status(500).json({ success: false, message: err.message });
+    if (session.inTransaction()) await session.abortTransaction();
+    await session.endSession();
+    res.status(err.statusCode || (err instanceof TypeError || err.name === "ValidationError" || err.name === "CastError" ? 400 : err.code === 11000 ? 409 : 500)).json({ success: false, message: err.message });
   }
 };
 
@@ -282,8 +286,8 @@ exports.getTemporaryPlayers = async (req, res) => {
       search,
     } = req.query;
 
-    page = Number(page) || 1;
-    limit = Number(limit) || 20;
+    page = Math.max(1, parseInt(page, 10) || 1);
+    limit = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
 
     // Only unapproved temporary players (playerStatus: "PENDING_APPROVAL")
     const unapprovedUserQuery = {
@@ -307,26 +311,6 @@ exports.getTemporaryPlayers = async (req, res) => {
     );
     const tempUserIds = tempUsers.map((p) => p._id);
 
-    // Ensure unapproved temporary players have a corresponding RegistrationRequest
-    for (const tu of tempUsers) {
-      const existingReq = await RegistrationRequest.findOne({
-        player: tu._id,
-        requestType: { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] },
-      });
-      if (!existingReq && tu.parentId) {
-        await RegistrationRequest.create({
-          parent: tu.parentId,
-          player: tu._id,
-          category: tu.category || null,
-          programs: tu.programs || [],
-          preferredClasses: tu.temporaryClass ? [tu.temporaryClass] : [],
-          requestType: "TEMPORARY_PLAYER",
-          status: "PENDING",
-          createdBy: tu.createdBy || coachId,
-        });
-      }
-    }
-
     const reqQuery = {
       requestType: { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] },
       player: { $in: tempUserIds },
@@ -342,7 +326,7 @@ exports.getTemporaryPlayers = async (req, res) => {
     }
 
     if (search) {
-      const searchRegex = new RegExp(search, "i");
+      const searchRegex = new RegExp(String(search).slice(0, 150).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
       const searchedPlayers = await User.find({
         _id: { $in: tempUserIds },
         $or: [
@@ -382,7 +366,7 @@ exports.getTemporaryPlayers = async (req, res) => {
       )
       .populate("category", "name")
       .populate("programs", "name")
-      .populate("preferredTerm", "name startDate endDate")
+      .populate("preferredTerm", "name year startDate endDate")
       .populate("preferredClasses", "name dayOfWeek startTime endTime venue location")
       .populate("assignedBy", "name email")
       .sort({ createdAt: -1 })
@@ -395,238 +379,44 @@ exports.getTemporaryPlayers = async (req, res) => {
       limit,
       total,
       totalPages: Math.ceil(total / limit),
-      data: requests,
+      data: requests.map((request) => {
+        const raw = request.toObject();
+        if (raw.player) { raw.player.dob = serializeDateOnly(raw.player.dob); raw.player.temporarySessionDate = serializeDateOnly(raw.player.temporarySessionDate); }
+        if (raw.preferredTerm) raw.preferredTerm = serializeTerm(raw.preferredTerm);
+        return raw;
+      }),
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
 
+// Compatibility endpoints use the same request-aware command as the queue.
 exports.approveTemporaryPlayer = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { assignedClasses, category, programs, term } = req.body;
-    const adminId = req.admin._id;
-
-    const player = await User.findById(id);
-
-    if (!player) {
-      return res.status(404).json({ success: false, message: "Player not found" });
-    }
-
-    if (player.playerStatus === "ACTIVE") {
-      return res.status(400).json({
-        success: false,
-        message: "Player is already ACTIVE",
-      });
-    }
-
-    player.playerStatus = "ACTIVE";
-    player.hasPendingRequest = false;
-    player.temporaryClass = null;
-
-    if (assignedClasses && Array.isArray(assignedClasses)) {
-      player.assignedClasses = assignedClasses;
-      await Class.updateMany(
-        { _id: { $in: assignedClasses } },
-        { $addToSet: { players: player._id } }
-      );
-    }
-    if (category) {
-      player.category = category;
-      player.categories = player.categories || [];
-      const catStr = category.toString();
-      if (!player.categories.some((c) => c.toString() === catStr)) {
-        player.categories.push(category);
-      }
-    }
-    if (programs && Array.isArray(programs)) player.programs = programs;
-    if (term) player.term = term;
-
-    await player.save();
-
-    await RegistrationRequest.updateMany(
-      { player: player._id, requestType: { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] } },
-      { status: "COMPLETED", assignedBy: adminId, assignedAt: new Date() }
-    );
-
-    if (assignedClasses && Array.isArray(assignedClasses)) {
-      try {
-        for (const clsId of assignedClasses) {
-          await generateClassInvoice({ userId: player._id, classId: clsId });
-        }
-      } catch (invErr) {
-        console.error("Auto invoice generation error in approveTemporaryPlayer:", invErr.message);
-      }
-    }
-
-    await AuditLog.create({
-      user: adminId,
-      userRole: req.admin.role,
-      action: "TEMP_PLAYER_APPROVED",
-      entityType: "User",
-      entityId: player._id,
-      ipAddress: req.ip || "",
-      deviceInfo: req.headers["user-agent"] || "",
-      oldValue: { playerStatus: "PENDING_APPROVAL" },
-      newValue: { playerStatus: "ACTIVE", assignedClasses, category, programs },
-      description: `Temporary player "${player.fullName}" approved by Admin and set to ACTIVE`,
-    });
-
-    if (player.createdBy) {
-      await sendNotification({
-        recipientType: "ADMIN",
-        adminId: player.createdBy,
-        title: "Temporary Player Approved",
-        message: `Temporary player "${player.fullName}" has been approved by Super Admin and is now ACTIVE.`,
-        type: "TEMPORARY_PLAYER_ADDED",
-        data: { playerId: player._id.toString() },
-      });
-    }
-
-    if (broadcastSidebarBadges) {
-      broadcastSidebarBadges().catch(() => {});
-    }
-
-    res.json({
-      success: true,
-      message: "Player approved successfully and activated.",
-      data: player,
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
+  req.params.playerId = req.params.id;
+  req.body.classIds = req.body.classIds || req.body.assignedClasses;
+  return require("./registrationRequestController").assignClassesToPlayer(req, res);
 };
 
 exports.rejectTemporaryPlayer = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { reason } = req.body;
-    const adminId = req.admin._id;
-
-    const player = await User.findById(id);
-
-    if (!player) {
-      return res.status(404).json({ success: false, message: "Player not found" });
-    }
-
-    player.playerStatus = "REJECTED";
-    await player.save();
-
-    await RegistrationRequest.updateMany(
-      { player: player._id, requestType: { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] } },
-      { status: "COMPLETED", assignedBy: adminId, assignedAt: new Date() }
-    );
-
-    await AuditLog.create({
-      user: adminId,
-      userRole: req.admin.role,
-      action: "TEMP_PLAYER_REJECTED",
-      entityType: "User",
-      entityId: player._id,
-      ipAddress: req.ip || "",
-      deviceInfo: req.headers["user-agent"] || "",
-      oldValue: { playerStatus: player.playerStatus },
-      newValue: { playerStatus: "REJECTED", reason: reason || "" },
-      description: `Temporary player "${player.fullName}" rejected by Admin`,
-    });
-
-    if (player.createdBy) {
-      await sendNotification({
-        recipientType: "ADMIN",
-        adminId: player.createdBy,
-        title: "Temporary Player Rejected ❌",
-        message: `Temporary player "${player.fullName}" was rejected by Super Admin.${reason ? " Reason: " + reason : ""}`,
-        type: "TEMPORARY_PLAYER_ADDED",
-        data: { playerId: player._id.toString() },
-      });
-    }
-
-    if (broadcastSidebarBadges) {
-      broadcastSidebarBadges().catch(() => {});
-    }
-
-    res.json({
-      success: true,
-      message: "Player rejected successfully.",
-      data: player,
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
+    const request = req.body.registrationRequestId
+      ? await RegistrationRequest.findById(req.body.registrationRequestId)
+      : await RegistrationRequest.findOne({ player: req.params.id, status: "PENDING", requestType: { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] } });
+    if (!request || String(request.player) !== String(req.params.id)) return res.status(404).json({ success: false, message: "Pending temporary-player request not found" });
+    req.params.id = String(request._id);
+    return require("./registrationRequestController").rejectRegistrationRequest(req, res);
+  } catch (error) { return res.status(error.name === "CastError" ? 400 : 500).json({ success: false, message: error.message }); }
 };
 
+// Preserve attendance, notes, household and financial history. Older clients
+// calling Delete cancel the pending request instead of cascading a player.
 exports.deleteTemporaryPlayer = async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
   try {
-    const { id } = req.params;
-    const adminId = req.admin._id;
-
-    const player = await User.findById(id).session(session);
-
-    if (!player) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(404).json({ success: false, message: "Player not found" });
-    }
-
-    const parentId = player.parentId;
-
-    await Class.updateMany(
-      { players: player._id },
-      { $pull: { players: player._id } },
-      { session }
-    );
-
-    await Attendance.updateMany(
-      { "records.player": player._id },
-      { $pull: { records: { player: player._id } } },
-      { session }
-    );
-    await AttendanceHistory.deleteMany({ playerId: player._id }, { session });
-
-    await CoachNote.deleteMany({ player: player._id }, { session });
-
-    await User.findByIdAndDelete(player._id, { session });
-
-    if (parentId) {
-      const remainingChildren = await User.countDocuments({ parentId }).session(session);
-      if (remainingChildren === 0) {
-        await Parent.findByIdAndDelete(parentId, { session });
-      }
-    }
-    await AuditLog.create(
-      [
-        {
-          user: adminId,
-          userRole: req.admin.role,
-          action: "PLAYER_DELETED",
-          entityType: "User",
-          entityId: player._id,
-          ipAddress: req.ip || "",
-          deviceInfo: req.headers["user-agent"] || "",
-          description: `Player "${player.fullName}" and all associated data cascade deleted by Super Admin`,
-        },
-      ],
-      { session }
-    );
-
-    await session.commitTransaction();
-    session.endSession();
-
-    if (broadcastSidebarBadges) {
-      broadcastSidebarBadges().catch(() => {});
-    }
-
-    res.json({
-      success: true,
-      message: `Player "${player.fullName}" and all associated data deleted completely.`,
-    });
-  } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-    res.status(500).json({ success: false, message: err.message });
-  }
+    const request = await RegistrationRequest.findOne({ $or: [{ _id: req.params.id }, { player: req.params.id }], status: "PENDING", requestType: { $in: ["TEMPORARY_PLAYER", "TEMPORARY"] } });
+    if (!request) return res.status(404).json({ success: false, message: "Pending temporary-player request not found" });
+    req.params.id = String(request._id);
+    req.body.reason = req.body.reason || "Cancelled by administrator";
+    return require("./registrationRequestController").rejectRegistrationRequest(req, res);
+  } catch (error) { return res.status(error.name === "CastError" ? 400 : 500).json({ success: false, message: error.message }); }
 };

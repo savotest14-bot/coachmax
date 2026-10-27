@@ -1,78 +1,28 @@
 const cron = require("node-cron");
 const Event = require("../models/Event");
-const EventRegistration = require("../models/EventRegistration");
-
 const jwt = require("jsonwebtoken");
 const Parent = require("../models/Parent");
 const Admin = require("../models/Admin");
-
-// Run daily at midnight (0 0 * * *) to delete expired events
-const initCronJobs = () => {
-  cron.schedule("0 0 * * *", async () => {
-    try {
-      console.log("⏰ Running expired events cleanup cron job...");
-      
-      const now = new Date();
-      const expiredEvents = await Event.find({ endDate: { $lt: now } }).select("_id");
-      
-      if (expiredEvents.length > 0) {
-        const expiredEventIds = expiredEvents.map((e) => e._id);
-        
-        const regDeleteResult = await EventRegistration.deleteMany({ event: { $in: expiredEventIds } });
-        
-        const eventDeleteResult = await Event.deleteMany({ _id: { $in: expiredEventIds } });
-        
-        console.log(`🧹 Successfully cleaned up:`);
-        console.log(`   - ${eventDeleteResult.deletedCount} expired events`);
-        console.log(`   - ${regDeleteResult.deletedCount} event registrations`);
-      } else {
-        console.log("No expired events found for cleanup.");
+const { DEFAULT_TIMEZONE, todayDateOnly, dateOnlyStartUtc } = require("../utils/dateTime");
+const { processDeliveryJobs } = require("./deliveryService");
+async function completeExpiredEvents(now = new Date()) {
+  // Completion preserves registrations, attendance, invoices and linked media.
+  const today = dateOnlyStartUtc(todayDateOnly(DEFAULT_TIMEZONE, now));
+  return Event.updateMany({ endDate: { $lt: today }, status: { $ne: "COMPLETED" } }, { $set: { status: "COMPLETED", isRegistrationOpen: false } });
+}
+function initCronJobs() {
+  const jobs = [];
+  jobs.push(cron.schedule("0 0 * * *", () => completeExpiredEvents().catch(() => console.error("Event completion job failed")), { timezone: DEFAULT_TIMEZONE, noOverlap: true }));
+  jobs.push(cron.schedule("* * * * *", () => processDeliveryJobs().catch(() => console.error("Delivery retry job failed")), { timezone: DEFAULT_TIMEZONE, noOverlap: true }));
+  jobs.push(cron.schedule("0 1 * * *", async () => {
+    for (const Model of [Admin, Parent]) {
+      const cursor = Model.find({ "tokens.0": { $exists: true } }).select("tokens").cursor();
+      for await (const user of cursor) {
+        const expired = user.tokens.filter((token) => { try { jwt.verify(token, process.env.JWT_SECRET); return false; } catch { return true; } });
+        if (expired.length) await Model.updateOne({ _id: user._id }, { $pull: { tokens: { $in: expired } } });
       }
-    } catch (error) {
-      console.error("❌ Error in expired events cleanup cron job:", error);
     }
-  });
-
-  // Run daily at 1:00 AM (0 1 * * *) to clean up expired/invalid tokens
-  cron.schedule("0 1 * * *", async () => {
-    try {
-      console.log("⏰ Running expired tokens cleanup cron job...");
-      const secret = process.env.JWT_SECRET;
-      
-      const processModelTokens = async (Model, modelName) => {
-        const users = await Model.find({ tokens: { $exists: true, $not: { $size: 0 } } });
-        let totalCleaned = 0;
-        
-        for (const user of users) {
-          const originalCount = user.tokens.length;
-          const validTokens = [];
-          
-          for (const token of user.tokens) {
-            try {
-              jwt.verify(token, secret);
-              validTokens.push(token);
-            } catch (err) {
-              totalCleaned++;
-            }
-          }
-          
-          if (validTokens.length !== originalCount) {
-            user.tokens = validTokens;
-            await user.save();
-          }
-        }
-        
-        console.log(`🧹 Cleaned up ${totalCleaned} invalid/expired tokens for ${modelName}s`);
-      };
-
-      await processModelTokens(Admin, "Admin");
-      await processModelTokens(Parent, "Parent");
-    } catch (error) {
-      console.error("❌ Error in expired tokens cleanup cron job:", error);
-    }
-  });
-
-  console.log("🚀 Cron jobs initialized.");
-};
-
-module.exports = { initCronJobs };
+  }, { timezone: DEFAULT_TIMEZONE, noOverlap: true }));
+  return jobs;
+}
+module.exports = { initCronJobs, completeExpiredEvents };

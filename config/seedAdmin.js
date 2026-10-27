@@ -6,6 +6,9 @@ const seedAdmin = async () => {
     const adminEmail = process.env.ADMIN_EMAIL;
     const adminMobile = process.env.ADMIN_MOBILE;
 
+    if (!adminEmail && !adminMobile && !process.env.ADMIN_PASSWORD) return;
+    if (!adminEmail || !adminMobile || !process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 8) throw new Error("Configure a complete admin email, mobile and password of at least 8 characters, or omit all seed settings");
+
     const adminExists = await Admin.findOne({
       $or: [{ email: adminEmail }, { mobile: adminMobile }],
     });
@@ -31,7 +34,7 @@ const seedAdmin = async () => {
     console.log("🔥 Admin created successfully");
 
   } catch (err) {
-    console.error("❌ Admin seed error:", err.message);
+    throw err;
   }
 };
 

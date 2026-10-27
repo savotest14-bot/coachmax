@@ -5,6 +5,7 @@ const BankDetails = require("../models/BankDetails");
 const PaymentSettings = require("../models/PaymentSettings");
 const Notification = require("../models/Notification");
 const { sendNotification } = require("../services/notificationService");
+const { formatDateOnly } = require("../utils/dateTime");
 
 const getOrCreatePaymentSettings = async () => {
   let settings = await PaymentSettings.findOne();
@@ -19,28 +20,7 @@ const getOrCreatePaymentSettings = async () => {
 
 
 // Helper to generate sequential invoice number e.g. INV-2026-000001
-const generateInvoiceNumber = async () => {
-  const year = new Date().getFullYear();
-  const prefix = `INV-${year}-`;
-
-  const lastInvoice = await Invoice.findOne({
-    invoiceNumber: new RegExp(`^${prefix}`),
-  })
-    .sort({ createdAt: -1 })
-    .select("invoiceNumber");
-
-  let sequence = 1;
-  if (lastInvoice && lastInvoice.invoiceNumber) {
-    const parts = lastInvoice.invoiceNumber.split("-");
-    const lastNum = parseInt(parts[parts.length - 1], 10);
-    if (!isNaN(lastNum)) {
-      sequence = lastNum + 1;
-    }
-  }
-
-  const paddedSequence = String(sequence).padStart(6, "0");
-  return `${prefix}${paddedSequence}`;
-};
+const { generateInvoiceNumber } = require("../services/invoiceService");
 
 exports.createInvoice = async (req, res) => {
   try {
@@ -188,7 +168,7 @@ exports.createInvoice = async (req, res) => {
         recipientType: "PARENT",
         parentId: parentId,
         title: "New Invoice Issued 📄",
-        message: `An invoice #${invoiceNumber} for amount ${finalTotal} has been issued. Due date: ${new Date(dueDate).toLocaleDateString()}.`,
+        message: `An invoice #${invoiceNumber} for amount ${finalTotal} has been issued. Due date: ${formatDateOnly(dueDate)}.`,
         type: "INVOICE_CREATED",
         data: {
           parentId: String(parentId),

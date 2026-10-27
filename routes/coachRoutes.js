@@ -64,6 +64,8 @@ const {
 const { getMyRooms } = require("../controllers/chatController");
 
 const router = express.Router();
+const { requireStaff, requirePlayerAccess } = require("../middleware/staffAccess");
+router.use(auth, requireStaff);
 
 // ─── Dashboard ──────────────────────────────
 router.get("/dashboard", auth, isCoach, getCoachDashboard);
@@ -90,7 +92,7 @@ router.get("/team-attendance/:teamId", auth, isCoach, getAttendanceByTeam);
 router.get("/team-attendance/:teamId/date", auth, isCoach, getAttendanceByTeamDate);
 
 //  Player Profile / Quick Access ─
-router.get("/player/:playerId/profile", auth, isCoach, getPlayerProfile);
+router.get("/player/:playerId/profile", auth, isCoach, requirePlayerAccess, getPlayerProfile);
 
 //  Temporary Players ───────────
 router.post("/temporary-players", auth, isCoach, createTemporaryPlayer);
@@ -130,6 +132,7 @@ router.get(
   "/player/:playerId",
   auth,
   isCoach,
+  requirePlayerAccess,
   getPlayerDetails
 );
 

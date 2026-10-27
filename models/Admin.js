@@ -19,6 +19,9 @@ const adminSchema = new mongoose.Schema(
         otp: String,
         otpExpire: Date,
         isOtpVerified: { type: Boolean, default: false },
+        otpAttempts: { type: Number, default: 0 },
+        resetTokenHash: { type: String, select: false },
+        resetTokenExpire: { type: Date, select: false },
         password: {
             type: String,
             required: true,

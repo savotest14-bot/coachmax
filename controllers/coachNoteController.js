@@ -282,6 +282,9 @@ exports.getMyNotes = async (req, res) => {
 exports.getNoteAuditHistory = async (req, res) => {
   try {
     const { noteId } = req.params;
+    const note = await require("../models/CoachNote").findById(noteId).select("coach");
+    if (!note) return res.status(404).json({ success: false, message: "Note not found" });
+    if (req.admin?.role === "COACH" && String(note.coach) !== String(req.admin._id)) return res.status(403).json({ success: false, message: "You may only read the audit history of your own notes" });
 
     const auditLogs = await AuditLog.find({
       entityType: "CoachNote",

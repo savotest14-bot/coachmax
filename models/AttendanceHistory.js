@@ -30,18 +30,20 @@ const attendanceHistorySchema = new mongoose.Schema(
     },
     previousStatus: {
       type: String,
-      enum: ["PRESENT", "ABSENT", "LATE", "TRIAL", "NONE"],
+      enum: ["PRESENT", "ABSENT", "LATE", "TRIAL", "NONE", "NOT_MARKED"],
       default: "NONE",
     },
     newStatus: {
       type: String,
-      enum: ["PRESENT", "ABSENT", "LATE", "TRIAL"],
+      enum: ["PRESENT", "ABSENT", "LATE", "TRIAL", "NOT_MARKED"],
       required: true,
     },
     previousComment: {
       type: String,
       default: "",
     },
+    previousNote: { type: String, default: "" },
+    newNote: { type: String, default: "" },
     newComment: {
       type: String,
       default: "",

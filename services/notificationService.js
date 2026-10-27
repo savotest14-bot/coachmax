@@ -46,8 +46,12 @@ try {
  * Send FCM Push Notification to device tokens
  */
 
-const sendPushToTokens = async (tokens, payload) => {
-  if (!isFirebaseInitialized || !tokens || tokens.length === 0) return;
+const sendPushToTokens = async (tokens, payload, { strict = false } = {}) => {
+  if (!tokens || tokens.length === 0) return;
+  if (!isFirebaseInitialized) {
+    if (strict) throw new Error("Push service is not configured");
+    return;
+  }
 
   const validTokens = [...new Set(tokens.filter(Boolean))];
   if (validTokens.length === 0) return;
@@ -72,12 +76,15 @@ const sendPushToTokens = async (tokens, payload) => {
 
     if (admin.messaging().sendEachForMulticast) {
       const response = await admin.messaging().sendEachForMulticast(messagePayload);
+      if (strict && response.responses?.some((item) => !item.success && !["messaging/invalid-registration-token", "messaging/registration-token-not-registered"].includes(item.error?.code))) throw new Error("Push service rejected delivery");
       console.log(`📱 FCM Push sent: ${response.successCount} succeeded, ${response.failureCount} failed.`);
     } else if (admin.messaging().sendMulticast) {
       const response = await admin.messaging().sendMulticast(messagePayload);
+      if (strict && response.failureCount > 0) throw new Error("Push service rejected delivery");
       console.log(`📱 FCM Push sent: ${response.successCount} succeeded, ${response.failureCount} failed.`);
     }
   } catch (err) {
+    if (strict) throw err;
     console.error("❌ Failed to send FCM Push Notification:", err.message);
   }
 };
@@ -95,8 +102,15 @@ const sendNotification = async ({
   message,
   type = "ANNOUNCEMENT",
   data = {},
+  idempotencyKey,
+  awaitPush = false,
 }) => {
   try {
+    let existing;
+    if (idempotencyKey) {
+      existing = await Notification.findOne({ idempotencyKey });
+      if (existing && !awaitPush) return existing;
+    }
     let targetParentId = parentId;
     let targetAdminId = adminId || coachId;
 
@@ -121,7 +135,8 @@ const sendNotification = async ({
     }
 
     // 1. Create Notification Record in DB
-    const notifDoc = await Notification.create({
+    const notifDoc = existing || await Notification.create({
+      ...(idempotencyKey ? { idempotencyKey } : {}),
       recipientType: finalRecipientType,
       parent: targetParentId || null,
       admin: targetAdminId || null,
@@ -186,13 +201,15 @@ const sendNotification = async ({
     }
 
     // 3. Dispatch Push Notification (Non-blocking)
-    sendPushToTokens(fcmTokens, {
+    const push = sendPushToTokens(fcmTokens, {
       title,
       message,
       type,
       notificationId: notifDoc._id,
       data,
-    }).catch((err) =>
+    }, { strict: awaitPush });
+    if (awaitPush) await push;
+    else push.catch((err) =>
       console.error("Push Notification async error:", err.message)
     );
 
