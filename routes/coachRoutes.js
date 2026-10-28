@@ -95,7 +95,7 @@ router.get("/team-attendance/:teamId/date", auth, isCoach, getAttendanceByTeamDa
 router.get("/player/:playerId/profile", auth, isCoach, requirePlayerAccess, getPlayerProfile);
 
 //  Temporary Players ───────────
-router.post("/temporary-players", auth, isCoach, createTemporaryPlayer);
+router.post("/temporary-players", auth, isCoach, uploads.single("profileImage"), createTemporaryPlayer);
 router.get("/temporary-players", auth, isCoach, getTemporaryPlayers);
 
 //  Coach Notes ─────────────────

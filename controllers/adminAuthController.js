@@ -3749,6 +3749,7 @@ exports.getClassFiltersWithTimeSlots = async (req, res) => {
       query.$or = [
         { dayOfWeek: { $regex: new RegExp(`^${selectedDay}$`, "i") } },
         { "schedule.dayOfWeek": { $regex: new RegExp(`^${selectedDay}$`, "i") } },
+        { scheduleType: "WEEKDAYS" },
       ];
     }
 

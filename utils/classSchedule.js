@@ -16,8 +16,14 @@ function timeMinutes(value) {
   return hours * 60 + minutes;
 }
 function classOccurrences(classDoc, selectedDay = null) {
-  const multiDay = (classDoc.scheduleType && classDoc.scheduleType !== "SINGLE_DAY") || (!classDoc.scheduleType && classDoc.schedule?.length);
-  const entries = multiDay && classDoc.schedule?.length ? classDoc.schedule : [classDoc];
+  const scheduleType = classDoc.scheduleType;
+  const scheduledEntries = Array.isArray(classDoc.schedule) ? classDoc.schedule : [];
+  const multiDay = (scheduleType && scheduleType !== "SINGLE_DAY") || (!scheduleType && scheduledEntries.length > 0);
+  const entries = scheduleType === "WEEKDAYS" && scheduledEntries.length === 0
+    ? WEEKDAYS.slice(0, 5).map((dayOfWeek) => ({ ...classDoc, dayOfWeek }))
+    : multiDay && scheduledEntries.length > 0
+      ? scheduledEntries
+      : [classDoc];
   const seen = new Set();
   return entries.flatMap((entry) => {
     const dayOfWeek = weekday(entry.dayOfWeek);

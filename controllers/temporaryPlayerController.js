@@ -7,14 +7,33 @@ const AuditLog = require("../models/AuditLog");
 const Class = require("../models/Class");
 const RegistrationRequest = require("../models/RegistrationRequest");
 const { temporaryPlayerAccessEmail } = require("../utils/emailTemplates");
+const sendEmail = require("../utils/sendEmail");
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
 const { dateOnlyToUtc, dateOnly, todayDateOnly, serializeDateOnly, serializeTerm } = require("../utils/dateTime");
+const { removeStoredUpload } = require("../utils/upload");
 let broadcastSidebarBadges = null;
 try {
   ({ broadcastSidebarBadges } = require("../sockets/chatSocket"));
 } catch (e) {}
+
+const cleanupUploadedProfileImage = async (req) => {
+  if (req.file?.filename) {
+    await removeStoredUpload(`uploads/profiles/${req.file.filename}`).catch(() => {});
+  }
+};
+
+const parseArrayField = (value) => {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return [value];
+  }
+};
 
 // Only operator-configured app domains may receive account links.
 const getAppLoginUrl = () => {
@@ -30,6 +49,7 @@ const getAppLoginUrl = () => {
 
 exports.createTemporaryPlayer = async (req, res) => {
   const session = await mongoose.startSession();
+  let transactionCommitted = false;
   session.startTransaction();
 
   try {
@@ -52,10 +72,10 @@ exports.createTemporaryPlayer = async (req, res) => {
       prefferedFoot,
       gender,
     } = req.body;
-
     if (!name || !dob || !parentName || !parentEmail || !parentPhone || !emergencyContact || !classId || !sessionDate) {
       await session.abortTransaction();
       session.endSession();
+      await cleanupUploadedProfileImage(req);
       return res.status(400).json({
         success: false,
         message: "name, dob, parentName, parentEmail, parentPhone, emergencyContact, classId, and sessionDate are required",
@@ -66,6 +86,7 @@ exports.createTemporaryPlayer = async (req, res) => {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedParentEmail)) {
       await session.abortTransaction();
       session.endSession();
+      await cleanupUploadedProfileImage(req);
       return res.status(400).json({ success: false, message: "Enter a valid parent email address to send the CoachMax sign-in details." });
     }
 
@@ -73,6 +94,7 @@ exports.createTemporaryPlayer = async (req, res) => {
     if (!classData) {
       await session.abortTransaction();
       session.endSession();
+      await cleanupUploadedProfileImage(req);
       return res.status(404).json({ success: false, message: "Class not found" });
     }
 
@@ -100,7 +122,8 @@ exports.createTemporaryPlayer = async (req, res) => {
     }
     if (dateOnly(parsedDob) > todayDateOnly() || dateOnly(parsedDob) > dateOnly(parsedSessionDate)) throw Object.assign(new Error("Date of birth cannot be in the future"), { statusCode: 400 });
     if (preferredTerm && String(preferredTerm) !== String(classData.term)) throw Object.assign(new Error("Requested term does not match the selected class"), { statusCode: 400 });
-    const desiredClassIds = Array.isArray(preferredClasses) && preferredClasses.length ? preferredClasses : [classId];
+    const requestedClassIds = parseArrayField(preferredClasses);
+    const desiredClassIds = requestedClassIds.length ? requestedClassIds : [classId];
     if (!desiredClassIds.some((value) => String(value) === String(classId))) throw Object.assign(new Error("Trial class must be one of the requested classes"), { statusCode: 400 });
     const requestedClasses = await Class.find({ _id: { $in: desiredClassIds }, term: classData.term, status: "ACTIVE" }).session(session);
     if (requestedClasses.length !== new Set(desiredClassIds.map(String)).size) throw Object.assign(new Error("One or more requested classes are unavailable in the selected term"), { statusCode: 400 });
@@ -109,15 +132,26 @@ exports.createTemporaryPlayer = async (req, res) => {
     if (phoneDigits.length < 7 || phoneDigits.length > 15) throw Object.assign(new Error("Enter a valid parent phone number"), { statusCode: 400 });
     const phoneRegex = new RegExp(`^[\\s()+.-]*${phoneDigits.split("").join("[\\s()+.-]*")}[\\s()+.-]*$`);
     const parents = await Parent.find({ $or: [{ email: emailToUse }, { phone: phoneRegex }] }).session(session);
-    if (parents.length > 1 || (parents[0] && (String(parents[0].email).trim().toLowerCase() !== emailToUse || String(parents[0].phone).replace(/\D/g, "") !== phoneDigits))) {
+    const emailParent = parents.find((candidate) => String(candidate.email).trim().toLowerCase() === emailToUse);
+    const phoneParent = parents.find((candidate) => String(candidate.phone).replace(/\D/g, "") === phoneDigits);
+    const contactDetailsMismatch = parents.length > 1 ||
+      (emailParent && String(emailParent.phone).replace(/\D/g, "") !== phoneDigits) ||
+      (phoneParent && String(phoneParent.email).trim().toLowerCase() !== emailToUse);
+    const isAdminOperator = ["ADMIN", "SUPER_ADMIN"].includes(req.admin.role);
+    if (contactDetailsMismatch && !isAdminOperator) {
       throw Object.assign(new Error("Parent email and phone identify different household details. Ask an administrator to verify and update the parent account first."), { statusCode: 409 });
     }
-    let parent = parents[0] || null;
+    // Admin-entered contact details do not require an OTP match. Reuse the
+    // email account first (or the phone account if there is no email match),
+    // and leave its saved contact details unchanged.
+    let parent = emailParent || phoneParent || parents[0] || null;
+    const contactDetailsReused = Boolean(contactDetailsMismatch && isAdminOperator && parent);
+    const contactMatchedBy = emailParent ? "email" : phoneParent ? "phone" : "existing account";
+    const parentNameToUse = contactDetailsReused ? (parent?.fullName || parentName) : parentName;
     if (parent?.isBlocked || parent?.status === "REJECTED") throw Object.assign(new Error("This parent account is unavailable; administrator review is required"), { statusCode: 409 });
 
     let isNewAccount = false;
     const appLoginUrl = getAppLoginUrl();
-    if (!appLoginUrl) throw Object.assign(new Error("Parent app URL is not configured. Set PARENT_APP_URL before creating temporary players."), { statusCode: 503 });
 
     if (!parent) {
       isNewAccount = true;
@@ -159,11 +193,12 @@ exports.createTemporaryPlayer = async (req, res) => {
           firstName,
           lastName,
           fullName: name.trim(),
+          profileImage: req.file?.filename ? `uploads/profiles/${req.file.filename}` : "",
           dob: parsedDob,
           gender: String(gender || "OTHER").toUpperCase(),
           prefferedFoot: prefferedFoot || undefined,
           parentId: parent._id,
-          contactName: parentName,
+          contactName: parentNameToUse,
           relationship: "Parent/Guardian",
           isMedicalCondition: medical.isMedicalCondition,
           medicalConditionDetails: medical.medicalConditionDetails,
@@ -198,7 +233,6 @@ exports.createTemporaryPlayer = async (req, res) => {
           preferredClasses: prefClassList,
           requestType: "TEMPORARY_PLAYER",
           status: "PENDING",
-          createdBy: coachId,
         },
       ],
       { session }
@@ -217,8 +251,11 @@ exports.createTemporaryPlayer = async (req, res) => {
           newValue: {
             playerId: player._id,
             name: player.fullName,
-            parentName,
-            parentPhone,
+            parentName: parentNameToUse,
+            parentEmail: parent.email,
+            parentPhone: parent.phone,
+            contactDetailsReused,
+            contactMatchedBy: contactDetailsReused ? contactMatchedBy : undefined,
             classId,
             sessionDate: parsedSessionDate,
             playerStatus: player.playerStatus,
@@ -229,31 +266,54 @@ exports.createTemporaryPlayer = async (req, res) => {
       { session }
     );
 
-    const { queueEmail, queueNotification } = require("../services/deliveryService");
-    await queueEmail(`temporary-access:${player._id}`, {
-      to: parent.email,
-      subject: isNewAccount ? "Set up your CoachMax account" : "A temporary player was added to your CoachMax account",
-      html: temporaryPlayerAccessEmail({ parentName: parent.fullName || parentName, playerName: player.fullName, email: parent.email, isNewAccount,
-        loginUrl: isNewAccount ? new URL("/forgot-password?role=PARENT", appLoginUrl).toString() : appLoginUrl }),
-    }, session);
-    await queueNotification(`temporary-created:${player._id}`, { recipientType: "ADMIN", adminId: null,
-      title: "Temporary Player Added", message: `Coach ${req.admin.name} added temporary player "${player.fullName}" for verification.`, type: "TEMPORARY_PLAYER_ADDED",
-      data: { playerId: String(player._id), parentId: String(parent._id), classId: String(classId), coachId: String(coachId) } }, session);
     await session.commitTransaction();
+    transactionCommitted = true;
     await session.endSession();
+
+    let emailSent = false;
+    if (appLoginUrl) {
+      emailSent = await sendEmail(
+        parent.email,
+        isNewAccount ? "Set up your CoachMax account" : "A temporary player was added to your CoachMax account",
+        temporaryPlayerAccessEmail({ parentName: parent.fullName || parentName, playerName: player.fullName, email: parent.email, isNewAccount,
+          loginUrl: isNewAccount ? new URL("/forgot-password?role=PARENT", appLoginUrl).toString() : appLoginUrl })
+      );
+    }
+
+    try {
+      const { sendNotification } = require("../services/notificationService");
+      await sendNotification({
+        recipientType: "ADMIN",
+        title: "Temporary Player Added",
+        message: `${req.admin.role === "COACH" ? `Coach ${req.admin.name}` : `Super Admin ${req.admin.name}`} added temporary player "${player.fullName}" for verification.`,
+        type: "TEMPORARY_PLAYER_ADDED",
+        idempotencyKey: `temporary-created:${player._id}`,
+        data: { playerId: String(player._id), parentId: String(parent._id), classId: String(classId), coachId: String(coachId) },
+      });
+    } catch (notificationError) {
+      console.error("Temporary-player admin notification failed:", notificationError.message);
+    }
 
     if (broadcastSidebarBadges) {
       broadcastSidebarBadges().catch(() => {});
     }
 
-    const message = isNewAccount
-      ? "Temporary player created. A password-setup email is queued for the parent."
-      : "Temporary player created. An account update and sign-in email is queued for the parent.";
+    let message = contactDetailsReused
+      ? `Temporary player created using the existing parent account matched by ${contactMatchedBy}. Its saved email and phone were kept unchanged.`
+      : "Temporary player created.";
+    if (!appLoginUrl) {
+      message += " Parent access email was not sent because the parent app URL is not configured.";
+    } else if (emailSent) {
+      message += isNewAccount ? " A password-setup email was sent to the parent." : " A parent update email was sent.";
+    } else {
+      message += " The player was created, but the parent access email could not be sent.";
+    }
 
     res.status(201).json({
       success: true,
       message,
-      emailQueued: true,
+      emailSent,
+      contactDetailsReused,
       data: {
         player,
         parent: {
@@ -267,7 +327,10 @@ exports.createTemporaryPlayer = async (req, res) => {
       },
     });
   } catch (err) {
-    if (session.inTransaction()) await session.abortTransaction();
+    if (session.inTransaction()) {
+      try { await session.abortTransaction(); } catch (abortError) { console.error("Failed to abort temporary-player transaction:", abortError); }
+    }
+    if (!transactionCommitted) await cleanupUploadedProfileImage(req);
     await session.endSession();
     res.status(err.statusCode || (err instanceof TypeError || err.name === "ValidationError" || err.name === "CastError" ? 400 : err.code === 11000 ? 409 : 500)).json({ success: false, message: err.message });
   }
