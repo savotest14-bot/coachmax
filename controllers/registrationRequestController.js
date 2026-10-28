@@ -87,14 +87,9 @@ exports.getRegistrationRequests = async (req, res) => {
       ]);
       query.$and = [{ $or: [{ player: { $in: players.map((player) => player._id) } }, { parent: { $in: parents.map((parent) => parent._id) } }] }];
     }
-    const temporaryQuery = { $and: [query, { requestType: { $in: TEMPORARY_REQUEST_TYPES } }] };
-    const otherQuery = { $and: [query, { requestType: { $nin: TEMPORARY_REQUEST_TYPES } }] };
-    const [temporaryTotal, otherTotal] = await Promise.all([
-      RegistrationRequest.countDocuments(temporaryQuery),
-      RegistrationRequest.countDocuments(otherQuery),
-    ]);
-    const total = temporaryTotal + otherTotal;
-    const loadPage = (filter, skip, count) => RegistrationRequest.find(filter)
+    const [total, requests] = await Promise.all([
+      RegistrationRequest.countDocuments(query),
+      RegistrationRequest.find(query)
         .populate("parent", "fullName email phone address city")
         .populate({
           path: "player",
@@ -106,18 +101,10 @@ exports.getRegistrationRequests = async (req, res) => {
         .populate("preferredTerm", "name year startDate endDate status")
         .populate("preferredClasses", "name dayOfWeek startTime endTime venue location term capacity status")
         .populate("assignedBy", "name email")
-        .sort({ createdAt: -1, _id: -1 }).skip(skip).limit(count);
-    const offset = (page - 1) * limit;
-    let requests = [];
-    if (offset < temporaryTotal) {
-      requests = await loadPage(temporaryQuery, offset, Math.min(limit, temporaryTotal - offset));
-    }
-    const otherOffset = Math.max(0, offset - temporaryTotal);
-    const otherLimit = limit - requests.length;
-    if (otherLimit > 0) {
-      const otherRequests = await loadPage(otherQuery, otherOffset, otherLimit);
-      requests = requests.concat(otherRequests);
-    }
+        .sort({ createdAt: -1, _id: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit),
+    ]);
     return res.json({ success: true, page, limit, total, totalPages: Math.ceil(total / limit), data: requests.map(serializeRequest) });
   } catch (error) {
     return res.status(error.name === "CastError" || error instanceof TypeError ? 400 : 500).json({ success: false, message: error.message });

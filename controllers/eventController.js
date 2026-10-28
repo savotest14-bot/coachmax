@@ -9,6 +9,7 @@ const Invoice = require("../models/Invoice");
 const Parent = require("../models/Parent");
 const Term = require("../models/Term");
 const { generateInvoiceNumber } = require("./invoiceController");
+const { activateAssignedPlayers } = require("../services/activateAssignedPlayers");
 const fs = require("fs");
 const path = require("path");
 const mongoose = require("mongoose");
@@ -749,7 +750,6 @@ exports.registerForEvent = async (req, res) => {
           if (!player.category) player.category = reqCategory;
         }
 
-        player.hasPendingRequest = true;
         await player.save();
 
         if (reqCategory && parentDocId) {
@@ -763,6 +763,7 @@ exports.registerForEvent = async (req, res) => {
             createdBy: req.user?._id || parentDocId,
           });
         }
+        await activateAssignedPlayers([player._id]);
       }
     };
 

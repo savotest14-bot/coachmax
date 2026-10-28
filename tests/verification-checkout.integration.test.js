@@ -38,6 +38,7 @@ const ChatRoom = require("../models/ChatRoom");
 const Message = require("../models/Message");
 const { canReadMedia } = require("../middleware/privateMedia");
 const { enrollPlayer } = require("../services/enrollmentService");
+const { activateAssignedPlayers } = require("../services/activateAssignedPlayers");
 const { checkout, createCheckoutService } = require("../services/checkoutService");
 const allModels = [User, Parent, Class, Term, Program, Category, RegistrationRequest, AuditLog, Invoice, Counter, DeliveryJob, Product, Cart, Order, MedicalProfile, MedicalRevision, Attendance, AttendanceHistory, ChatRoom, Message];
 let replica;
@@ -124,6 +125,62 @@ test("unified queue keeps a second pending request for an active player and filt
   assert.equal(invalidTerm.statusCode, 400);
   const missingTerm = response(); await getRegistrationRequests({ query: { term: String(new mongoose.Types.ObjectId()) } }, missingTerm);
   assert.equal(missingTerm.statusCode, 404);
+});
+
+test("verification queue sorts all request sources newest-first across page boundaries", async () => {
+  const f = await enrollmentFixture({ twoPlayers: true });
+  await RegistrationRequest.collection.updateOne(
+    { _id: f.requests[0]._id },
+    { $set: { createdAt: new Date("2026-01-01T00:00:00.000Z") } },
+  );
+  await RegistrationRequest.collection.updateOne(
+    { _id: f.requests[1]._id },
+    { $set: { createdAt: new Date("2026-01-02T00:00:00.000Z") } },
+  );
+  const latest = await RegistrationRequest.create({
+    parent: f.household._id,
+    player: f.players[0]._id,
+    category: f.category._id,
+    programs: [f.program._id],
+    requestType: "EVENT_REGISTRATION",
+    status: "PENDING",
+  });
+  await RegistrationRequest.collection.updateOne(
+    { _id: latest._id },
+    { $set: { createdAt: new Date("2026-01-03T00:00:00.000Z") } },
+  );
+
+  const firstPage = response();
+  await getRegistrationRequests({ query: { page: "1", limit: "2" } }, firstPage);
+  assert.equal(firstPage.statusCode, 200);
+  assert.deepEqual(firstPage.body.data.map((request) => String(request._id)), [
+    String(latest._id),
+    String(f.requests[1]._id),
+  ]);
+
+  const secondPage = response();
+  await getRegistrationRequests({ query: { page: "2", limit: "2" } }, secondPage);
+  assert.equal(secondPage.statusCode, 200);
+  assert.deepEqual(secondPage.body.data.map((request) => String(request._id)), [
+    String(f.requests[0]._id),
+  ]);
+});
+
+test("an assigned player leaves the verification queue and becomes active in Players", async () => {
+  const f = await enrollmentFixture();
+  const request = f.requests[0];
+
+  await activateAssignedPlayers([f.players[0]._id]);
+
+  const resolvedRequest = await RegistrationRequest.findById(request._id);
+  const activePlayer = await User.findById(f.players[0]._id);
+  assert.equal(resolvedRequest.status, "APPROVED");
+  assert.equal(activePlayer.playerStatus, "ACTIVE");
+  assert.equal(activePlayer.hasPendingRequest, false);
+
+  const pendingQueue = response();
+  await getRegistrationRequests({ query: { status: "PENDING" } }, pendingQueue);
+  assert.equal(pendingQueue.body.total, 0);
 });
 
 async function storeFixture({ twoParents = false } = {}) {
