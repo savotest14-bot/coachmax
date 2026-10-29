@@ -1,4 +1,5 @@
 const express = require("express");
+const { getCloneTermInfo } = require("../controllers/cloneTermInfoController");
 const {
   adminLogin,
   logout,
@@ -138,6 +139,7 @@ const {
   updateProduct,
   deleteProduct,
   getProductById,
+  getProductInsights,
   getAdminProducts,
   getAllCategories: getStoreCategories,
   updateCategory: updateStoreCategory,
@@ -218,7 +220,7 @@ const {
   getUnallocatedPlayers,
   assignClassesToPlayer,
   getPlayersByCategoryAndProgram,
-  rejectRegistrationRequest,
+  rejectAndDeleteRegistrationRequest,
 } = require("../controllers/registrationRequestController");
 
 const router = express.Router();
@@ -230,7 +232,7 @@ router.get("/registration-requests", auth, isAdmin, getRegistrationRequests);
 router.get("/unallocated-players", auth, isAdmin, getUnallocatedPlayers);
 router.get("/players/search", auth, isAdmin, getPlayersByCategoryAndProgram);
 router.patch("/player/:playerId/assign-classes", auth, isAdmin, assignClassesToPlayer);
-router.patch("/registration-requests/:id/reject", auth, isAdmin, rejectRegistrationRequest);
+router.patch("/registration-requests/:id/reject", auth, isAdmin, rejectAndDeleteRegistrationRequest);
 router.get("/sidebar-badges", auth, isAdmin, getSidebarBadges);
 
 
@@ -299,6 +301,7 @@ router.delete("/deleteTerm/:id", auth, isAdmin, deleteTerm);
 router.get("/getAllTerms", auth, isAdmin, getAllTerms);
 router.get("/getTermById/:id", auth, isAdmin, getTermById);
 router.put("/updateTerm/:id", auth, isAdmin, updateTerm);
+router.get("/cloneTerm/term-info/:termId", auth, isAdmin, getCloneTermInfo);
 router.post("/cloneTerm/preview", auth, isAdmin, previewCloneTerm);
 router.post("/cloneTerm", auth, isAdmin, cloneTerm);
 router.get("/term/:termId/earnings", auth, isAdmin, getTermEarningsReport);
@@ -414,6 +417,7 @@ router.get("/store/products", auth, isAdmin, getAdminProducts);
 router.put("/store/products/:id", auth, isAdmin, uploads.array("images", 5), updateProduct);
 router.delete("/store/products/:id", auth, isAdmin, deleteProduct);
 router.get("/store/products/:id", auth, isAdmin, getProductById);
+router.get("/store/products/:id/insights", auth, isAdmin, getProductInsights);
 router.get("/store/orders", auth, isAdmin, getAllOrders);
 router.get("/store/orders/:id", auth, isAdmin, getOrderById);
 router.patch("/store/orders/:id", auth, isAdmin, updateOrderStatus);

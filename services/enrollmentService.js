@@ -71,6 +71,11 @@ function createEnrollmentService(deps = {}) {
         }
         const classes = await models.Class.find({ _id: { $in: classIds } }).session(session);
         if (classes.length !== classIds.length) throw fail(404, "One or more selected classes no longer exist");
+        const alreadyAssignedClass = classes.find((cls) =>
+          (player.assignedClasses || []).some((value) => id(value) === id(cls._id))
+          || (cls.players || []).some((value) => id(value) === id(playerId))
+        );
+        if (alreadyAssignedClass) throw fail(409, `Player is already enrolled in ${alreadyAssignedClass.name}. Select a different class.`);
         const termId = id(classes[0].term);
         if (classes.some((cls) => id(cls.term) !== termId)) throw fail(400, "All selected classes must belong to the same term");
         const term = await models.Term.findById(termId).session(session);

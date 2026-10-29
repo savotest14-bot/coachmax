@@ -3,3 +3,4 @@ uploads/
 *.log
 coverage/
 .test-tmp/
+config.bat

@@ -1487,7 +1487,7 @@ exports.assignPlayerToTeam = async (req, res) => {
       enrollment.players = [...roster.values()];
     }
     await team.save({ session });
-    await activateAssignedPlayers(entries.map((row) => row.player), { session, assignedBy: req.admin?._id });
+    await activateAssignedPlayers(entries.map((row) => row.player), { session, assignedBy: req.admin?._id, resolvePendingRequests: false });
     if (enrollment?.teamFee > 0) for (const row of entries) if (row.paymentStatus === "UNPAID") await generateLeagueInvoice({ userId: row.player, leagueId, teamId, amount: enrollment.teamFee, session });
     await session.commitTransaction();
     return res.json({ success: true, message: "Players assigned successfully.", data: await Team.findById(teamId).populate("players.player", "fullName profileImage").populate("leagues.players.player", "fullName profileImage") });
@@ -3542,7 +3542,7 @@ exports.addTeamToLeague = async (req, res) => {
     await league.save({ session });
     await syncTeamsLeagueData({ teamIds: ids, leagueId, teamFee: league.fee, round: league.numberOfRounds, sessionDates: league.sessionDates, groups: league.groups, sessionOption: { session } });
     const assignedPlayerIds = teams.flatMap((team) => (team.players || []).map((entry) => entry.player?._id || entry.player).filter(Boolean));
-    await activateAssignedPlayers(assignedPlayerIds, { session, assignedBy: req.admin?._id });
+    await activateAssignedPlayers(assignedPlayerIds, { session, assignedBy: req.admin?._id, resolvePendingRequests: false });
     for (const teamId of ids) {
       await Standing.updateOne({ league: leagueId, team: teamId }, { $setOnInsert: { played: 0 } }, { upsert: true, session });
       if (newIds.includes(teamId) && league.fee > 0) await processLeagueInvoicesForTeam({ leagueId, teamId, session });

@@ -118,13 +118,43 @@ exports.logout = async (req, res) => {
   }
 };
 
+async function resolvePlayerTermScope(term, year) {
+  if ((!term || term === "All") && (!year || year === "All")) return null;
+
+  let termIds;
+  if (term && term !== "All") {
+    const selectedTerm = mongoose.Types.ObjectId.isValid(term)
+      ? await Term.findById(term).select("_id year").lean()
+      : await Term.findOne({ name: { $regex: String(term), $options: "i" } }).select("_id year").lean();
+    termIds = selectedTerm ? [selectedTerm._id] : [];
+  } else {
+    const selectedYear = Number(year);
+    termIds = Number.isInteger(selectedYear)
+      ? await Term.find({ year: selectedYear }).distinct("_id")
+      : [];
+  }
+
+  if (year && year !== "All" && termIds.length > 0) {
+    const termsInYear = await Term.find({ _id: { $in: termIds }, year: Number(year) }).distinct("_id");
+    termIds = termsInYear;
+  }
+
+  const classIds = termIds.length > 0
+    ? await Class.find({ term: { $in: termIds } }).distinct("_id")
+    : [];
+  return { termIds, classIds };
+}
+
 exports.getUsers = async (req, res) => {
   try {
     let {
       paymentStatus,
+      playerStatus,
+      assignment,
       category,
       program,
       term,
+      year,
       medical,
       ageGroup,
       subProgram,
@@ -167,24 +197,75 @@ exports.getUsers = async (req, res) => {
 
     const andConditions = [{ parentId: { $exists: true } }];
 
+    // Approval status is separate from payment status. The player list only
+    // exposes real player records in the Approved and Rejected views.
+    const requestedPlayerStatus = String(playerStatus || "").toUpperCase();
+    if (requestedPlayerStatus && !["APPROVED", "REJECTED", "ALL"].includes(requestedPlayerStatus)) {
+      return res.status(400).json({ message: "Invalid playerStatus" });
+    }
+    if (requestedPlayerStatus === "APPROVED") {
+      andConditions.push({ playerStatus: { $in: ["ACTIVE", "APPROVED"] } });
+    } else if (requestedPlayerStatus === "REJECTED") {
+      andConditions.push({ playerStatus: "REJECTED" });
+    }
+
+    const requestedAssignment = String(assignment || "").toUpperCase();
+    if (requestedAssignment && !["ELITE", "SCHOOL", "BOTH", "UNASSIGNED", "ALL"].includes(requestedAssignment)) {
+      return res.status(400).json({ message: "Invalid assignment filter" });
+    }
+    const eliteCats = await Category.find({ name: { $regex: "ACADEMY|ELITE", $options: "i" } }).distinct("_id");
+    const elitePrograms = await Program.find({ name: { $regex: "ELITE", $options: "i" } }).distinct("_id");
+    const schoolCats = await Category.find({ name: { $regex: "SCHOOL", $options: "i" } }).distinct("_id");
+    const schoolPrograms = await Program.find({
+      $or: [
+        { name: { $regex: "SCHOOL", $options: "i" } },
+        { category: { $in: schoolCats } },
+      ],
+    }).distinct("_id");
+
+    const eliteAssignment = {
+      $or: [
+        { programs: { $in: elitePrograms } },
+        { category: { $in: eliteCats } },
+        { categories: { $in: eliteCats } },
+      ],
+    };
+    const schoolAssignment = {
+      $or: [
+        { programs: { $in: schoolPrograms } },
+        { category: { $in: schoolCats } },
+        { categories: { $in: schoolCats } },
+      ],
+    };
+    const unassignedPlayer = {
+      $and: [
+        { $or: [{ category: { $exists: false } }, { category: null }] },
+        { $or: [{ categories: { $exists: false } }, { categories: { $size: 0 } }] },
+        { $or: [{ programs: { $exists: false } }, { programs: { $size: 0 } }] },
+      ],
+    };
+
+    if (requestedAssignment === "ELITE") {
+      andConditions.push({ $and: [eliteAssignment, { $nor: [schoolAssignment] }] });
+    } else if (requestedAssignment === "SCHOOL") {
+      andConditions.push({ $and: [schoolAssignment, { $nor: [eliteAssignment] }] });
+    } else if (requestedAssignment === "BOTH") {
+      andConditions.push({ $and: [eliteAssignment, schoolAssignment] });
+    } else if (requestedAssignment === "UNASSIGNED") {
+      andConditions.push(unassignedPlayer);
+    }
+
     // Term filtering
-    let termClassIds = [];
-    if (term && term !== "All") {
-      let termId = term;
-      if (!mongoose.Types.ObjectId.isValid(term)) {
-        const foundTerm = await Term.findOne({ name: { $regex: term, $options: "i" } });
-        if (foundTerm) termId = foundTerm._id;
-      }
-      if (mongoose.Types.ObjectId.isValid(termId)) {
-        termClassIds = await Class.find({ term: termId }).distinct("_id");
-        andConditions.push({
-          $or: [
-            { term: termId },
-            { assignedClasses: { $in: termClassIds } },
-            { "classPaymentStatuses.class": { $in: termClassIds } },
-          ],
-        });
-      }
+    const termScope = await resolvePlayerTermScope(term, year);
+    const termClassIds = termScope?.classIds || [];
+    if (termScope) {
+      andConditions.push({
+        $or: [
+          { term: { $in: termScope.termIds } },
+          { assignedClasses: { $in: termClassIds } },
+          { "classPaymentStatuses.class": { $in: termClassIds } },
+        ],
+      });
     }
 
     // Payment Status filtering (supports term-wise when term is selected)
@@ -331,7 +412,7 @@ exports.getUsers = async (req, res) => {
       }
 
       if (ageRange) {
-        let contextYear = ageGroupContextYear();
+        let contextYear = ageGroupContextYear(year && year !== "All" ? Number(year) : undefined);
         if (term && term !== "All") {
           if (!mongoose.Types.ObjectId.isValid(term)) return res.status(400).json({ message: "Invalid term ID" });
           const ageTerm = await Term.findById(term).select("year").lean();
@@ -483,28 +564,23 @@ exports.getUsers = async (req, res) => {
     if (termClassIds.length > 0) {
       termAndConditions.push({
         $or: [
-          { term: term },
+          { term: { $in: termScope.termIds } },
           { assignedClasses: { $in: termClassIds } },
           { "classPaymentStatuses.class": { $in: termClassIds } },
         ],
       });
-    } else if (term && term !== "All" && mongoose.Types.ObjectId.isValid(term)) {
-      termAndConditions.push({ term: term });
+    } else if (termScope) {
+      termAndConditions.push({ term: { $in: termScope.termIds } });
     }
 
-    const eliteCats = await Category.find({ name: { $regex: "ACADEMY|ELITE", $options: "i" } }).distinct("_id");
-    const elitePrograms = await Program.find({ name: { $regex: "ELITE", $options: "i" } }).distinct("_id");
-    const schoolCats = await Category.find({ name: { $regex: "SCHOOL", $options: "i" } }).distinct("_id");
-    const schoolPrograms = await Program.find({
-      $or: [
-        { name: { $regex: "SCHOOL", $options: "i" } },
-        { category: { $in: schoolCats } },
-      ],
-    }).distinct("_id");
-
-    const reqTermQuery = (term && term !== "All" && mongoose.Types.ObjectId.isValid(term))
-      ? { preferredTerm: term }
+    const reqTermQuery = termScope
+      ? { preferredTerm: { $in: termScope.termIds } }
       : {};
+    const officialPlayerConditions = [
+      ...termAndConditions,
+      { playerStatus: { $ne: "PENDING_APPROVAL" } },
+      { $or: [{ hasPendingRequest: { $ne: true } }, { "assignedClasses.0": { $exists: true } }] },
+    ];
 
     const [
       totalCount,
@@ -512,51 +588,41 @@ exports.getUsers = async (req, res) => {
       pendingUsers,
       pendingReqs,
       rejectedUsers,
-      rejectedReqs,
       eliteCount,
       schoolCount,
+      bothCount,
+      unassignedCount,
     ] = await Promise.all([
-      User.countDocuments({ $and: [...termAndConditions, { playerStatus: { $ne: "PENDING_APPROVAL" } }] }),
-      User.countDocuments({ $and: [...termAndConditions, { playerStatus: { $in: ["ACTIVE", "APPROVED"] } }] }),
+      User.countDocuments({ $and: officialPlayerConditions }),
+      User.countDocuments({ $and: [...officialPlayerConditions, { playerStatus: { $in: ["ACTIVE", "APPROVED"] } }] }),
       User.countDocuments({ $and: [...termAndConditions, { $or: [{ playerStatus: "PENDING_APPROVAL" }, { hasPendingRequest: true }] }] }),
       RegistrationRequest.countDocuments({ status: "PENDING", ...reqTermQuery }),
-      User.countDocuments({ $and: [...termAndConditions, { playerStatus: "REJECTED" }] }),
-      RegistrationRequest.countDocuments({ status: "REJECTED", ...reqTermQuery }),
+      User.countDocuments({ $and: [...officialPlayerConditions, { playerStatus: "REJECTED" }] }),
       User.countDocuments({
         $and: [
-          ...termAndConditions,
-          { playerStatus: { $ne: "PENDING_APPROVAL" } },
-          {
-            $or: [
-              { programs: { $in: elitePrograms } },
-              { category: { $in: eliteCats } },
-              { categories: { $in: eliteCats } },
-            ],
-          },
+          ...officialPlayerConditions,
+          { $and: [eliteAssignment, { $nor: [schoolAssignment] }] },
         ],
       }),
       User.countDocuments({
         $and: [
-          ...termAndConditions,
-          { playerStatus: { $ne: "PENDING_APPROVAL" } },
-          {
-            $or: [
-              { programs: { $in: schoolPrograms } },
-              { category: { $in: schoolCats } },
-              { categories: { $in: schoolCats } },
-            ],
-          },
+          ...officialPlayerConditions,
+          { $and: [schoolAssignment, { $nor: [eliteAssignment] }] },
         ],
       }),
+      User.countDocuments({ $and: [...officialPlayerConditions, eliteAssignment, schoolAssignment] }),
+      User.countDocuments({ $and: [...officialPlayerConditions, unassignedPlayer] }),
     ]);
 
     const stats = {
       totalCount,
       approvedCount,
       pendingCount: pendingUsers + pendingReqs,
-      rejectedCount: rejectedUsers + rejectedReqs,
+      rejectedCount: rejectedUsers,
       eliteCount,
       schoolCount,
+      bothCount,
+      unassignedCount,
     };
 
     res.json({
@@ -575,26 +641,19 @@ exports.getUsers = async (req, res) => {
 
 exports.getPlayerStats = async (req, res) => {
   try {
-    const { term } = req.query;
-    let termClassIds = [];
+    const { term, year } = req.query;
+    const termScope = await resolvePlayerTermScope(term, year);
+    const termClassIds = termScope?.classIds || [];
     const termAndConditions = [{ parentId: { $exists: true } }];
 
-    if (term && term !== "All") {
-      let termId = term;
-      if (!mongoose.Types.ObjectId.isValid(term)) {
-        const foundTerm = await Term.findOne({ name: { $regex: term, $options: "i" } });
-        if (foundTerm) termId = foundTerm._id;
-      }
-      if (mongoose.Types.ObjectId.isValid(termId)) {
-        termClassIds = await Class.find({ term: termId }).distinct("_id");
-        termAndConditions.push({
-          $or: [
-            { term: termId },
-            { assignedClasses: { $in: termClassIds } },
-            { "classPaymentStatuses.class": { $in: termClassIds } },
-          ],
-        });
-      }
+    if (termScope) {
+      termAndConditions.push({
+        $or: [
+          { term: { $in: termScope.termIds } },
+          { assignedClasses: { $in: termClassIds } },
+          { "classPaymentStatuses.class": { $in: termClassIds } },
+        ],
+      });
     }
 
     const eliteCats = await Category.find({ name: { $regex: "ACADEMY|ELITE", $options: "i" } }).distinct("_id");
@@ -607,9 +666,36 @@ exports.getPlayerStats = async (req, res) => {
       ],
     }).distinct("_id");
 
-    const reqTermQuery = (term && term !== "All" && mongoose.Types.ObjectId.isValid(term))
-      ? { preferredTerm: term }
+    const eliteAssignment = {
+      $or: [
+        { programs: { $in: elitePrograms } },
+        { category: { $in: eliteCats } },
+        { categories: { $in: eliteCats } },
+      ],
+    };
+    const schoolAssignment = {
+      $or: [
+        { programs: { $in: schoolPrograms } },
+        { category: { $in: schoolCats } },
+        { categories: { $in: schoolCats } },
+      ],
+    };
+    const unassignedPlayer = {
+      $and: [
+        { $or: [{ category: { $exists: false } }, { category: null }] },
+        { $or: [{ categories: { $exists: false } }, { categories: { $size: 0 } }] },
+        { $or: [{ programs: { $exists: false } }, { programs: { $size: 0 } }] },
+      ],
+    };
+
+    const reqTermQuery = termScope
+      ? { preferredTerm: { $in: termScope.termIds } }
       : {};
+    const officialPlayerConditions = [
+      ...termAndConditions,
+      { playerStatus: { $ne: "PENDING_APPROVAL" } },
+      { $or: [{ hasPendingRequest: { $ne: true } }, { "assignedClasses.0": { $exists: true } }] },
+    ];
 
     const [
       totalCount,
@@ -617,51 +703,41 @@ exports.getPlayerStats = async (req, res) => {
       pendingUsers,
       pendingReqs,
       rejectedUsers,
-      rejectedReqs,
       eliteCount,
       schoolCount,
+      bothCount,
+      unassignedCount,
     ] = await Promise.all([
-      User.countDocuments({ $and: [...termAndConditions, { playerStatus: { $ne: "PENDING_APPROVAL" } }] }),
-      User.countDocuments({ $and: [...termAndConditions, { playerStatus: { $in: ["ACTIVE", "APPROVED"] } }] }),
+      User.countDocuments({ $and: officialPlayerConditions }),
+      User.countDocuments({ $and: [...officialPlayerConditions, { playerStatus: { $in: ["ACTIVE", "APPROVED"] } }] }),
       User.countDocuments({ $and: [...termAndConditions, { $or: [{ playerStatus: "PENDING_APPROVAL" }, { hasPendingRequest: true }] }] }),
       RegistrationRequest.countDocuments({ status: "PENDING", ...reqTermQuery }),
-      User.countDocuments({ $and: [...termAndConditions, { playerStatus: "REJECTED" }] }),
-      RegistrationRequest.countDocuments({ status: "REJECTED", ...reqTermQuery }),
+      User.countDocuments({ $and: [...officialPlayerConditions, { playerStatus: "REJECTED" }] }),
       User.countDocuments({
         $and: [
-          ...termAndConditions,
-          { playerStatus: { $ne: "PENDING_APPROVAL" } },
-          {
-            $or: [
-              { programs: { $in: elitePrograms } },
-              { category: { $in: eliteCats } },
-              { categories: { $in: eliteCats } },
-            ],
-          },
+          ...officialPlayerConditions,
+          { $and: [eliteAssignment, { $nor: [schoolAssignment] }] },
         ],
       }),
       User.countDocuments({
         $and: [
-          ...termAndConditions,
-          { playerStatus: { $ne: "PENDING_APPROVAL" } },
-          {
-            $or: [
-              { programs: { $in: schoolPrograms } },
-              { category: { $in: schoolCats } },
-              { categories: { $in: schoolCats } },
-            ],
-          },
+          ...officialPlayerConditions,
+          { $and: [schoolAssignment, { $nor: [eliteAssignment] }] },
         ],
       }),
+      User.countDocuments({ $and: [...officialPlayerConditions, eliteAssignment, schoolAssignment] }),
+      User.countDocuments({ $and: [...officialPlayerConditions, unassignedPlayer] }),
     ]);
 
     const stats = {
       totalCount,
       approvedCount,
       pendingCount: pendingUsers + pendingReqs,
-      rejectedCount: rejectedUsers + rejectedReqs,
+      rejectedCount: rejectedUsers,
       eliteCount,
       schoolCount,
+      bothCount,
+      unassignedCount,
     };
 
     res.json({ success: true, stats });
@@ -3289,9 +3365,37 @@ exports.createCoach = async (req, res) => {
 
 exports.getAllCoaches = async (req, res) => {
   try {
+    const hasPagination = req.query.page !== undefined || req.query.limit !== undefined;
+    if (hasPagination) {
+      const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 10));
+      const skip = (page - 1) * limit;
+      const filter = { role: "COACH" };
+
+      const [coaches, total] = await Promise.all([
+        Admin.find(filter)
+          .select("-password")
+          .sort({ createdAt: -1, _id: -1 })
+          .skip(skip)
+          .limit(limit),
+        Admin.countDocuments(filter),
+      ]);
+
+      return res.json({
+        success: true,
+        data: coaches,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      });
+    }
+
     const coaches = await Admin.find({ role: "COACH" })
       .select("-password")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1, _id: -1 });
 
     res.json({ data: coaches });
 
@@ -4967,6 +5071,7 @@ exports.getPlayerDetails = async (req, res) => {
         id: `order-${order._id}`,
         type: "STORE_ORDER",
         orderId: order._id,
+        orderStatus: order.status || "PENDING",
         name: (order.items || []).map((entry) => entry.product?.name || "Product").join(", ") || "Store order",
         products: (order.items || []).map((entry) => ({
           name: entry.product?.name || "Product",
@@ -5070,6 +5175,26 @@ exports.getPlayerDetails = async (req, res) => {
       history: paymentHistory,
     };
 
+    const paymentTransactions = invoicePayments.map((payment) => {
+      const relatedItem = paymentHistory.find((item) => String(item.invoiceId || "") === String(payment.invoice || ""));
+      return {
+        id: payment._id,
+        invoiceId: payment.invoice,
+        invoiceNumber: relatedItem?.invoiceNumber || null,
+        termId: relatedItem?.termId || null,
+        termName: relatedItem?.termName || "No term linked",
+        name: relatedItem?.name || "Payment",
+        householdPurchase: Boolean(relatedItem?.householdPurchase),
+        amount: Number(payment.amount) || 0,
+        status: payment.status || "PENDING",
+        method: payment.paymentMethod || "",
+        transactionId: payment.transactionId || "",
+        remarks: payment.remarks || "",
+        createdAt: payment.createdAt,
+        approvedAt: payment.approvedAt || null,
+      };
+    }).sort((left, right) => new Date(right.createdAt || 0) - new Date(left.createdAt || 0));
+
     const leagueStatistics = leaguePlayerStatistics.map((entry) => ({
       id: entry._id,
       leagueId: entry.league?._id || null,
@@ -5164,6 +5289,7 @@ exports.getPlayerDetails = async (req, res) => {
         leagueStatistics,
         eventRegistrations,
         paymentFinancialSummary,
+        paymentTransactions,
         perDayAttendance,
         overallAttendance,
         perDayTeamAttendance,
@@ -5352,6 +5478,18 @@ exports.previewCloneTerm = async (req, res) => {
 };
 
 exports.cloneTerm = async (req, res) => {
+  const streamProgress = req.headers.accept?.includes("text/event-stream");
+  let progressStarted = false;
+  let heartbeat;
+  const emitProgress = (event, payload) => {
+    if (progressStarted && !res.destroyed) {
+      try {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+      } catch {
+        // A disconnected browser must not interrupt the database transaction.
+      }
+    }
+  };
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -5405,8 +5543,56 @@ exports.cloneTerm = async (req, res) => {
       });
     }
 
-    // 1. Process Classes
     const selectedClasses = Array.isArray(classes) ? classes : [];
+    let leaguesToProcess = Array.isArray(leagues) ? leagues : [];
+    if (leaguesToProcess.length === 0 && (req.body.cloneAllLeagues === true || req.body.cloneLeagues === true)) {
+      const allSourceLeagues = await League.find({ term: sourceTermId }).select("_id teams").session(session);
+      leaguesToProcess = allSourceLeagues.map((league) => ({ leagueId: league._id }));
+    }
+
+    const leagueIds = leaguesToProcess
+      .map((item) => item.leagueId)
+      .filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const plannedLeagues = leagueIds.length
+      ? await League.find({ _id: { $in: leagueIds }, term: sourceTermId })
+        .select("_id teams").session(session).lean()
+      : [];
+    const sourceTeamCounts = new Map(plannedLeagues.map((league) => [String(league._id), (league.teams || []).length]));
+    const plannedTeamCount = (item) => Array.isArray(item.teams)
+      ? item.teams.length
+      : sourceTeamCounts.get(String(item.leagueId)) || 0;
+    const totalWork = selectedClasses.length + leaguesToProcess.reduce((sum, item) => sum + 1 + plannedTeamCount(item), 0);
+    let completedWork = 0;
+    const reportProgress = (stage, message) => {
+      emitProgress("progress", {
+        percent: Math.min(99, Math.max(1, Math.floor(1 + (completedWork / Math.max(totalWork, 1)) * 98))),
+        completed: completedWork,
+        total: totalWork,
+        remaining: Math.max(0, totalWork - completedWork),
+        stage,
+        message,
+      });
+    };
+    const advanceProgress = (units, stage, message) => {
+      completedWork = Math.min(totalWork, completedWork + units);
+      reportProgress(stage, message);
+    };
+    if (streamProgress) {
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders?.();
+      progressStarted = true;
+      reportProgress("preparing", "Preparing selected items");
+      heartbeat = setInterval(() => {
+        if (!res.destroyed) {
+          try { res.write(": keep-alive\n\n"); } catch { /* Clone work continues if the browser disconnects. */ }
+        }
+      }, 15000);
+      heartbeat.unref?.();
+    }
+
+    // 1. Process Classes
     let classesSelected = selectedClasses.length;
     let classesCloned = 0;
     let classesSkipped = 0;
@@ -5417,15 +5603,18 @@ exports.cloneTerm = async (req, res) => {
       const { classId, players: playerIds } = item;
       const playerList = Array.isArray(playerIds) ? playerIds : [];
       playersSelected += playerList.length;
+      reportProgress("classes", "Copying classes and player assignments");
 
       if (!classId || !mongoose.Types.ObjectId.isValid(classId)) {
         classesSkipped++;
+        advanceProgress(1, "classes", "Skipped an invalid class");
         continue;
       }
 
       const sourceClass = await Class.findById(classId).session(session);
       if (!sourceClass || String(sourceClass.term) !== String(sourceTermId)) {
         classesSkipped++;
+        advanceProgress(1, "classes", "Skipped a class outside the source term");
         continue;
       }
 
@@ -5440,6 +5629,7 @@ exports.cloneTerm = async (req, res) => {
 
       if (existingClass) {
         classesSkipped++;
+        advanceProgress(1, "classes", `Skipped existing class: ${sourceClass.name}`);
         continue;
       }
 
@@ -5473,15 +5663,10 @@ exports.cloneTerm = async (req, res) => {
           await User.updateOne({ _id: playerId }, updateData, { session });
         }
       }
+      advanceProgress(1, "classes", `Copied class: ${sourceClass.name}`);
     }
 
     // 2. Process Leagues & Teams
-    let leaguesToProcess = Array.isArray(leagues) ? leagues : [];
-    if (leaguesToProcess.length === 0 && (req.body.cloneAllLeagues === true || req.body.cloneLeagues === true)) {
-      const allSourceLeagues = await League.find({ term: sourceTermId }).session(session);
-      leaguesToProcess = allSourceLeagues.map((l) => ({ leagueId: l._id }));
-    }
-
     let leaguesSelected = leaguesToProcess.length;
     let leaguesCloned = 0;
     let leaguesSkipped = 0;
@@ -5491,9 +5676,12 @@ exports.cloneTerm = async (req, res) => {
 
     for (const item of leaguesToProcess) {
       const { leagueId, teams: teamItems, duplicateTeams } = item;
+      const plannedTeams = plannedTeamCount(item);
+      reportProgress("leagues", "Copying leagues and teams");
 
       if (!leagueId || !mongoose.Types.ObjectId.isValid(leagueId)) {
         leaguesSkipped++;
+        advanceProgress(1 + plannedTeams, "leagues", "Skipped an invalid league");
         continue;
       }
 
@@ -5506,6 +5694,7 @@ exports.cloneTerm = async (req, res) => {
 
       if (!sourceLeague || String(sourceLeague.term) !== String(sourceTermId)) {
         leaguesSkipped++;
+        advanceProgress(1 + plannedTeams, "leagues", "Skipped a league outside the source term");
         continue;
       }
 
@@ -5516,13 +5705,14 @@ exports.cloneTerm = async (req, res) => {
 
       if (existingLeague) {
         leaguesSkipped++;
+        advanceProgress(1 + plannedTeams, "leagues", `Skipped existing league: ${sourceLeague.name}`);
         continue;
       }
 
       const sourceTeams = (sourceLeague.teams || []).filter(Boolean);
       let teamsToInclude = [];
 
-      if (Array.isArray(teamItems) && teamItems.length > 0) {
+      if (Array.isArray(teamItems)) {
         for (const tItem of teamItems) {
           const tId = tItem.teamId || tItem._id || tItem;
           const matchTeam = sourceTeams.find((st) => String(st._id) === String(tId));
@@ -5550,6 +5740,7 @@ exports.cloneTerm = async (req, res) => {
 
       if (shouldDuplicateTeams && teamsToInclude.length > 0) {
         for (const { teamDoc, selectedPlayerIds } of teamsToInclude) {
+          reportProgress("teams", `Copying team: ${teamDoc.teamName}`);
           let playerListToUse = teamDoc.players || [];
           if (selectedPlayerIds) {
             playerListToUse = playerListToUse.filter((p) =>
@@ -5577,12 +5768,17 @@ exports.cloneTerm = async (req, res) => {
           oldToNewTeamMap[String(teamDoc._id)] = newTeam._id;
           teamsCloned++;
           leaguePlayersCopied += clonedPlayers.length;
+          advanceProgress(1, "teams", `Copied team: ${teamDoc.teamName}`);
         }
       } else {
         for (const { teamDoc } of teamsToInclude) {
           assignedTeamIds.push(teamDoc._id);
           teamsCloned++;
+          advanceProgress(1, "teams", `Added team: ${teamDoc.teamName}`);
         }
+      }
+      if (plannedTeams > teamsToInclude.length) {
+        advanceProgress(plannedTeams - teamsToInclude.length, "teams", "Skipped unavailable teams");
       }
 
       const newGroups = (sourceLeague.groups || []).map((g) => ({
@@ -5676,12 +5872,15 @@ exports.cloneTerm = async (req, res) => {
           }
         }
       }
+      advanceProgress(1, "leagues", `Copied league: ${sourceLeague.name}`);
     }
 
+    reportProgress("saving", "Saving the completed clone");
     await session.commitTransaction();
     session.endSession();
+    if (heartbeat) clearInterval(heartbeat);
 
-    return res.status(200).json({
+    const result = {
       success: true,
       message: "Term cloned successfully.",
       summary: {
@@ -5698,10 +5897,24 @@ exports.cloneTerm = async (req, res) => {
         leaguePlayersCopied,
         attendanceCopied: false,
       },
-    });
+    };
+    if (progressStarted) {
+      emitProgress("complete", { ...result, percent: 100, completed: totalWork, total: totalWork, remaining: 0, stage: "complete" });
+      return res.end();
+    }
+    return res.status(200).json(result);
   } catch (error) {
-    await session.abortTransaction();
+    if (heartbeat) clearInterval(heartbeat);
+    try {
+      if (session.inTransaction()) await session.abortTransaction();
+    } catch (abortError) {
+      console.error("Clone term rollback failed", abortError);
+    }
     session.endSession();
+    if (progressStarted) {
+      emitProgress("error", { success: false, message: error.message });
+      return res.end();
+    }
     return res.status(500).json({
       success: false,
       message: error.message,

@@ -5,8 +5,8 @@
   "main": "server.js",
   "scripts": {
     "test": "node scripts/run-tests.js",
-    "start": "node server.js",
-    "dev": "nodemon server.js",
+    "start": "node init && node server.js",
+    "dev": "node init && nodemon server.js",
     "server": "nodemon server.js",
     "test:unit": "node scripts/run-tests.js unit",
     "test:integration": "node scripts/run-tests.js integration",

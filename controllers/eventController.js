@@ -752,8 +752,9 @@ exports.registerForEvent = async (req, res) => {
 
         await player.save();
 
+        let registrationRequest = null;
         if (reqCategory && parentDocId) {
-          await RegistrationRequest.create({
+          registrationRequest = await RegistrationRequest.create({
             parent: parentDocId,
             player: player._id,
             category: reqCategory,
@@ -763,7 +764,10 @@ exports.registerForEvent = async (req, res) => {
             createdBy: req.user?._id || parentDocId,
           });
         }
-        await activateAssignedPlayers([player._id]);
+        await activateAssignedPlayers([player._id], {
+          registrationRequestIds: registrationRequest ? [registrationRequest._id] : [],
+          resolvePendingRequests: false,
+        });
       }
     };
 

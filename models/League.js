@@ -158,4 +158,5 @@ leagueSchema.set("toJSON", { transform: (_doc, result) => {
   if (result.sessionDates) result.sessionDates = result.sessionDates.map((date) => dateOnly(date));
   return result;
 } });
+leagueSchema.index({ term: 1, name: 1 });
 module.exports = mongoose.model("League", leagueSchema);

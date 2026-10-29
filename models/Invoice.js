@@ -18,6 +18,9 @@ const invoiceItemSchema = new mongoose.Schema({
 
 const invoiceSchema = new mongoose.Schema(
   {
+    // Internal sequence documents share the existing invoices collection so
+    // invoice generation does not need a new MongoDB namespace.
+    internalType: { type: String, default: "INVOICE" },
     chargeKey: { type: String },
     invoiceNumber: {
       type: String,
@@ -115,6 +118,12 @@ const invoiceSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// Keep the internal yearly sequence document invisible to normal invoice
+// reads and counts. Existing invoices have no internalType and remain visible.
+invoiceSchema.pre(["find", "findOne", "countDocuments"], function excludeInternalSequence() {
+  this.where({ internalType: { $ne: "INVOICE_COUNTER" } });
+});
 
 invoiceSchema.index({ chargeKey: 1 }, { unique: true, partialFilterExpression: { chargeKey: { $type: "string" }, status: "ACTIVE" } });
 module.exports = mongoose.model("Invoice", invoiceSchema);
