@@ -1,6 +1,5 @@
 const mongoose = require("mongoose");
 const Invoice = require("../models/Invoice");
-const Counter = require("../models/Counter");
 const Class = require("../models/Class");
 const User = require("../models/User");
 const Parent = require("../models/Parent");
@@ -11,20 +10,43 @@ const withSession = (query, session) => session ? query.session(session) : query
 
 async function generateInvoiceNumber({ session } = {}) {
   const year = Number(todayDateOnly().slice(0, 4));
-  const key = `invoice:${year}`;
-  if (!await withSession(Counter.findById(key), session)) {
-    // Numeric ordering matters when an old sequence grows beyond six digits.
+  const counterId = `__coachmax_invoice_counter_${year}__`;
+  const invoiceNumber = `__COACHMAX_INVOICE_COUNTER__:${year}`;
+  let initial = 0;
+
+  // Preserve the sequence from invoices that predate the in-collection
+  // counter. Reading a missing legacy counter collection does not create it.
+  const existingCounter = await Invoice.collection.findOne({ _id: counterId }, { session, projection: { sequence: 1 } });
+  if (!existingCounter) {
     const last = await withSession(Invoice.aggregate([
       { $match: { invoiceNumber: new RegExp(`^INV-${year}-[0-9]+$`) } },
       { $project: { sequence: { $convert: { input: { $arrayElemAt: [{ $split: ["$invoiceNumber", "-"] }, 2] }, to: "long", onError: 0, onNull: 0 } } } },
       { $group: { _id: null, sequence: { $max: "$sequence" } } },
     ]), session);
-    const initial = Number(last[0]?.sequence || 0);
-    if (!Number.isSafeInteger(initial) || initial < 0) throw Object.assign(new Error("Invoice sequence requires administrator reconciliation"), { status: 422 });
-    try { await Counter.updateOne({ _id: key }, { $max: { sequence: initial } }, { upsert: true, session }); }
-    catch (error) { if (session || error.code !== 11000) throw error; /* Another standalone allocator initialized this counter. */ }
+    // Keep transaction operations sequential; MongoDB sessions do not support
+    // running parallel commands in one transaction.
+    const legacyCounter = await Invoice.db.collection("counters").findOne({ _id: `invoice:${year}` }, { session, projection: { sequence: 1 } });
+    initial = Math.max(Number(last[0]?.sequence || 0), Number(legacyCounter?.sequence || 0));
   }
-  const counter = await Counter.findOneAndUpdate({ _id: key }, { $inc: { sequence: 1 } }, { upsert: true, returnDocument: "after", session });
+  if (!Number.isSafeInteger(initial) || initial < 0) throw Object.assign(new Error("Invoice sequence requires administrator reconciliation"), { status: 422 });
+
+  // Keep sequence state inside the existing invoices collection. The
+  // aggregation-pipeline update increments atomically across concurrent
+  // requests and avoids creating a new MongoDB collection at the namespace cap.
+  const result = await Invoice.collection.findOneAndUpdate(
+    { _id: counterId },
+    [{ $set: {
+      invoiceNumber: { $ifNull: ["$invoiceNumber", { $literal: invoiceNumber }] },
+      internalType: { $literal: "INVOICE_COUNTER" },
+      status: { $literal: "CANCELLED" },
+      sequence: { $add: [{ $max: [{ $ifNull: ["$sequence", 0] }, initial] }, 1] },
+    } }],
+    { upsert: true, returnDocument: "after", session },
+  );
+  const counter = result?.value || result;
+  if (!Number.isSafeInteger(Number(counter?.sequence)) || Number(counter.sequence) < 1) {
+    throw Object.assign(new Error("Invoice sequence could not be allocated"), { status: 500 });
+  }
   return `INV-${year}-${String(counter.sequence).padStart(6, "0")}`;
 }
 

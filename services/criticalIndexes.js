@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 
-const MODEL_NAMES = ["Team", "Fixture", "Standing", "PlayerStatistics", "Invoice", "Counter", "DeliveryJob", "Notification", "Order", "RegistrationRequest", "Attendance", "Parent", "Admin", "Cart", "CampSession", "EventRegistration", "MedicalProfile", "Category", "ProductCategory", "Wishlist"];
+const MODEL_NAMES = ["Team", "Fixture", "Standing", "PlayerStatistics", "Invoice", "Notification", "Order", "RegistrationRequest", "Attendance", "Parent", "Admin", "Cart", "CampSession", "EventRegistration", "MedicalProfile", "Category", "ProductCategory", "Wishlist"];
 const canonical = (value) => {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
@@ -13,8 +13,7 @@ function criticalIndexRequirements() {
   return MODEL_NAMES.flatMap((name) => {
     const Model = require(`../models/${name}`);
     const collection = Model.collection.collectionName;
-    const required = Model.schema.indexes().filter(([, options]) => options.unique || ["RegistrationRequest", "DeliveryJob"].includes(name)).map(([key, options]) => ({ model: name, collection, key, options: Object.fromEntries(Object.entries(options).filter(([option]) => ["name", "unique", "sparse", "partialFilterExpression", "collation"].includes(option))) }));
-    if (name === "Counter") required.push({ model: name, collection, key: { _id: 1 }, options: { name: "_id_", unique: true }, implicit: true });
+    const required = Model.schema.indexes().filter(([, options]) => options.unique || name === "RegistrationRequest").map(([key, options]) => ({ model: name, collection, key, options: Object.fromEntries(Object.entries(options).filter(([option]) => ["name", "unique", "sparse", "partialFilterExpression", "collation"].includes(option))) }));
     return required;
   });
 }

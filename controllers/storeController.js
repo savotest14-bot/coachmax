@@ -351,6 +351,101 @@ exports.getProductById = async (req, res) => {
   }
 };
 
+exports.getProductInsights = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: "Invalid product ID" });
+    }
+
+    const product = await Product.findById(id).populate("category", "name description");
+    if (!product) {
+      return res.status(404).json({ success: false, message: "Product not found" });
+    }
+
+    const productId = new mongoose.Types.ObjectId(id);
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 10));
+    const paid = { $and: [{ $ne: ["$status", "CANCELLED"] }, { $eq: ["$paymentStatus", "PAID"] }] };
+    const active = { $ne: ["$status", "CANCELLED"] };
+    const summaryRows = await Order.aggregate([
+      { $match: { "items.product": productId } },
+      { $unwind: "$items" },
+      { $match: { "items.product": productId } },
+      { $group: {
+        _id: "$_id",
+        parent: { $first: "$parent" },
+        status: { $first: "$status" },
+        paymentStatus: { $first: "$paymentStatus" },
+        quantity: { $sum: "$items.quantity" },
+        amountMinor: { $sum: { $multiply: [
+          "$items.quantity",
+          { $ifNull: ["$items.priceMinor", { $round: [{ $multiply: ["$items.price", 100] }, 0] }] },
+        ] } },
+      } },
+      { $group: {
+        _id: null,
+        orderCount: { $sum: 1 },
+        unitsOrdered: { $sum: { $cond: [active, "$quantity", 0] } },
+        unitsSold: { $sum: { $cond: [paid, "$quantity", 0] } },
+        paidRevenueMinor: { $sum: { $cond: [paid, "$amountMinor", 0] } },
+        pendingRevenueMinor: { $sum: { $cond: [{ $and: [active, { $eq: ["$paymentStatus", "PENDING"] }] }, "$amountMinor", 0] } },
+        cancelledOrders: { $sum: { $cond: [{ $eq: ["$status", "CANCELLED"] }, 1, 0] } },
+        refundedOrders: { $sum: { $cond: [{ $eq: ["$paymentStatus", "REFUNDED"] }, 1, 0] } },
+        paidBuyers: { $addToSet: { $cond: [paid, "$parent", null] } },
+      } },
+      { $project: {
+        _id: 0, orderCount: 1, unitsOrdered: 1, unitsSold: 1,
+        paidRevenueMinor: 1, pendingRevenueMinor: 1, cancelledOrders: 1, refundedOrders: 1,
+        buyerCount: { $size: { $setDifference: ["$paidBuyers", [null]] } },
+      } },
+    ]);
+    const summary = summaryRows[0] || {
+      orderCount: 0, unitsOrdered: 0, unitsSold: 0, paidRevenueMinor: 0,
+      pendingRevenueMinor: 0, cancelledOrders: 0, refundedOrders: 0, buyerCount: 0,
+    };
+
+    const orders = await Order.find({ "items.product": productId })
+      .select("parent items paymentStatus status invoice createdAt currency")
+      .populate("parent", "fullName email phone")
+      .populate("invoice", "invoiceNumber paymentStatus")
+      .sort({ createdAt: -1, _id: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
+    const orderRows = orders.map((order) => {
+      const lines = order.items.filter((item) => String(item.product) === id);
+      const quantity = lines.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+      const lineTotalMinor = lines.reduce((sum, item) => sum + Number(item.quantity || 0) *
+        (item.priceMinor == null ? Math.round(Number(item.price || 0) * 100) : Number(item.priceMinor)), 0);
+      return {
+        _id: order._id,
+        parent: order.parent,
+        quantity,
+        lineTotalMinor,
+        variants: lines.map((item) => ({ size: item.selectedSize, color: item.selectedColor, quantity: item.quantity })),
+        paymentStatus: order.paymentStatus,
+        orderStatus: order.status,
+        invoice: order.invoice,
+        createdAt: order.createdAt,
+        currency: order.currency || "AUD",
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        product,
+        summary,
+        orders: orderRows,
+        pagination: { page, limit, total: summary.orderCount, totalPages: Math.ceil(summary.orderCount / limit) },
+      },
+    });
+  } catch (error) {
+    return res.status(error.name === "CastError" ? 400 : 500).json({ success: false, message: error.message });
+  }
+};
+
 exports.updateProduct = async (req, res) => {
   try {
     const { id } = req.params;

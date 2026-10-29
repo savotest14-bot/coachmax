@@ -65,5 +65,6 @@ const orderSchema = new mongoose.Schema(
 );
 
 orderSchema.index({ parent: 1, checkoutKey: 1 }, { unique: true, partialFilterExpression: { checkoutKey: { $type: "string" } } });
+orderSchema.index({ "items.product": 1, createdAt: -1 });
 
 module.exports = mongoose.model("Order", orderSchema);
